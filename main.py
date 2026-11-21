@@ -247,6 +247,24 @@ Builder.load_string(KV_STYLES)
 # Android lifecycle helpers
 def start_service():
     if platform != "android":
+        # In desktop / Termux local test mode: auto-spawn service if not already running
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        is_free = False
+        try:
+            sock.bind((HOST, SVC_PORT))
+            sock.close()
+            is_free = True
+        except OSError:
+            pass
+        if is_free:
+            try:
+                import subprocess, sys
+                svc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "service", "main.py")
+                if os.path.exists(svc_path):
+                    subprocess.Popen([sys.executable, svc_path])
+            except Exception as e:
+                log_exception(f"Local start_service error: {e}")
         return
     try:
         from jnius import autoclass
@@ -748,7 +766,14 @@ class Root(BoxLayout):
             # OSC Setup
             self.client = OSCClient(HOST, SVC_PORT, encoding="utf8")
             self.server = OSCThreadServer(encoding="utf8")
-            self.server.listen(HOST, port=UI_PORT, default=True)
+            try:
+                self.server.listen(HOST, port=UI_PORT, default=True)
+            except OSError as e:
+                self.on_log(f"[WARN] UI_PORT {UI_PORT} already in use: {e}")
+                try:
+                    self.server.listen(HOST, port=UI_PORT + 10, default=True)
+                except Exception:
+                    pass
 
             ui = lambda fn: (lambda *a: Clock.schedule_once(lambda dt: fn(*a), 0))
             self.server.bind(b"/status", ui(self.on_status))
