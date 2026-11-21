@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+import core._shims
 from common import qr_cache_path
 from .plugins import PluginManager
 from .throttle import Job, OutboundQueue, PluginSupervisor
@@ -38,61 +39,67 @@ class WhatsAppCore:
 
     # ---- lifecycle
     async def start(self):
-        from neonize.aioze.client import NewAClient
-        from neonize.aioze.events import ConnectedEv, DisconnectedEv, MessageEv, PairStatusEv
-
-        self.client = c = NewAClient(self.db)
-
-        @c.event(ConnectedEv)
-        async def _connected(_, __):
-            self.emit("/status", "connected")
-            self.emit("/log", "WhatsApp client connected successfully.")
-
-        @c.event(DisconnectedEv)
-        async def _disconnected(_, __):
-            self.emit("/status", "disconnected")
-            self.emit("/log", "WhatsApp client disconnected.")
-
-        @c.event(PairStatusEv)
-        async def _paired(_, ev):
-            self.emit("/status", "paired")
-            self.emit("/log", "Device paired successfully with WhatsApp.")
-
-        @c.event(MessageEv)
-        async def _message(_, ev):
-            msg = self._to_msg(ev)
-            if msg and (self.process_own or not msg.from_me):
-                self.emit("/log", f"Message from {msg.sender_id}: {msg.text[:50]}")
-                self.plugins.dispatch(msg)
-
-        async def _qr(_, data: bytes):
-            try:
-                txt = data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
-            except Exception:
-                txt = str(data)
-            
-            # Save QR to PNG via segno if available
-            try:
-                import segno
-                cache_file = qr_cache_path()
-                qr_obj = segno.make(txt)
-                qr_obj.save(cache_file, scale=6)
-                self.emit("/qr", cache_file)
-            except Exception as e:
-                log.debug("segno qr save failed: %s", e)
-                self.emit("/qr", txt)
-
         try:
-            c.event.qr(_qr)
-        except AttributeError:
-            log.info("this neonize build has no qr event hook; use pairing code")
+            from neonize.aioze.client import NewAClient
+            from neonize.aioze.events import ConnectedEv, DisconnectedEv, MessageEv, PairStatusEv
 
-        self.queue.start()
-        self.supervisor.start_monitor()
-        rep = await self.plugins.reload()
-        self.emit("/plugins", ",".join(self.plugins.names()))
-        self.emit("/log", f"plugins: {rep}")
-        self._run_task = asyncio.create_task(self._run())
+            self.client = c = NewAClient(self.db)
+            self.emit("/log", "WhatsApp client engine initialized.")
+
+            @c.event(ConnectedEv)
+            async def _connected(_, __):
+                self.emit("/status", "connected")
+                self.emit("/log", "WhatsApp client connected successfully.")
+
+            @c.event(DisconnectedEv)
+            async def _disconnected(_, __):
+                self.emit("/status", "disconnected")
+                self.emit("/log", "WhatsApp client disconnected.")
+
+            @c.event(PairStatusEv)
+            async def _paired(_, ev):
+                self.emit("/status", "paired")
+                self.emit("/log", "Device paired successfully with WhatsApp.")
+
+            @c.event(MessageEv)
+            async def _message(_, ev):
+                msg = self._to_msg(ev)
+                if msg and (self.process_own or not msg.from_me):
+                    self.emit("/log", f"Message from {msg.sender_id}: {msg.text[:50]}")
+                    self.plugins.dispatch(msg)
+
+            async def _qr(_, data: bytes):
+                try:
+                    txt = data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
+                except Exception:
+                    txt = str(data)
+
+                # Save QR to PNG via segno if available
+                try:
+                    import segno
+                    cache_file = qr_cache_path()
+                    qr_obj = segno.make(txt)
+                    qr_obj.save(cache_file, scale=6)
+                    self.emit("/qr", cache_file)
+                except Exception as e:
+                    log.debug("segno qr save failed: %s", e)
+                    self.emit("/qr", txt)
+
+            try:
+                c.event.qr(_qr)
+            except AttributeError:
+                log.info("this neonize build has no qr event hook; use pairing code")
+
+            self.queue.start()
+            self.supervisor.start_monitor()
+            rep = await self.plugins.reload()
+            self.emit("/plugins", ",".join(self.plugins.names()))
+            self.emit("/log", f"plugins: {rep}")
+            self._run_task = asyncio.create_task(self._run())
+        except Exception as e:
+            log.exception("Engine start failed")
+            self.emit("/status", f"init_error")
+            self.emit("/log", f"Engine init error: {e!r}")
 
     async def _run(self):
         self.emit("/status", "connecting")
@@ -106,6 +113,9 @@ class WhatsAppCore:
     # ---- commands from UI
     async def pair(self, phone: str):
         try:
+            if not self.client:
+                self.emit("/log", "Client is initializing, please wait 2 seconds and retry.")
+                return
             if isinstance(phone, bytes):
                 phone = phone.decode()
             phone = str(phone).strip().lstrip("+")
@@ -119,6 +129,9 @@ class WhatsAppCore:
         if not recipient or not text:
             return False
         try:
+            if not self.client:
+                self.emit("/log", "Cannot send: WhatsApp client is not connected.")
+                return False
             if isinstance(recipient, bytes):
                 recipient = recipient.decode()
             if isinstance(text, bytes):

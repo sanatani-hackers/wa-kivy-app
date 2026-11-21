@@ -8,6 +8,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Load module shims before importing neonize
+import core._shims
+
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 
