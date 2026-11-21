@@ -10,14 +10,16 @@ Features:
 """
 import os
 import time
+import traceback
+
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
-from kivy.core.window import Window
 from kivy.factory import Factory
 from kivy.lang import Builder
 from kivy.properties import BooleanProperty
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
 from kivy.uix.image import Image
 from kivy.uix.label import Label
 from kivy.uix.modalview import ModalView
@@ -28,11 +30,30 @@ from kivy.utils import get_color_from_hex, platform
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 
-from common import HOST, PACKAGE, SERVICE, SVC_PORT, UI_PORT, plugin_dir, qr_cache_path
+from common import HOST, PACKAGE, SERVICE, SVC_PORT, UI_PORT, plugin_dir, private_dir, qr_cache_path
+
+
+def log_exception(exc_text):
+    try:
+        crash_path = os.path.join(private_dir(), "last_crash.log")
+        with open(crash_path, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {exc_text}\n")
+    except Exception:
+        pass
+
 
 # Modern Minimalistic Design Styles
 KV_STYLES = """
 #:import get_color_from_hex kivy.utils.get_color_from_hex
+
+<Root>:
+    orientation: 'vertical'
+    canvas.before:
+        Color:
+            rgba: get_color_from_hex('#0B0F19')
+        Rectangle:
+            pos: self.pos
+            size: self.size
 
 <Card@BoxLayout>:
     orientation: 'vertical'
@@ -86,7 +107,7 @@ KV_STYLES = """
             rgba: get_color_from_hex('#10B981')
         Line:
             rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
-            width: dp(1.5)
+            width: dp(1)
 
 <TerminalCard@BoxLayout>:
     orientation: 'vertical'
@@ -118,6 +139,7 @@ KV_STYLES = """
 <PrimaryButton@Button>:
     background_color: (0, 0, 0, 0)
     background_normal: ''
+    background_down: ''
     color: get_color_from_hex('#0B0F19')
     bold: True
     font_size: '14sp'
@@ -134,6 +156,7 @@ KV_STYLES = """
 <SecondaryButton@Button>:
     background_color: (0, 0, 0, 0)
     background_normal: ''
+    background_down: ''
     color: get_color_from_hex('#F3F4F6')
     font_size: '13sp'
     size_hint_y: None
@@ -154,6 +177,7 @@ KV_STYLES = """
 <DangerButton@Button>:
     background_color: (0, 0, 0, 0)
     background_normal: ''
+    background_down: ''
     color: get_color_from_hex('#FFFFFF')
     font_size: '13sp'
     size_hint_y: None
@@ -168,6 +192,8 @@ KV_STYLES = """
 
 <ModernInput@TextInput>:
     background_color: (0, 0, 0, 0)
+    background_normal: ''
+    background_active: ''
     cursor_color: get_color_from_hex('#10B981')
     foreground_color: get_color_from_hex('#F3F4F6')
     hint_text_color: get_color_from_hex('#64748B')
@@ -189,13 +215,13 @@ KV_STYLES = """
             rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
             width: dp(1)
 
-<TabButton@Button>:
+<TabButton>:
     background_color: (0, 0, 0, 0)
     background_normal: ''
+    background_down: ''
     font_size: '12sp'
     bold: True
     color: get_color_from_hex('#10B981') if self.active else get_color_from_hex('#94A3B8')
-    active: False
     canvas.before:
         Color:
             rgba: get_color_from_hex('#1A2433') if self.active else (0, 0, 0, 0)
@@ -206,9 +232,14 @@ KV_STYLES = """
         Color:
             rgba: get_color_from_hex('#10B981') if self.active else (0, 0, 0, 0)
         Line:
-            points: [self.x + dp(6), self.y + dp(2), self.right - dp(6), self.y + dp(2)]
-            width: dp(2) if self.active else dp(0.01)
+            points: [self.x + dp(6), self.y + dp(2), self.right - dp(6), self.y + dp(2)] if self.active else []
+            width: dp(2)
 """
+
+
+class TabButton(Button):
+    active = BooleanProperty(False)
+
 
 Builder.load_string(KV_STYLES)
 
@@ -222,7 +253,7 @@ def start_service():
         activity = autoclass("org.kivy.android.PythonActivity").mActivity
         autoclass(f"{PACKAGE}.Service{SERVICE}").start(activity, "")
     except Exception as e:
-        print(f"Failed to start service: {e}")
+        log_exception(f"start_service error: {e}")
 
 
 def ask_permissions():
@@ -231,8 +262,8 @@ def ask_permissions():
     try:
         from android.permissions import request_permissions
         request_permissions(["android.permission.POST_NOTIFICATIONS"])
-    except Exception:
-        pass
+    except Exception as e:
+        log_exception(f"ask_permissions error: {e}")
 
 
 def ask_ignore_battery_optimizations():
@@ -247,8 +278,8 @@ def ask_ignore_battery_optimizations():
         i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
         i.setData(Uri.parse("package:" + act.getPackageName()))
         act.startActivity(i)
-    except Exception:
-        pass
+    except Exception as e:
+        log_exception(f"battery optimizations error: {e}")
 
 
 # --------------------------------------------------------------------------- Dialogs
@@ -667,85 +698,78 @@ class ConsoleScreen(Screen):
 # --------------------------------------------------------------------------- Root Layout
 class Root(BoxLayout):
     def __init__(self, **kw):
-        super().__init__(orientation="vertical", **kw)
-        
-        # Background
-        self.canvas.before.add(
-            Builder.load_string("""
-canvas:
-    Color:
-        rgba: get_color_from_hex('#0B0F19')
-    Rectangle:
-        pos: self.pos
-        size: self.size
-""")
-        )
+        try:
+            super().__init__(**kw)
 
-        # Top Bar
-        top_bar = BoxLayout(size_hint_y=None, height=52, padding=[16, 6, 16, 6], spacing=10)
-        self.title_lbl = Label(text="WA CORE", font_size="18sp", bold=True,
-                               color=get_color_from_hex("#F3F4F6"), halign="left",
-                               size_hint_x=None, width=120)
-        self.title_lbl.bind(size=self.title_lbl.setter('text_size'))
+            # Top Bar
+            top_bar = BoxLayout(size_hint_y=None, height=52, padding=[16, 6, 16, 6], spacing=10)
+            self.title_lbl = Label(text="WA CORE", font_size="18sp", bold=True,
+                                   color=get_color_from_hex("#F3F4F6"), halign="left",
+                                   size_hint_x=None, width=120)
+            self.title_lbl.bind(size=self.title_lbl.setter('text_size'))
 
-        # Live Status Pill
-        self.status_pill = Factory.StatusPill()
-        self.lbl_pill = Label(text="● CONNECTING", font_size="11sp", bold=True,
-                              color=get_color_from_hex("#F59E0B"))
-        self.status_pill.add_widget(self.lbl_pill)
+            # Live Status Pill
+            self.status_pill = Factory.StatusPill()
+            self.lbl_pill = Label(text="● CONNECTING", font_size="11sp", bold=True,
+                                  color=get_color_from_hex("#F59E0B"))
+            self.status_pill.add_widget(self.lbl_pill)
 
-        top_bar.add_widget(self.title_lbl)
-        top_bar.add_widget(self.status_pill)
-        self.add_widget(top_bar)
+            top_bar.add_widget(self.title_lbl)
+            top_bar.add_widget(self.status_pill)
+            self.add_widget(top_bar)
 
-        # Tab Navigation Row
-        self.tab_bar = BoxLayout(size_hint_y=None, height=44, padding=[12, 2, 12, 4], spacing=6)
-        self.tabs = {}
-        for tab_id, tab_label in [("connect", "Connect"), ("plugins", "Plugins"),
-                                  ("send", "Quick Send"), ("console", "Console")]:
-            btn = Factory.TabButton(text=tab_label)
-            btn.bind(on_release=lambda _, t=tab_id: self.switch_tab(t))
-            self.tabs[tab_id] = btn
-            self.tab_bar.add_widget(btn)
-        self.add_widget(self.tab_bar)
+            # Tab Navigation Row
+            self.tab_bar = BoxLayout(size_hint_y=None, height=44, padding=[12, 2, 12, 4], spacing=6)
+            self.tabs = {}
+            for tab_id, tab_label in [("connect", "Connect"), ("plugins", "Plugins"),
+                                      ("send", "Quick Send"), ("console", "Console")]:
+                btn = TabButton(text=tab_label)
+                btn.bind(on_release=lambda _, t=tab_id: self.switch_tab(t))
+                self.tabs[tab_id] = btn
+                self.tab_bar.add_widget(btn)
+            self.add_widget(self.tab_bar)
 
-        # Screen Manager
-        self.sm = ScreenManager(transition=FadeTransition(duration=0.15))
-        self.screen_connect = ConnectScreen(self)
-        self.screen_plugins = PluginsScreen(self)
-        self.screen_send = QuickSendScreen(self)
-        self.screen_console = ConsoleScreen(self)
+            # Screen Manager
+            self.sm = ScreenManager(transition=FadeTransition(duration=0.15))
+            self.screen_connect = ConnectScreen(self)
+            self.screen_plugins = PluginsScreen(self)
+            self.screen_send = QuickSendScreen(self)
+            self.screen_console = ConsoleScreen(self)
 
-        self.sm.add_widget(self.screen_connect)
-        self.sm.add_widget(self.screen_plugins)
-        self.sm.add_widget(self.screen_send)
-        self.sm.add_widget(self.screen_console)
-        self.add_widget(self.sm)
+            self.sm.add_widget(self.screen_connect)
+            self.sm.add_widget(self.screen_plugins)
+            self.sm.add_widget(self.screen_send)
+            self.sm.add_widget(self.screen_console)
+            self.add_widget(self.sm)
 
-        # Default Active Tab
-        self.switch_tab("connect")
+            # Default Active Tab
+            self.switch_tab("connect")
 
-        # OSC Setup
-        self.client = OSCClient(HOST, SVC_PORT, encoding="utf8")
-        self.server = OSCThreadServer(encoding="utf8")
-        self.server.listen(HOST, port=UI_PORT, default=True)
+            # OSC Setup
+            self.client = OSCClient(HOST, SVC_PORT, encoding="utf8")
+            self.server = OSCThreadServer(encoding="utf8")
+            self.server.listen(HOST, port=UI_PORT, default=True)
 
-        ui = lambda fn: (lambda *a: Clock.schedule_once(lambda dt: fn(*a), 0))
-        self.server.bind(b"/status", ui(self.on_status))
-        self.server.bind(b"/pair_code", ui(self.on_pair_code))
-        self.server.bind(b"/plugins", ui(self.on_plugins))
-        self.server.bind(b"/log", ui(self.on_log))
-        self.server.bind(b"/qr", ui(self.on_qr))
+            ui = lambda fn: (lambda *a: Clock.schedule_once(lambda dt: fn(*a), 0))
+            self.server.bind(b"/status", ui(self.on_status))
+            self.server.bind(b"/pair_code", ui(self.on_pair_code))
+            self.server.bind(b"/plugins", ui(self.on_plugins))
+            self.server.bind(b"/log", ui(self.on_log))
+            self.server.bind(b"/qr", ui(self.on_qr))
 
-        Clock.schedule_once(lambda dt: self.send("/hello"), 1.2)
+            Clock.schedule_once(lambda dt: self.send("/hello"), 1.2)
+        except Exception as e:
+            log_exception(f"Root.__init__ failed: {traceback.format_exc()}")
+            raise
 
     def switch_tab(self, tab_id):
         self.sm.current = tab_id
         for tid, btn in self.tabs.items():
             btn.active = (tid == tab_id)
 
-    def on_status(self, s):
-        s_str = str(s).upper()
+    def on_status(self, *s):
+        s_val = s[0] if s else ""
+        s_str = str(s_val).upper()
         if "CONNECTED" in s_str:
             self.lbl_pill.text = "● CONNECTED"
             self.lbl_pill.color = get_color_from_hex("#10B981")
@@ -764,17 +788,21 @@ canvas:
             self.screen_connect.lbl_status.color = get_color_from_hex("#F59E0B")
         self.screen_connect.lbl_status.text = f"STATUS: {s_str}"
 
-    def on_pair_code(self, code):
-        self.screen_connect.set_code(str(code))
+    def on_pair_code(self, *code):
+        c = code[0] if code else ""
+        self.screen_connect.set_code(str(c))
 
-    def on_plugins(self, p):
-        self.screen_plugins.update_plugins(str(p))
+    def on_plugins(self, *p):
+        pl = p[0] if p else ""
+        self.screen_plugins.update_plugins(str(pl))
 
-    def on_log(self, text):
-        self.screen_console.append_log(str(text))
+    def on_log(self, *text):
+        txt = text[0] if text else ""
+        self.screen_console.append_log(str(txt))
 
-    def on_qr(self, data):
-        self.screen_connect.set_qr(str(data))
+    def on_qr(self, *data):
+        d = data[0] if data else ""
+        self.screen_connect.set_qr(str(d))
 
     def send(self, addr, *vals):
         try:
@@ -796,8 +824,14 @@ canvas:
 
 class WaApp(App):
     def build(self):
-        ask_permissions()
-        start_service()
+        try:
+            ask_permissions()
+        except Exception as e:
+            log_exception(f"ask_permissions failed: {e}")
+        try:
+            start_service()
+        except Exception as e:
+            log_exception(f"start_service failed: {e}")
         return Root()
 
     def on_pause(self):
