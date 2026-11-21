@@ -1,5 +1,5 @@
 """Module-level shims for Android compatibility.
-Provides safe fallbacks for desktop-only / unbundled libraries (magic, PIL, httpx, linkpreview)
+Provides safe fallbacks for desktop-only / unbundled libraries (magic, PIL, httpx, linkpreview, tqdm)
 so neonize can run in pure Python on Android without C-extension dependency issues.
 """
 import sys
@@ -7,6 +7,29 @@ import types
 
 
 def setup_shims():
+    # 0. tqdm shim
+    if "tqdm" not in sys.modules:
+        tq = types.ModuleType("tqdm")
+
+        class TqdmMock:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def update(self, *a):
+                pass
+
+            def close(self):
+                pass
+
+        tq.tqdm = TqdmMock
+        sys.modules["tqdm"] = tq
+
     # 1. magic shim (Android has no libmagic.so)
     if "magic" not in sys.modules:
         m = types.ModuleType("magic")

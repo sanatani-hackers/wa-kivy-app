@@ -1,3 +1,8 @@
+try:
+    import core._shims
+except Exception:
+    pass
+
 from .client import NewClient
 from .events import Event
 from .utils.ffmpeg import FFmpeg

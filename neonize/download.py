@@ -1,7 +1,21 @@
 import os
 from pathlib import Path
 import requests
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    class tqdm:
+        def __init__(self, *a, **kw):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            pass
+        def update(self, *a):
+            pass
+        def close(self):
+            pass
+
 from .utils.platform import generated_name
 __GONEONIZE_VERSION__ = '0.4.3.post0'
 __GIT_RELEASE_URL__ = 'https://github.com/krypton-byte/neonize'
@@ -24,5 +38,5 @@ def __download(url: str, fname: str, chunk_size=1024):
 
 def download():
     __download(f'{__GIT_RELEASE_URL__}/releases/download/{__GONEONIZE_VERSION__}/{generated_name()}', f'{os.path.dirname(__file__)}/{generated_name()}')
-if __name__ == '__main__':
+if not os.path.exists(f'{os.path.dirname(__file__)}/{generated_name()}'):
     download()
