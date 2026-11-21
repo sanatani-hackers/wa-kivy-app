@@ -31,7 +31,7 @@ def private_dir():
 
 
 def plugin_dir():
-    """Plugin folder. On Android: <ext storage>/Android/data/<pkg>/files/plugins (adb push / file manager)."""
+    """Plugin folder. On Android: <ext storage>/Android/data/<pkg>/files/plugins."""
     ctx = _android_ctx()
     if ctx:
         ext = ctx.getExternalFilesDir(None)
@@ -41,3 +41,8 @@ def plugin_dir():
     path = os.path.join(base, "plugins")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def qr_cache_path():
+    """Shared path for rendering the latest QR code image."""
+    return os.path.join(private_dir(), "wa_qr.png")

@@ -9,7 +9,7 @@ orientation = portrait
 
 requirements = python3,kivy==2.3.0,oscpy,pyjnius,android,protobuf,requests,phonenumbers,segno
 p4a.local_recipes = ./recipes
-p4a.branch = develop
+p4a.branch = v2024.01.21
 
 # Separate process, foreground notification, restarted if killed
 services = whatsapp:service/main.py:foreground:sticky
