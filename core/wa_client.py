@@ -41,15 +41,26 @@ class WhatsAppCore:
     async def start(self):
         try:
             from neonize.aioze.client import NewAClient
-            from neonize.aioze.events import ConnectedEv, DisconnectedEv, MessageEv, PairStatusEv
+            from neonize.aioze.events import (
+                ConnectedEv, ConnectFailureEv, DisconnectedEv, MessageEv,
+                PairStatusEv, StreamErrorEv
+            )
 
             self.client = c = NewAClient(self.db)
-            self.emit("/log", "WhatsApp client engine initialized.")
+            self.emit("/log", "WhatsApp engine initialized. Connecting to servers...")
 
             @c.event(ConnectedEv)
             async def _connected(_, __):
                 self.emit("/status", "connected")
                 self.emit("/log", "WhatsApp client connected successfully.")
+
+            @c.event(ConnectFailureEv)
+            async def _conn_fail(_, ev):
+                self.emit("/log", f"WhatsApp connection failure: {ev}")
+
+            @c.event(StreamErrorEv)
+            async def _stream_err(_, ev):
+                self.emit("/log", f"WhatsApp stream error: {ev}")
 
             @c.event(DisconnectedEv)
             async def _disconnected(_, __):
@@ -98,7 +109,7 @@ class WhatsAppCore:
             self._run_task = asyncio.create_task(self._run())
         except Exception as e:
             log.exception("Engine start failed")
-            self.emit("/status", f"init_error")
+            self.emit("/status", "init_error")
             self.emit("/log", f"Engine init error: {e!r}")
 
     async def _run(self):
@@ -114,14 +125,34 @@ class WhatsAppCore:
     async def pair(self, phone: str):
         try:
             if not self.client:
-                self.emit("/log", "Client is initializing, please wait 2 seconds and retry.")
+                self.emit("/log", "Engine is initializing, please wait 3 seconds...")
                 return
             if isinstance(phone, bytes):
                 phone = phone.decode()
             phone = str(phone).strip().lstrip("+")
+            if not phone:
+                self.emit("/log", "Please enter a valid phone number with country code.")
+                return
+
+            # Auto-wait for WebSocket connection if still handshaking
+            if not getattr(self.client, "is_connected", False):
+                self.emit("/log", "Connecting to WhatsApp servers, please wait...")
+                for i in range(15):
+                    await asyncio.sleep(1)
+                    if getattr(self.client, "is_connected", False):
+                        self.emit("/log", "WebSocket connection established!")
+                        break
+                    if (i + 1) % 3 == 0:
+                        self.emit("/log", f"Handshaking with WhatsApp... ({i+1}s)")
+
+            if not getattr(self.client, "is_connected", False):
+                self.emit("/log", "WhatsApp server not connected yet. Please wait 5s and tap again.")
+                return
+
+            self.emit("/log", f"Requesting pairing code for +{phone}...")
             code = await self.client.PairPhone(phone, show_push_notification=True)
             self.emit("/pair_code", str(code))
-            self.emit("/log", f"Pairing code generated: {code}")
+            self.emit("/log", f"Pairing code received: {code}")
         except Exception as e:
             self.emit("/log", f"Pairing failed: {e!r}")
 
