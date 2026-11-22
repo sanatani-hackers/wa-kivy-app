@@ -18,7 +18,12 @@ from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
 from kivy.core.text import DEFAULT_FONT, LabelBase
+from kivy.core.window import Window
 from kivy.factory import Factory
+
+# Ensure window dynamically shifts up when software keyboard appears
+Window.softinput_mode = "below_target"
+Window.keyboard_anim_args = {'d': 0.2, 't': 'in_out_quart'}
 from kivy.lang import Builder
 from kivy.properties import BooleanProperty
 from kivy.uix.boxlayout import BoxLayout
@@ -61,6 +66,7 @@ from common import (
     SVC_PORT,
     UI_PORT,
     activity_log_path,
+    backup_folder,
     export_activity_log,
     export_session_zip,
     get_ram_usage_mb,
@@ -70,6 +76,27 @@ from common import (
     qr_cache_path,
     stop_android_service,
 )
+
+
+def ask_all_files_permission():
+    """Request All Files Access on Android 11+ (API 30+) for unrestricted /sdcard access."""
+    ctx = _android_ctx()
+    if not ctx:
+        return
+    try:
+        from jnius import autoclass
+        Build = autoclass("android.os.Build$VERSION")
+        if Build.SDK_INT >= 30:
+            Environment = autoclass("android.os.Environment")
+            if not Environment.isExternalStorageManager():
+                Intent = autoclass("android.content.Intent")
+                Settings = autoclass("android.provider.Settings")
+                Uri = autoclass("android.net.Uri")
+                uri = Uri.parse(f"package:{ctx.getPackageName()}")
+                intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri)
+                ctx.startActivity(intent)
+    except Exception as e:
+        print(f"ask_all_files_permission failed: {e}")
 
 # Register DejaVuSans for crisp symbol support
 _font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
@@ -905,46 +932,54 @@ class ConsoleScreen(Screen):
 
         layout = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
 
-        # Header - Pagination & Export Toolbar
+        # Header - Pagination & Export Toolbar (2-row responsive layout)
         header = Factory.Card()
-        row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+        header_box = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None)
+        header_box.bind(minimum_height=header_box.setter("height"))
 
+        # Row 1: Title & Pagination Controls
+        row_top = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(6))
         title = Label(
-            text="Console", font_size="15sp", bold=True,
-            color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle",
-            size_hint_x=None, width=dp(65)
+            text="Console Logs", font_size="15sp", bold=True,
+            color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle"
         )
         title.bind(size=title.setter('text_size'))
 
-        btn_prev = Factory.SecondaryButton(text=ICON_PREV, size_hint=(None, None), size=(dp(36), dp(34)))
+        btn_prev = Factory.SecondaryButton(text=ICON_PREV, size_hint=(None, None), size=(dp(36), dp(32)))
         btn_prev.bind(on_release=self.prev_page)
 
         self.lbl_page = Label(text="1/1", font_size="11sp", bold=True,
-                              color=get_color_from_hex("#94A3B8"), size_hint_x=None, width=dp(42))
+                              color=get_color_from_hex("#94A3B8"), size_hint_x=None, width=dp(44), halign="center")
 
-        btn_next = Factory.SecondaryButton(text=ICON_NEXT, size_hint=(None, None), size=(dp(36), dp(34)))
+        btn_next = Factory.SecondaryButton(text=ICON_NEXT, size_hint=(None, None), size=(dp(36), dp(32)))
         btn_next.bind(on_release=self.next_page)
 
-        self.btn_scroll = Factory.SecondaryButton(text="Auto: ON", size_hint=(None, None), size=(dp(72), dp(34)))
-        self.btn_scroll.font_size = "10sp"
+        row_top.add_widget(title)
+        row_top.add_widget(btn_prev)
+        row_top.add_widget(self.lbl_page)
+        row_top.add_widget(btn_next)
+
+        # Row 2: Action Buttons (Equal width distribution, perfectly fits within screen)
+        row_actions = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
+        self.btn_scroll = Factory.SecondaryButton(text="Auto: ON", size_hint=(0.34, 1))
+        self.btn_scroll.font_size = "11sp"
         self.btn_scroll.bind(on_release=self.toggle_scroll)
 
-        btn_export = Factory.SecondaryButton(text="Export", size_hint=(None, None), size=(dp(54), dp(34)))
-        btn_export.font_size = "10sp"
+        btn_export = Factory.SecondaryButton(text=f"{ICON_DOWNLOAD} Export", size_hint=(0.33, 1))
+        btn_export.font_size = "11sp"
         btn_export.bind(on_release=self.export_logs)
 
-        btn_clear = Factory.SecondaryButton(text="Clear", size_hint=(None, None), size=(dp(46), dp(34)))
-        btn_clear.font_size = "10sp"
+        btn_clear = Factory.SecondaryButton(text="Clear", size_hint=(0.33, 1))
+        btn_clear.font_size = "11sp"
         btn_clear.bind(on_release=self.clear_logs)
 
-        row.add_widget(title)
-        row.add_widget(btn_prev)
-        row.add_widget(self.lbl_page)
-        row.add_widget(btn_next)
-        row.add_widget(self.btn_scroll)
-        row.add_widget(btn_export)
-        row.add_widget(btn_clear)
-        header.add_widget(row)
+        row_actions.add_widget(self.btn_scroll)
+        row_actions.add_widget(btn_export)
+        row_actions.add_widget(btn_clear)
+
+        header_box.add_widget(row_top)
+        header_box.add_widget(row_actions)
+        header.add_widget(header_box)
         layout.add_widget(header)
 
         # Monospace Terminal Card
@@ -1089,18 +1124,22 @@ class SettingsScreen(Screen):
         btn_export = Factory.SecondaryButton(text=f"{ICON_DOWNLOAD} Export Session (.zip)")
         btn_export.bind(on_release=self.export_session)
 
-        lbl_import_hint = Label(text="Restore session from backup path:", font_size="11sp",
+        btn_perm = Factory.SecondaryButton(text=f"{ICON_BOLT} Grant All Files Access (for /sdcard)")
+        btn_perm.bind(on_release=lambda *_: ask_all_files_permission())
+
+        lbl_import_hint = Label(text="Restore session from backup path or filename:", font_size="11sp",
                                 color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(22), halign="left")
         lbl_import_hint.bind(size=lbl_import_hint.setter('text_size'))
 
         self.input_import = Factory.ModernInput()
-        self.input_import.hint_text = "/sdcard/Download/WA_Session_...zip"
+        self.input_import.hint_text = "WA_Session_...zip or full path"
 
         btn_import = Factory.SecondaryButton(text=f"{ICON_UPLOAD} Restore & Connect")
         btn_import.bind(on_release=self.import_session)
 
         card_session.add_widget(lbl_s_title)
         card_session.add_widget(btn_export)
+        card_session.add_widget(btn_perm)
         card_session.add_widget(lbl_import_hint)
         card_session.add_widget(self.input_import)
         card_session.add_widget(btn_import)
