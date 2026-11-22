@@ -44,24 +44,62 @@ class PluginManager:
     async def reload(self) -> dict:
         """Rescan the folder: load new files, reload changed ones, unload deleted ones."""
         os.makedirs(self.folder, exist_ok=True)
-        # Seed bundled plugins if not present
         bundle_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plugins")
+
+        # 1. Seed bundled plugins (.py or .pyc) if not already in self.folder
         if os.path.isdir(bundle_dir):
             import shutil
             for f in os.listdir(bundle_dir):
-                if f.endswith(".py") and not f.startswith("_"):
-                    dst = os.path.join(self.folder, f)
-                    if not os.path.exists(dst):
+                if f.startswith("_"):
+                    continue
+                if f.endswith((".py", ".pyc")):
+                    base = f[:-4] if f.endswith(".pyc") else f[:-3]
+                    dst_py = os.path.join(self.folder, f"{base}.py")
+                    dst_pyc = os.path.join(self.folder, f"{base}.pyc")
+                    if not os.path.exists(dst_py) and not os.path.exists(dst_pyc):
                         try:
-                            shutil.copy2(os.path.join(bundle_dir, f), dst)
-                        except Exception:
-                            pass
-        files = {f[:-3]: os.path.join(self.folder, f)
-                 for f in sorted(os.listdir(self.folder)) if f.endswith(".py") and not f.startswith("_")}
+                            shutil.copy2(os.path.join(bundle_dir, f), os.path.join(self.folder, f))
+                        except Exception as e:
+                            log.debug("could not seed plugin %s: %s", f, e)
+
+        # 2. Collect candidate files (prefer .py over .pyc)
+        files: dict[str, str] = {}
+        # Scan user folder
+        if os.path.isdir(self.folder):
+            for f in sorted(os.listdir(self.folder)):
+                if f.startswith("_"):
+                    continue
+                if f.endswith(".py"):
+                    files[f[:-3]] = os.path.join(self.folder, f)
+                elif f.endswith(".pyc"):
+                    name = f[:-4]
+                    if name not in files:
+                        files[name] = os.path.join(self.folder, f)
+
+        # Fallback to bundle_dir for any missing built-in plugins
+        if os.path.isdir(bundle_dir):
+            for f in sorted(os.listdir(bundle_dir)):
+                if f.startswith("_"):
+                    continue
+                if f.endswith(".py"):
+                    name = f[:-3]
+                    if name not in files:
+                        files[name] = os.path.join(bundle_dir, f)
+                elif f.endswith(".pyc"):
+                    name = f[:-4]
+                    if name not in files:
+                        files[name] = os.path.join(bundle_dir, f)
+
         report = {"loaded": [], "failed": {}, "removed": []}
         for name in list(self.loaded):
             gone = name not in files
-            if gone or os.path.getmtime(files[name]) != self.loaded[name]["mtime"]:
+            cur_path = files.get(name)
+            prev_entry = self.loaded[name]
+            path_changed = cur_path != prev_entry.get("path")
+            mtime_changed = False
+            if cur_path and os.path.exists(cur_path):
+                mtime_changed = os.path.getmtime(cur_path) != prev_entry.get("mtime")
+            if gone or path_changed or mtime_changed:
                 await self._unload(name)
                 if gone:
                     report["removed"].append(name)
@@ -72,7 +110,7 @@ class PluginManager:
                 await self._load(name, path)
                 report["loaded"].append(name)
             except Exception as e:
-                log.exception("failed to load plugin %s", name)
+                log.exception("failed to load plugin %s from %s", name, path)
                 report["failed"][name] = repr(e)
         return report
 
@@ -82,7 +120,7 @@ class PluginManager:
         spec.loader.exec_module(mod)                       # top-level code runs here: keep it light
         ctx = PluginContext(name, self.core)
         self.core.supervisor.reset(name)
-        self.loaded[name] = {"mod": mod, "ctx": ctx, "mtime": os.path.getmtime(path)}
+        self.loaded[name] = {"mod": mod, "ctx": ctx, "mtime": os.path.getmtime(path), "path": path}
         sys.modules[spec.name] = mod
         if hasattr(mod, "setup"):
             await self.core.supervisor.run(name, mod.setup, ctx)

@@ -34,7 +34,8 @@ class WhatsAppCore:
         self._ws_ready = None   # asyncio.Event: set when WS connected
         self.queue = OutboundQueue(self._send_job, typing=self._typing)
         self.supervisor = PluginSupervisor(
-            on_quarantine=lambda n, why: self.emit("/log", f"plugin {n} quarantined: {why}"))
+            on_quarantine=lambda n, why: self.emit("/log", f"plugin {n} quarantined: {why}"),
+            on_error=lambda n, err: self.emit("/log", f"plugin {n} error: {err}"))
         self.plugins = PluginManager(plugin_dir, self)
         self._run_task = None
 
@@ -78,9 +79,16 @@ class WhatsAppCore:
             @c.event(MessageEv)
             async def _message(_, ev):
                 msg = self._to_msg(ev)
-                if msg and (self.process_own or not msg.from_me):
-                    self.emit("/log", f"Message from {msg.sender_id}: {msg.text[:50]}")
-                    self.plugins.dispatch(msg)
+                if not msg:
+                    return
+                # Allow incoming from others, or self-commands starting with ! or greetings
+                if msg.from_me and not self.process_own:
+                    txt = msg.text.strip().lower()
+                    first = txt.split()[0] if txt else ""
+                    if not (first.startswith("!") or first in {"hi", "hello", "hey", "hlo", "namaste", "salam"}):
+                        return
+                self.emit("/log", f"Message from {msg.sender_id}: {msg.text[:50]}")
+                self.plugins.dispatch(msg)
 
             async def _qr(_, data: bytes):
                 try:
@@ -284,8 +292,16 @@ class WhatsAppCore:
             pass
 
     async def _send_job(self, job: Job):
-        if job.quoted is not None:
-            await self.client.reply_message(job.text, job.quoted)
-        else:
-            await self.client.send_message(job.chat, job.text)
-        self.emit("/log", f"✓ Outbound message dispatched to {job.chat_key}")
+        try:
+            if job.quoted is not None:
+                try:
+                    await self.client.reply_message(job.text, job.quoted)
+                except Exception as quote_err:
+                    log.warning("reply_message failed (%s), falling back to send_message", quote_err)
+                    await self.client.send_message(job.chat, job.text)
+            else:
+                await self.client.send_message(job.chat, job.text)
+            self.emit("/log", f"✓ Outbound message dispatched to {job.chat_key}")
+        except Exception as e:
+            log.exception("Outbound send failed for %s", job.chat_key)
+            self.emit("/log", f"✗ Outbound send failed to {job.chat_key}: {e}")

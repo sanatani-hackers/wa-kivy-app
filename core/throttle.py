@@ -23,8 +23,8 @@ class Job:
 class OutboundQueue:
     """Single choke point for ALL outgoing messages. Plugins can never bypass it."""
 
-    def __init__(self, send, typing=None, *, min_delay=1.0, max_delay=3.0, per_char=0.05,
-                 max_typing=5.0, per_chat_gap=2.5, max_per_min=15,
+    def __init__(self, send, typing=None, *, min_delay=0.3, max_delay=1.0, per_char=0.015,
+                 max_typing=2.0, per_chat_gap=1.5, max_per_min=30,
                  max_queued=100, max_queued_per_plugin=20):
         self._send, self._typing = send, typing
         self.min_delay, self.max_delay = min_delay, max_delay
@@ -99,12 +99,14 @@ class PluginSupervisor:
 
     def __init__(self, *, handler_timeout=20.0, max_calls_per_min=30, max_failures=5,
                  quarantine_secs=300.0, min_periodic=30.0, max_periodic_per_plugin=3,
-                 lag_interval=5.0, lag_warn=1.0, on_quarantine: Optional[Callable] = None):
+                 lag_interval=5.0, lag_warn=1.0, on_quarantine: Optional[Callable] = None,
+                 on_error: Optional[Callable] = None):
         self.handler_timeout, self.max_calls_per_min = handler_timeout, max_calls_per_min
         self.max_failures, self.quarantine_secs = max_failures, quarantine_secs
         self.min_periodic, self.max_periodic = min_periodic, max_periodic_per_plugin
         self.lag_interval, self.lag_warn = lag_interval, lag_warn
         self.on_quarantine = on_quarantine
+        self.on_error = on_error
         self.stats: dict[str, PluginStats] = defaultdict(PluginStats)
         self._monitor: Optional[asyncio.Task] = None
 
@@ -132,8 +134,13 @@ class PluginSupervisor:
             self._fail(name, "timeout")
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as e:
             log.exception("plugin %s raised", name)
+            if self.on_error:
+                try:
+                    self.on_error(name, repr(e))
+                except Exception:
+                    pass
             self._fail(name, "exception")
         finally:
             st.runs += 1

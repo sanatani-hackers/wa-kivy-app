@@ -51,16 +51,18 @@ def main():
     async def _delete_plugin(name):
         if isinstance(name, bytes):
             name = name.decode()
-        name = str(name).strip()
-        if not name.endswith(".py"):
-            name += ".py"
-        path = os.path.join(plugin_dir(), name)
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-                emit("/log", f"Deleted plugin {name}")
-            except Exception as e:
-                emit("/log", f"Failed to delete {name}: {e}")
+        base = str(name).strip().removesuffix(".py").removesuffix(".pyc")
+        deleted = False
+        for ext in (".py", ".pyc"):
+            p = os.path.join(plugin_dir(), f"{base}{ext}")
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                    deleted = True
+                except Exception as e:
+                    emit("/log", f"Failed to delete {base}{ext}: {e}")
+        if deleted:
+            emit("/log", f"Deleted plugin {base}")
         await core.reload_plugins()
 
     server.bind(b"/hello", lambda *a: run(_snapshot()))

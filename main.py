@@ -583,7 +583,7 @@ class PluginsScreen(Screen):
         if not names:
             empty_card = Factory.Card()
             empty_card.add_widget(Label(text="No plugins loaded. Tap '+ Add' to create one.",
-                                        color=get_color_from_hex("#64748B"), size_hint_y=None, height=40))
+                                        color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(40)))
             self.list_box.add_widget(empty_card)
             return
 
@@ -591,12 +591,13 @@ class PluginsScreen(Screen):
             p_card = Factory.Card()
             row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
             
-            lbl_name = Label(text=f"🧩  {name}.py", font_size="14sp", bold=True,
-                             color=get_color_from_hex("#F3F4F6"), halign="left")
+            lbl_name = Label(text=f"🧩  {name}", font_size="14sp", bold=True,
+                             color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle")
             lbl_name.bind(size=lbl_name.setter('text_size'))
 
             badge = Label(text="ACTIVE", font_size="10sp", bold=True,
-                          color=get_color_from_hex("#10B981"), size_hint_x=None, width=54)
+                          color=get_color_from_hex("#10B981"), size_hint_x=None, width=dp(54), valign="middle")
+            badge.bind(size=badge.setter('text_size'))
 
             btn_del = Factory.DangerButton(text="Del", size_hint=(None, None), size=(dp(58), dp(34)))
             btn_del.font_size = "11sp"
