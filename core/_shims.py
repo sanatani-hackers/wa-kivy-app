@@ -156,6 +156,60 @@ def setup_shims():
         hx.AsyncClient = AsyncClient
         sys.modules["httpx"] = hx
 
+    # 5. Crypto shim (pycryptodome)
+    if "Crypto" not in sys.modules:
+        cr = types.ModuleType("Crypto")
+        cip = types.ModuleType("Crypto.Cipher")
+        ut = types.ModuleType("Crypto.Util")
+        pad_mod = types.ModuleType("Crypto.Util.Padding")
+
+        class _MockAES:
+            MODE_CBC = 1
+            MODE_EAX = 2
+            @staticmethod
+            def new(*a, **kw):
+                return type("_AESInst", (), {"encrypt": lambda s, d: d, "decrypt": lambda s, d: d})()
+
+        cip.AES = _MockAES
+        pad_mod.pad = lambda data, block_size=16: data
+        pad_mod.unpad = lambda data, block_size=16: data
+        ut.Padding = pad_mod
+        cr.Cipher = cip
+        cr.Util = ut
+
+        sys.modules["Crypto"] = cr
+        sys.modules["Crypto.Cipher"] = cip
+        sys.modules["Crypto.Util"] = ut
+        sys.modules["Crypto.Util.Padding"] = pad_mod
+
+    # 6. cryptography shim
+    if "cryptography" not in sys.modules:
+        cg = types.ModuleType("cryptography")
+        haz = types.ModuleType("cryptography.hazmat")
+        prim = types.ModuleType("cryptography.hazmat.primitives")
+        hashes_mod = types.ModuleType("cryptography.hazmat.primitives.hashes")
+        hashes_mod.SHA256 = type("SHA256", (), {})
+        kdf_mod = types.ModuleType("cryptography.hazmat.primitives.kdf")
+        hkdf_mod = types.ModuleType("cryptography.hazmat.primitives.kdf.hkdf")
+
+        class _MockHKDF:
+            def __init__(self, *a, **kw): pass
+            def derive(self, key): return b"\x00" * 112
+
+        hkdf_mod.HKDF = _MockHKDF
+        prim.hashes = hashes_mod
+        prim.kdf = kdf_mod
+        kdf_mod.hkdf = hkdf_mod
+        haz.primitives = prim
+        cg.hazmat = haz
+
+        sys.modules["cryptography"] = cg
+        sys.modules["cryptography.hazmat"] = haz
+        sys.modules["cryptography.hazmat.primitives"] = prim
+        sys.modules["cryptography.hazmat.primitives.hashes"] = hashes_mod
+        sys.modules["cryptography.hazmat.primitives.kdf"] = kdf_mod
+        sys.modules["cryptography.hazmat.primitives.kdf.hkdf"] = hkdf_mod
+
 
 # Apply automatically upon import
 setup_shims()

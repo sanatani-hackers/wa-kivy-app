@@ -262,7 +262,7 @@ def start_service():
                 import subprocess, sys
                 svc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "service", "main.py")
                 if os.path.exists(svc_path):
-                    subprocess.Popen([sys.executable, svc_path])
+                    subprocess.Popen([sys.executable, svc_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             except Exception as e:
                 log_exception(f"Local start_service error: {e}")
         return

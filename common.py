@@ -4,8 +4,8 @@ import os
 PACKAGE = "org.sanatani.waapp"      # package.domain + "." + package.name in buildozer.spec
 SERVICE = "Whatsapp"                # services = whatsapp:...  ->  class <PACKAGE>.ServiceWhatsapp
 HOST = "127.0.0.1"
-UI_PORT = 38201                     # UI process listens here
-SVC_PORT = 38202                    # service process listens here
+UI_PORT = int(os.environ.get("WA_UI_PORT", 38201))                     # UI process listens here
+SVC_PORT = int(os.environ.get("WA_SVC_PORT", 38202))                    # service process listens here
 
 
 def _android_ctx():
