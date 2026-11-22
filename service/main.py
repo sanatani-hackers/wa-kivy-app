@@ -46,7 +46,7 @@ def main():
     run = lambda coro: asyncio.run_coroutine_threadsafe(coro, loop)
 
     async def _snapshot():
-        core.snapshot()
+        await core.snapshot()
 
     async def _delete_plugin(name):
         if isinstance(name, bytes):

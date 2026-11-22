@@ -222,9 +222,19 @@ class WhatsAppCore:
         self.emit("/plugins", ",".join(self.plugins.names()))
         self.emit("/log", f"Plugins reloaded: {rep}")
 
-    def snapshot(self):
+    async def snapshot(self):
         self.emit("/plugins", ",".join(self.plugins.names()))
         self.emit("/stats", str(self.supervisor.report()))
+        if self.client:
+            try:
+                logged = await self.client.is_logged_in
+                conn = await self.client.is_connected
+                if logged and conn:
+                    self.emit("/status", "connected")
+                elif conn:
+                    self.emit("/status", "ready_to_pair")
+            except Exception:
+                pass
 
     # ---- helpers
     def jid_for(self, number: str):
@@ -261,3 +271,4 @@ class WhatsAppCore:
             await self.client.reply_message(job.text, job.quoted)
         else:
             await self.client.send_message(job.chat, job.text)
+        self.emit("/log", f"✓ Outbound message dispatched to {job.chat_key}")

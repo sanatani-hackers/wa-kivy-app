@@ -476,7 +476,7 @@ class ConnectScreen(Screen):
                                 font_size="11sp", color=get_color_from_hex("#94A3B8"),
                                 size_hint_y=None, height=20, halign="left")
         self.lbl_qr_sub.bind(size=self.lbl_qr_sub.setter('text_size'))
-        self.qr_image = Image(size_hint_y=None, height=200, allow_stretch=True)
+        self.qr_image = Image(size_hint_y=None, height=200, fit_mode="contain")
         self.card_qr.add_widget(lbl_qr_title)
         self.card_qr.add_widget(self.lbl_qr_sub)
         self.card_qr.add_widget(self.qr_image)
@@ -511,6 +511,16 @@ class ConnectScreen(Screen):
             Clipboard.put(c)
             self.btn_copy.text = "Copied!"
             Clock.schedule_once(lambda dt: setattr(self.btn_copy, "text", "Copy"), 2)
+
+    def on_status_change(self, s_str):
+        if "CONNECTED" in s_str:
+            self.lbl_pair_sub.text = "✓ Device linked & active. To link another account, use Clear Session."
+            self.lbl_code.text = "LINKED"
+            self.lbl_qr_sub.text = "✓ Connected to WhatsApp servers"
+        elif "DISCONNECTED" in s_str:
+            self.lbl_pair_sub.text = "Enter full phone with country code (e.g. 919876543210):"
+            self.lbl_code.text = "------"
+            self.lbl_qr_sub.text = "QR code will appear here when ready for link."
 
     def set_qr(self, path_or_str):
         if os.path.exists(path_or_str):
@@ -653,9 +663,14 @@ class QuickSendScreen(Screen):
         target = self.input_target.text.strip()
         msg = self.input_msg.text.strip()
         if target and msg:
+            self.lbl_feedback.color = get_color_from_hex("#10B981")
             self.root.send("/send", target, msg)
-            self.lbl_feedback.text = "✓ Dispatched to outbound queue."
+            self.lbl_feedback.text = f"✓ Dispatched to queue for {target}"
             self.input_msg.text = ""
+            Clock.schedule_once(lambda dt: setattr(self.lbl_feedback, "text", ""), 4)
+        else:
+            self.lbl_feedback.color = get_color_from_hex("#EF4444")
+            self.lbl_feedback.text = "⚠️ Please enter both target number and message."
             Clock.schedule_once(lambda dt: setattr(self.lbl_feedback, "text", ""), 3)
 
 
@@ -812,6 +827,7 @@ class Root(BoxLayout):
             self.lbl_pill.color = get_color_from_hex("#F59E0B")
             self.screen_connect.lbl_status.color = get_color_from_hex("#F59E0B")
         self.screen_connect.lbl_status.text = f"STATUS: {s_str}"
+        self.screen_connect.on_status_change(s_str)
 
     def on_pair_code(self, *code):
         c = code[0] if code else ""

@@ -6,6 +6,7 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,json,so
 version = 0.1.0
 orientation = portrait
+android.softinput_mode = resize
 
 requirements = python3,kivy==2.3.0,oscpy,pyjnius,android,protobuf,requests,phonenumbers,segno,tqdm,filetype
 p4a.local_recipes = ./recipes
