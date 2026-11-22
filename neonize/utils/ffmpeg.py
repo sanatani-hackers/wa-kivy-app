@@ -47,10 +47,8 @@ def check_ffmpeg_available() -> bool:
             missing.append("ffmpeg")
         if not ffprobe_found:
             missing.append("ffprobe")
-        log.warning(
-            "neonize: %s not found on PATH -- media operations "
-            "(stickers, voice notes, video, thumbnails) will fail.  "
-            "Install FFmpeg: https://ffmpeg.org/download.html",
+        log.debug(
+            "neonize: %s not found on PATH (media operations disabled).",
             " and ".join(missing),
         )
         return False

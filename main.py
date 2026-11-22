@@ -438,10 +438,10 @@ class ConnectScreen(Screen):
                                color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=26, halign="left")
         lbl_pair_title.bind(size=lbl_pair_title.setter('text_size'))
         
-        lbl_pair_sub = Label(text="Enter full phone with country code (e.g. 919876543210):",
-                             font_size="11sp", color=get_color_from_hex("#94A3B8"),
-                             size_hint_y=None, height=20, halign="left")
-        lbl_pair_sub.bind(size=lbl_pair_sub.setter('text_size'))
+        self.lbl_pair_sub = Label(text="Enter full phone with country code (e.g. 919876543210):",
+                                  font_size="11sp", color=get_color_from_hex("#94A3B8"),
+                                  size_hint_y=None, height=20, halign="left")
+        self.lbl_pair_sub.bind(size=self.lbl_pair_sub.setter('text_size'))
 
         self.input_phone = Factory.ModernInput()
         self.input_phone.hint_text = "Country code + phone (e.g. 9198xxxxxxxx)"
@@ -462,7 +462,7 @@ class ConnectScreen(Screen):
         self.code_box.add_widget(self.btn_copy)
 
         card_pair.add_widget(lbl_pair_title)
-        card_pair.add_widget(lbl_pair_sub)
+        card_pair.add_widget(self.lbl_pair_sub)
         card_pair.add_widget(self.input_phone)
         card_pair.add_widget(btn_get_code)
         card_pair.add_widget(self.code_box)
