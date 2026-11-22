@@ -138,11 +138,11 @@ def update_service_notification(title: str, text: str, is_running: bool = True, 
         PendingIntent = autoclass("android.app.PendingIntent")
 
         nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE)
-        # Use IMPORTANCE_DEFAULT on a fresh channel so action buttons are always visible in notification drawer
-        channel_id = "org.sanatani.waapp.service_channel_v3"
+        # Use IMPORTANCE_DEFAULT on a dedicated channel so action buttons are always visible in Android 13-16
+        channel_id = "org.sanatani.waapp.service_channel_v4"
         try:
             NotificationChannel = autoclass("android.app.NotificationChannel")
-            channel = NotificationChannel(channel_id, "WA Core Automation Service", NotificationManager.IMPORTANCE_DEFAULT)
+            channel = NotificationChannel(channel_id, "WA Core Service", NotificationManager.IMPORTANCE_DEFAULT)
             channel.setShowBadge(False)
             channel.enableVibration(False)
             channel.setSound(None, None)
@@ -151,9 +151,11 @@ def update_service_notification(title: str, text: str, is_running: bool = True, 
         except Exception:
             builder = NotificationBuilder(ctx)
 
-        builder.setContentTitle(str(title))
-        builder.setContentText(str(text))
+        StringClass = autoclass("java.lang.String")
+        builder.setContentTitle(StringClass(str(title)))
+        builder.setContentText(StringClass(str(text)))
         builder.setOngoing(True)
+        builder.setOnlyAlertOnce(True)
         try:
             builder.setSmallIcon(ctx.getApplicationInfo().icon)
         except Exception:
@@ -177,20 +179,39 @@ def update_service_notification(title: str, text: str, is_running: bool = True, 
             action_intent = Intent(action_name)
             action_intent.setPackage(ctx.getPackageName())
             p_action = PendingIntent.getBroadcast(ctx, 101, action_intent, 0x04000000 | 0x08000000)
-            app_icon = ctx.getApplicationInfo().icon
-
-            StringClass = autoclass("java.lang.String")
+            app_icon_res = ctx.getApplicationInfo().icon
             j_label = StringClass(btn_label)
 
-            # Try Notification.Action.Builder first (guarantees visibility on modern Android)
+            action_added = False
+            # Method 1: Android 6+ through Android 16 using android.graphics.drawable.Icon
             try:
+                Icon = autoclass("android.graphics.drawable.Icon")
                 NotificationActionBuilder = autoclass("android.app.Notification$Action$Builder")
-                action = NotificationActionBuilder(app_icon, j_label, p_action).build()
+                icon_obj = Icon.createWithResource(ctx, app_icon_res)
+                action = NotificationActionBuilder(icon_obj, j_label, p_action).build()
                 builder.addAction(action)
-            except Exception:
-                builder.addAction(app_icon, j_label, p_action)
+                action_added = True
+            except Exception as e_m1:
+                print(f"Action method 1 failed: {e_m1}")
+
+            # Method 2: Fallback Action.Builder(int, CharSequence, PendingIntent)
+            if not action_added:
+                try:
+                    NotificationActionBuilder = autoclass("android.app.Notification$Action$Builder")
+                    action = NotificationActionBuilder(app_icon_res, j_label, p_action).build()
+                    builder.addAction(action)
+                    action_added = True
+                except Exception as e_m2:
+                    print(f"Action method 2 failed: {e_m2}")
+
+            # Method 3: Direct builder.addAction(int, CharSequence, PendingIntent)
+            if not action_added:
+                try:
+                    builder.addAction(app_icon_res, j_label, p_action)
+                except Exception as e_m3:
+                    print(f"Action method 3 failed: {e_m3}")
         except Exception as e:
-            print(f"addAction failed: {e}")
+            print(f"addAction setup failed: {e}")
 
         # BigTextStyle multiline stats
         if stats_text:

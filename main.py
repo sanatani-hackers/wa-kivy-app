@@ -79,12 +79,13 @@ from common import (
 
 
 def ask_all_files_permission():
-    """Request All Files Access on Android 11+ (API 30+) for unrestricted /sdcard access."""
-    ctx = _android_ctx()
-    if not ctx:
-        return
+    """Request All Files Access on Android 11+ (API 30+) safely with multiple fallback intents."""
     try:
         from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+        if not activity:
+            return
         Build = autoclass("android.os.Build$VERSION")
         if Build.SDK_INT >= 30:
             Environment = autoclass("android.os.Environment")
@@ -92,11 +93,36 @@ def ask_all_files_permission():
                 Intent = autoclass("android.content.Intent")
                 Settings = autoclass("android.provider.Settings")
                 Uri = autoclass("android.net.Uri")
-                uri = Uri.parse(f"package:{ctx.getPackageName()}")
-                intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri)
-                ctx.startActivity(intent)
+
+                # Strategy 1: General All Files Access settings page (universal across Android 11-16)
+                try:
+                    intent1 = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    intent1.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    activity.startActivity(intent1)
+                    return
+                except Exception:
+                    pass
+
+                # Strategy 2: App-specific All Files settings page
+                try:
+                    intent2 = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                    intent2.setData(Uri.parse(f"package:{activity.getPackageName()}"))
+                    intent2.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    activity.startActivity(intent2)
+                    return
+                except Exception:
+                    pass
+
+                # Strategy 3: Standard Application Details Settings page
+                try:
+                    intent3 = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    intent3.setData(Uri.parse(f"package:{activity.getPackageName()}"))
+                    intent3.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    activity.startActivity(intent3)
+                except Exception:
+                    pass
     except Exception as e:
-        print(f"ask_all_files_permission failed: {e}")
+        print(f"ask_all_files_permission error: {e}")
 
 # Register DejaVuSans for crisp symbol support
 _font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
@@ -932,13 +958,13 @@ class ConsoleScreen(Screen):
 
         layout = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
 
-        # Header - Pagination & Export Toolbar (2-row responsive layout)
+        # Header - Pagination & Export Toolbar (2-row responsive card)
         header = Factory.Card()
-        header_box = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None)
-        header_box.bind(minimum_height=header_box.setter("height"))
+        header.padding = [dp(12), dp(8), dp(12), dp(8)]
+        header.spacing = dp(6)
 
         # Row 1: Title & Pagination Controls
-        row_top = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(6))
+        row_top = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
         title = Label(
             text="Console Logs", font_size="15sp", bold=True,
             color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle"
@@ -961,15 +987,15 @@ class ConsoleScreen(Screen):
 
         # Row 2: Action Buttons (Equal width distribution, perfectly fits within screen)
         row_actions = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
-        self.btn_scroll = Factory.SecondaryButton(text="Auto: ON", size_hint=(0.34, 1))
+        self.btn_scroll = Factory.SecondaryButton(text="Auto: ON", size_hint=(0.34, None), height=dp(32))
         self.btn_scroll.font_size = "11sp"
         self.btn_scroll.bind(on_release=self.toggle_scroll)
 
-        btn_export = Factory.SecondaryButton(text=f"{ICON_DOWNLOAD} Export", size_hint=(0.33, 1))
+        btn_export = Factory.SecondaryButton(text=f"{ICON_DOWNLOAD} Export", size_hint=(0.33, None), height=dp(32))
         btn_export.font_size = "11sp"
         btn_export.bind(on_release=self.export_logs)
 
-        btn_clear = Factory.SecondaryButton(text="Clear", size_hint=(0.33, 1))
+        btn_clear = Factory.SecondaryButton(text="Clear", size_hint=(0.33, None), height=dp(32))
         btn_clear.font_size = "11sp"
         btn_clear.bind(on_release=self.clear_logs)
 
@@ -977,9 +1003,8 @@ class ConsoleScreen(Screen):
         row_actions.add_widget(btn_export)
         row_actions.add_widget(btn_clear)
 
-        header_box.add_widget(row_top)
-        header_box.add_widget(row_actions)
-        header.add_widget(header_box)
+        header.add_widget(row_top)
+        header.add_widget(row_actions)
         layout.add_widget(header)
 
         # Monospace Terminal Card
@@ -1124,10 +1149,11 @@ class SettingsScreen(Screen):
         btn_export = Factory.SecondaryButton(text=f"{ICON_DOWNLOAD} Export Session (.zip)")
         btn_export.bind(on_release=self.export_session)
 
-        btn_perm = Factory.SecondaryButton(text=f"{ICON_BOLT} Grant All Files Access (for /sdcard)")
-        btn_perm.bind(on_release=lambda *_: ask_all_files_permission())
+        # Direct file selection button (opens native Android file chooser)
+        btn_pick = Factory.PrimaryButton(text=f"{ICON_DOWNLOAD} Select Backup File (.zip / .sqlite3)")
+        btn_pick.bind(on_release=self.pick_backup_file)
 
-        lbl_import_hint = Label(text="Restore session from backup path or filename:", font_size="11sp",
+        lbl_import_hint = Label(text="Or restore manually by file path / name:", font_size="11sp",
                                 color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(22), halign="left")
         lbl_import_hint.bind(size=lbl_import_hint.setter('text_size'))
 
@@ -1137,12 +1163,16 @@ class SettingsScreen(Screen):
         btn_import = Factory.SecondaryButton(text=f"{ICON_UPLOAD} Restore & Connect")
         btn_import.bind(on_release=self.import_session)
 
+        btn_perm = Factory.SecondaryButton(text=f"{ICON_BOLT} Grant All Files Access (System Settings)")
+        btn_perm.bind(on_release=lambda *_: ask_all_files_permission())
+
         card_session.add_widget(lbl_s_title)
         card_session.add_widget(btn_export)
-        card_session.add_widget(btn_perm)
+        card_session.add_widget(btn_pick)
         card_session.add_widget(lbl_import_hint)
         card_session.add_widget(self.input_import)
         card_session.add_widget(btn_import)
+        card_session.add_widget(btn_perm)
 
         # Card 4: Danger Zone (Logout)
         card_danger = Factory.Card()
@@ -1199,6 +1229,143 @@ class SettingsScreen(Screen):
         InfoDialog(title, msg).open()
         if ok:
             self.root.send("/start_bot")
+
+    def pick_backup_file(self, *_):
+        """Open native Android file chooser to directly select a backup file without permission errors."""
+        if platform != "android":
+            self.open_kivy_file_chooser()
+            return
+
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+            if not activity:
+                self.open_kivy_file_chooser()
+                return
+
+            Intent = autoclass("android.content.Intent")
+            intent = Intent(Intent.ACTION_GET_CONTENT)
+            intent.setType("*/*")
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+
+            REQUEST_CODE_PICK_FILE = 8801
+
+            try:
+                from android.activity import bind as android_bind, unbind as android_unbind
+
+                def _on_activity_result(request_code, result_code, data_intent):
+                    if request_code == REQUEST_CODE_PICK_FILE:
+                        try:
+                            android_unbind(on_activity_result=_on_activity_result)
+                        except Exception:
+                            pass
+                        # RESULT_OK is -1
+                        if result_code == -1 and data_intent is not None:
+                            try:
+                                uri = data_intent.getData()
+                                if uri:
+                                    local_path = self.copy_content_uri_to_private(activity, uri)
+                                    Clock.schedule_once(lambda dt: self.apply_restored_file(local_path), 0)
+                                    return
+                            except Exception as e:
+                                self.root.on_log(f"Failed to read selected file: {e}")
+                                Clock.schedule_once(lambda dt: InfoDialog("Restore Error", f"Failed to read file:\n{e}").open(), 0)
+                                return
+                        self.root.on_log("File selection cancelled.")
+
+                android_bind(on_activity_result=_on_activity_result)
+                activity.startActivityForResult(intent, REQUEST_CODE_PICK_FILE)
+            except Exception as e:
+                self.root.on_log(f"Native picker error: {e}, using in-app chooser")
+                self.open_kivy_file_chooser()
+        except Exception as e:
+            self.root.on_log(f"File picker error: {e}")
+            self.open_kivy_file_chooser()
+
+    def copy_content_uri_to_private(self, activity, uri) -> str:
+        """Stream bytes from content:// URI into private storage."""
+        from jnius import autoclass
+        cr = activity.getContentResolver()
+        input_stream = cr.openInputStream(uri)
+
+        filename = "selected_session.zip"
+        try:
+            OpenableColumns = autoclass("android.provider.OpenableColumns")
+            cursor = cr.query(uri, None, None, None, None)
+            if cursor and cursor.moveToFirst():
+                name_idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if name_idx >= 0:
+                    filename = cursor.getString(name_idx)
+                cursor.close()
+        except Exception:
+            pass
+
+        dest = os.path.join(private_dir(), filename)
+        FileOutputStream = autoclass("java.io.FileOutputStream")
+        ByteArray = autoclass("java.lang.reflect.Array")
+        ByteType = autoclass("java.lang.Byte").TYPE
+        buffer = ByteArray.newInstance(ByteType, 16384)
+
+        out_stream = FileOutputStream(dest)
+        try:
+            while True:
+                n = input_stream.read(buffer)
+                if n == -1:
+                    break
+                out_stream.write(buffer, 0, n)
+            out_stream.flush()
+        finally:
+            try:
+                input_stream.close()
+            except Exception:
+                pass
+            try:
+                out_stream.close()
+            except Exception:
+                pass
+
+        return dest
+
+    def apply_restored_file(self, local_path):
+        """Perform restore with chosen local file."""
+        self.input_import.text = local_path
+        ok, res = import_session_zip(local_path)
+        title = "Session Restored" if ok else "Restore Failed"
+        msg = res if ok else f"Error: {res}"
+        InfoDialog(title, msg).open()
+        if ok:
+            self.root.on_log(f"Session restored from {local_path}. Reconnecting...")
+            self.root.send("/start_bot")
+
+    def open_kivy_file_chooser(self):
+        """In-app file chooser dialog fallback."""
+        from kivy.uix.filechooser import FileChooserListView
+        from kivy.uix.popup import Popup
+
+        content = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        fc = FileChooserListView(path="/sdcard/Download" if os.path.isdir("/sdcard/Download") else "/sdcard",
+                                 filters=["*.zip", "*.sqlite3"])
+        btn_box = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        popup = Popup(title="Select Backup (.zip or .sqlite3)", size_hint=(0.95, 0.9), auto_dismiss=True)
+
+        def _select(*_):
+            if fc.selection:
+                sel = fc.selection[0]
+                popup.dismiss()
+                self.apply_restored_file(sel)
+
+        btn_ok = Factory.PrimaryButton(text="Select")
+        btn_ok.bind(on_release=_select)
+        btn_cancel = Factory.SecondaryButton(text="Cancel")
+        btn_cancel.bind(on_release=popup.dismiss)
+
+        btn_box.add_widget(btn_cancel)
+        btn_box.add_widget(btn_ok)
+        content.add_widget(fc)
+        content.add_widget(btn_box)
+        popup.content = content
+        popup.open()
 
     def on_logout(self, *_):
         self.root.send("/clear_session")
