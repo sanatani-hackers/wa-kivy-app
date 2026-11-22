@@ -30,34 +30,45 @@ def setup_shims():
         tq.tqdm = TqdmMock
         sys.modules["tqdm"] = tq
 
-    # 1. magic shim (Android has no libmagic.so)
+    # 1. magic implementation (using real filetype library)
     if "magic" not in sys.modules:
         m = types.ModuleType("magic")
+
+        try:
+            import filetype
+        except Exception:
+            filetype = None
 
         class Magic:
             @staticmethod
             def from_buffer(buf, mime=True):
+                if filetype is not None:
+                    try:
+                        kind = filetype.guess(buf)
+                        if kind and kind.mime:
+                            return kind.mime
+                    except Exception:
+                        pass
                 if isinstance(buf, (bytes, bytearray)):
-                    if buf.startswith(b"\xff\xd8\xff"):
-                        return "image/jpeg"
-                    if buf.startswith(b"\x89PNG\r\n\x1a\n"):
-                        return "image/png"
-                    if buf.startswith(b"GIF8"):
-                        return "image/gif"
-                    if buf.startswith(b"RIFF") and len(buf) >= 12 and buf[8:12] == b"WEBP":
-                        return "image/webp"
-                    if buf.startswith(b"OggS"):
-                        return "audio/ogg"
-                    if buf.startswith(b"%PDF"):
-                        return "application/pdf"
-                    if buf.startswith(b"ID3") or buf.startswith(b"\xff\xfb") or buf.startswith(b"\xff\xf3"):
-                        return "audio/mpeg"
-                    if len(buf) >= 8 and buf[4:8] in (b"ftyp", b"moov"):
-                        return "video/mp4"
+                    if buf.startswith(b"\xff\xd8\xff"): return "image/jpeg"
+                    if buf.startswith(b"\x89PNG\r\n\x1a\n"): return "image/png"
+                    if buf.startswith(b"GIF8"): return "image/gif"
+                    if buf.startswith(b"RIFF") and len(buf) >= 12 and buf[8:12] == b"WEBP": return "image/webp"
+                    if buf.startswith(b"OggS"): return "audio/ogg"
+                    if buf.startswith(b"%PDF"): return "application/pdf"
+                    if buf.startswith(b"ID3") or buf.startswith(b"\xff\xfb") or buf.startswith(b"\xff\xf3"): return "audio/mpeg"
+                    if len(buf) >= 8 and buf[4:8] in (b"ftyp", b"moov"): return "video/mp4"
                 return "application/octet-stream"
 
             @staticmethod
             def from_file(path, mime=True):
+                if filetype is not None:
+                    try:
+                        kind = filetype.guess(path)
+                        if kind and kind.mime:
+                            return kind.mime
+                    except Exception:
+                        pass
                 return "application/octet-stream"
 
         m.from_buffer = Magic.from_buffer
@@ -171,8 +182,19 @@ def setup_shims():
                 return type("_AESInst", (), {"encrypt": lambda s, d: d, "decrypt": lambda s, d: d})()
 
         cip.AES = _MockAES
-        pad_mod.pad = lambda data, block_size=16: data
-        pad_mod.unpad = lambda data, block_size=16: data
+        def _pad(data, block_size=16):
+            pad_len = block_size - (len(data) % block_size)
+            return data + bytes([pad_len] * pad_len)
+
+        def _unpad(data, block_size=16):
+            if not data: return data
+            pad_len = data[-1]
+            if 1 <= pad_len <= block_size and data[-pad_len:] == bytes([pad_len] * pad_len):
+                return data[:-pad_len]
+            return data
+
+        pad_mod.pad = _pad
+        pad_mod.unpad = _unpad
         ut.Padding = pad_mod
         cr.Cipher = cip
         cr.Util = ut
@@ -192,11 +214,23 @@ def setup_shims():
         kdf_mod = types.ModuleType("cryptography.hazmat.primitives.kdf")
         hkdf_mod = types.ModuleType("cryptography.hazmat.primitives.kdf.hkdf")
 
-        class _MockHKDF:
-            def __init__(self, *a, **kw): pass
-            def derive(self, key): return b"\x00" * 112
+        import hashlib, hmac, math
+        class _RealHKDF:
+            def __init__(self, algorithm=None, length=112, salt=None, info=b""):
+                self.length = length
+                self.salt = salt if salt else bytes([0] * 32)
+                self.info = info if info else b""
 
-        hkdf_mod.HKDF = _MockHKDF
+            def derive(self, key):
+                prk = hmac.new(self.salt, key, hashlib.sha256).digest()
+                okm = b""
+                t = b""
+                for i in range(1, math.ceil(self.length / 32) + 1):
+                    t = hmac.new(prk, t + self.info + bytes([i]), hashlib.sha256).digest()
+                    okm += t
+                return okm[:self.length]
+
+        hkdf_mod.HKDF = _RealHKDF
         prim.hashes = hashes_mod
         prim.kdf = kdf_mod
         kdf_mod.hkdf = hkdf_mod

@@ -12,6 +12,7 @@ import os
 import time
 import traceback
 
+from kivy.metrics import dp, sp
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
@@ -407,17 +408,16 @@ class ConnectScreen(Screen):
         self.root = app_root
 
         scroll = ScrollView(size_hint=(1, 1))
-        content = BoxLayout(orientation="vertical", padding=14, spacing=12, size_hint_y=None)
+        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(14), size_hint_y=None)
         content.bind(minimum_height=content.setter("height"))
 
         # Card 1: Connection Status & Battery
         card_status = Factory.Card()
-        row_status = BoxLayout(size_hint_y=None, height=36, spacing=8)
+        row_status = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
         self.lbl_status = Label(text="STATUS: STARTING", font_size="13sp", bold=True,
-                                color=get_color_from_hex("#10B981"), halign="left")
+                                color=get_color_from_hex("#10B981"), halign="left", valign="middle")
         self.lbl_status.bind(size=self.lbl_status.setter('text_size'))
-        btn_battery = Factory.SecondaryButton(text="⚡ Battery Exemption", size_hint_x=None, width=150)
-        btn_battery.height = 36
+        btn_battery = Factory.SecondaryButton(text="⚡ Battery Exemption", size_hint=(None, None), size=(dp(165), dp(38)))
         btn_battery.font_size = "11sp"
         btn_battery.bind(on_release=lambda *_: ask_ignore_battery_optimizations())
         row_status.add_widget(self.lbl_status)
@@ -426,7 +426,7 @@ class ConnectScreen(Screen):
         desc = Label(
             text="Service runs in foreground (persistent 24/7 notification).",
             font_size="11sp", color=get_color_from_hex("#64748B"),
-            size_hint_y=None, height=20, halign="left"
+            size_hint_y=None, height=dp(24), halign="left", valign="middle"
         )
         desc.bind(size=desc.setter('text_size'))
         card_status.add_widget(row_status)
@@ -435,12 +435,12 @@ class ConnectScreen(Screen):
         # Card 2: Pairing with Phone Code
         card_pair = Factory.Card()
         lbl_pair_title = Label(text="Pair with Phone Number", font_size="15sp", bold=True,
-                               color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=26, halign="left")
+                               color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(28), halign="left", valign="middle")
         lbl_pair_title.bind(size=lbl_pair_title.setter('text_size'))
         
         self.lbl_pair_sub = Label(text="Enter full phone with country code (e.g. 919876543210):",
                                   font_size="11sp", color=get_color_from_hex("#94A3B8"),
-                                  size_hint_y=None, height=20, halign="left")
+                                  size_hint_y=None, height=dp(32), halign="left", valign="middle")
         self.lbl_pair_sub.bind(size=self.lbl_pair_sub.setter('text_size'))
 
         self.input_phone = Factory.ModernInput()
@@ -454,8 +454,7 @@ class ConnectScreen(Screen):
         self.code_box = Factory.CodeBox()
         self.lbl_code = Label(text="------", font_size="22sp", bold=True,
                               color=get_color_from_hex("#10B981"))
-        self.btn_copy = Factory.SecondaryButton(text="Copy", size_hint_x=None, width=80)
-        self.btn_copy.height = 38
+        self.btn_copy = Factory.SecondaryButton(text="Copy", size_hint=(None, None), size=(dp(80), dp(38)))
         self.btn_copy.font_size = "12sp"
         self.btn_copy.bind(on_release=self.copy_code)
         self.code_box.add_widget(self.lbl_code)
@@ -470,13 +469,13 @@ class ConnectScreen(Screen):
         # Card 3: QR Code Section (Optional scan)
         self.card_qr = Factory.Card()
         lbl_qr_title = Label(text="Or Scan QR Code", font_size="15sp", bold=True,
-                             color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=24, halign="left")
+                             color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left", valign="middle")
         lbl_qr_title.bind(size=lbl_qr_title.setter('text_size'))
         self.lbl_qr_sub = Label(text="QR code will appear here when ready for link.",
                                 font_size="11sp", color=get_color_from_hex("#94A3B8"),
-                                size_hint_y=None, height=20, halign="left")
+                                size_hint_y=None, height=dp(32), halign="left", valign="middle")
         self.lbl_qr_sub.bind(size=self.lbl_qr_sub.setter('text_size'))
-        self.qr_image = Image(size_hint_y=None, height=200, fit_mode="contain")
+        self.qr_image = Image(size_hint_y=None, height=dp(220), fit_mode="contain")
         self.card_qr.add_widget(lbl_qr_title)
         self.card_qr.add_widget(self.lbl_qr_sub)
         self.card_qr.add_widget(self.qr_image)
@@ -538,21 +537,19 @@ class PluginsScreen(Screen):
         super().__init__(name="plugins", **kw)
         self.root = app_root
 
-        layout = BoxLayout(orientation="vertical", padding=14, spacing=10)
+        layout = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
 
         # Header with actions
         header_card = Factory.Card()
-        row = BoxLayout(size_hint_y=None, height=42, spacing=8)
+        row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
         self.lbl_title = Label(text="Automations & Plugins", font_size="16sp", bold=True,
                                color=get_color_from_hex("#F3F4F6"), halign="left")
         self.lbl_title.bind(size=self.lbl_title.setter('text_size'))
 
-        btn_add = Factory.PrimaryButton(text="+ Add", size_hint_x=None, width=80)
-        btn_add.height = 38
+        btn_add = Factory.PrimaryButton(text="+ Add", size_hint=(None, None), size=(dp(75), dp(38)))
         btn_add.bind(on_release=lambda *_: self.open_editor())
 
-        btn_reload = Factory.SecondaryButton(text="🔄 Reload", size_hint_x=None, width=90)
-        btn_reload.height = 38
+        btn_reload = Factory.SecondaryButton(text="🔄 Reload", size_hint=(None, None), size=(dp(90), dp(38)))
         btn_reload.bind(on_release=lambda *_: self.root.send("/reload"))
 
         row.add_widget(self.lbl_title)
@@ -563,7 +560,7 @@ class PluginsScreen(Screen):
 
         # Plugins list scroll
         scroll = ScrollView(size_hint=(1, 1))
-        self.list_box = BoxLayout(orientation="vertical", spacing=8, size_hint_y=None)
+        self.list_box = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None)
         self.list_box.bind(minimum_height=self.list_box.setter("height"))
         scroll.add_widget(self.list_box)
         layout.add_widget(scroll)
@@ -592,7 +589,7 @@ class PluginsScreen(Screen):
 
         for name in names:
             p_card = Factory.Card()
-            row = BoxLayout(size_hint_y=None, height=38, spacing=8)
+            row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
             
             lbl_name = Label(text=f"🧩  {name}.py", font_size="14sp", bold=True,
                              color=get_color_from_hex("#F3F4F6"), halign="left")
@@ -601,8 +598,7 @@ class PluginsScreen(Screen):
             badge = Label(text="ACTIVE", font_size="10sp", bold=True,
                           color=get_color_from_hex("#10B981"), size_hint_x=None, width=54)
 
-            btn_del = Factory.DangerButton(text="Del", size_hint_x=None, width=54)
-            btn_del.height = 34
+            btn_del = Factory.DangerButton(text="Del", size_hint=(None, None), size=(dp(58), dp(34)))
             btn_del.font_size = "11sp"
             btn_del.bind(on_release=lambda _, n=name: self.root.send("/delete_plugin", n))
 
@@ -621,17 +617,17 @@ class QuickSendScreen(Screen):
         self.root = app_root
 
         scroll = ScrollView(size_hint=(1, 1))
-        content = BoxLayout(orientation="vertical", padding=14, spacing=12, size_hint_y=None)
+        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(14), size_hint_y=None)
         content.bind(minimum_height=content.setter("height"))
 
         card = Factory.Card()
         lbl_title = Label(text="Quick Message Dispatch", font_size="16sp", bold=True,
-                          color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=26, halign="left")
+                          color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(28), halign="left", valign="middle")
         lbl_title.bind(size=lbl_title.setter('text_size'))
 
         lbl_desc = Label(text="Send a message directly through the bot's anti-spam queue to test connectivity.",
                          font_size="11sp", color=get_color_from_hex("#94A3B8"),
-                         size_hint_y=None, height=24, halign="left")
+                         size_hint_y=None, height=dp(32), halign="left", valign="middle")
         lbl_desc.bind(size=lbl_desc.setter('text_size'))
 
         self.input_target = Factory.ModernInput()
@@ -639,7 +635,7 @@ class QuickSendScreen(Screen):
 
         self.input_msg = Factory.ModernInput()
         self.input_msg.hint_text = "Message text..."
-        self.input_msg.height = 64
+        self.input_msg.height = dp(72)
         self.input_msg.multiline = True
 
         btn_send = Factory.PrimaryButton(text="Queue Outbound Message")
@@ -681,17 +677,16 @@ class ConsoleScreen(Screen):
         super().__init__(name="console", **kw)
         self.root = app_root
 
-        layout = BoxLayout(orientation="vertical", padding=14, spacing=10)
+        layout = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
 
         # Header
         header = Factory.Card()
         row = BoxLayout(size_hint_y=None, height=36, spacing=8)
         title = Label(text="Activity Console", font_size="16sp", bold=True,
-                      color=get_color_from_hex("#F3F4F6"), halign="left")
+                      color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle")
         title.bind(size=title.setter('text_size'))
 
-        btn_clear = Factory.SecondaryButton(text="Clear", size_hint_x=None, width=70)
-        btn_clear.height = 36
+        btn_clear = Factory.SecondaryButton(text="Clear", size_hint=(None, None), size=(dp(75), dp(36)))
         btn_clear.bind(on_release=lambda *_: setattr(self.log_label, "text", ""))
 
         row.add_widget(title)
@@ -735,10 +730,10 @@ class Root(BoxLayout):
             super().__init__(**kw)
 
             # Top Bar
-            top_bar = BoxLayout(size_hint_y=None, height=52, padding=[16, 6, 16, 6], spacing=10)
+            top_bar = BoxLayout(size_hint_y=None, height=dp(56), padding=[dp(14), dp(6), dp(14), dp(6)], spacing=dp(10))
             self.title_lbl = Label(text="WA CORE", font_size="18sp", bold=True,
-                                   color=get_color_from_hex("#F3F4F6"), halign="left",
-                                   size_hint_x=None, width=120)
+                                   color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle",
+                                   size_hint_x=None, width=dp(110))
             self.title_lbl.bind(size=self.title_lbl.setter('text_size'))
 
             # Live Status Pill
@@ -752,7 +747,7 @@ class Root(BoxLayout):
             self.add_widget(top_bar)
 
             # Tab Navigation Row
-            self.tab_bar = BoxLayout(size_hint_y=None, height=44, padding=[12, 2, 12, 4], spacing=6)
+            self.tab_bar = BoxLayout(size_hint_y=None, height=dp(46), padding=[dp(8), dp(2), dp(8), dp(4)], spacing=dp(6))
             self.tabs = {}
             for tab_id, tab_label in [("connect", "Connect"), ("plugins", "Plugins"),
                                       ("send", "Quick Send"), ("console", "Console")]:
