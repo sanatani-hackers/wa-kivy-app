@@ -14,6 +14,20 @@ echo "=== 2. Installing Buildozer & Cython ==="
 pip install --upgrade pip
 pip install --upgrade "Cython<3.0" buildozer
 
+echo "=== 2.5 Updating Bundled Plugins JSON ==="
+python3 -c "
+import os, json
+p_dir = 'plugins'
+bundle = {}
+for f in sorted(os.listdir(p_dir)):
+    if f.endswith('.py') and not f.startswith('_'):
+        with open(os.path.join(p_dir, f), 'r', encoding='utf-8') as fp:
+            bundle[f[:-3]] = fp.read()
+with open('bundled_plugins.json', 'w', encoding='utf-8') as fp:
+    json.dump(bundle, fp, indent=2)
+print('bundled_plugins.json updated with', len(bundle), 'plugins')
+"
+
 echo "=== 3. Running Buildozer Android Debug ==="
 buildozer -v android debug
 

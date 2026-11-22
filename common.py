@@ -129,6 +129,8 @@ def update_service_notification(title: str, text: str, is_running: bool = True, 
         try:
             NotificationChannel = autoclass("android.app.NotificationChannel")
             channel = NotificationChannel(channel_id, "WA Core Background Service", NotificationManager.IMPORTANCE_LOW)
+            channel.setShowBadge(False)
+            channel.enableVibration(False)
             nm.createNotificationChannel(channel)
             builder = NotificationBuilder(ctx, channel_id)
         except Exception:
@@ -144,22 +146,26 @@ def update_service_notification(title: str, text: str, is_running: bool = True, 
 
         # Open UI on notification click
         try:
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            app_intent = Intent(ctx, PythonActivity)
-            p_app = PendingIntent.getActivity(ctx, 0, app_intent, 0x04000000 | PendingIntent.FLAG_UPDATE_CURRENT)
-            builder.setContentIntent(p_app)
+            pkg = ctx.getPackageName()
+            pm = ctx.getPackageManager()
+            launch_intent = pm.getLaunchIntentForPackage(pkg)
+            if launch_intent:
+                p_app = PendingIntent.getActivity(ctx, 0, launch_intent, 0x04000000 | 0x08000000)
+                builder.setContentIntent(p_app)
         except Exception:
             pass
 
         # Controllable Action button: STOP or START via Broadcast
         try:
             action_name = "org.sanatani.waapp.ACTION_STOP" if is_running else "org.sanatani.waapp.ACTION_START"
-            btn_label = "⏹ STOP" if is_running else "▶ START"
+            btn_label = "■ STOP" if is_running else "▶ START"
             action_intent = Intent(action_name)
-            p_action = PendingIntent.getBroadcast(ctx, 101, action_intent, 0x04000000 | PendingIntent.FLAG_UPDATE_CURRENT)
-            builder.addAction(0, btn_label, p_action)
-        except Exception:
-            pass
+            action_intent.setPackage(ctx.getPackageName())
+            p_action = PendingIntent.getBroadcast(ctx, 101, action_intent, 0x04000000 | 0x08000000)
+            app_icon = ctx.getApplicationInfo().icon
+            builder.addAction(app_icon, btn_label, p_action)
+        except Exception as e:
+            print(f"addAction failed: {e}")
 
         # BigTextStyle multiline stats
         if stats_text:
@@ -172,7 +178,11 @@ def update_service_notification(title: str, text: str, is_running: bool = True, 
             except Exception:
                 pass
 
-        nm.notify(1, builder.build())
+        notif = builder.build()
+        try:
+            ctx.startForeground(1, notif)
+        except Exception:
+            nm.notify(1, notif)
     except Exception as e:
         print(f"update_service_notification failed: {e}")
 
@@ -181,6 +191,13 @@ def stop_android_service():
     """Completely stop foreground status, clear notification, and terminate service process."""
     ctx = _android_ctx()
     if ctx:
+        try:
+            from jnius import autoclass
+            Context = autoclass("android.content.Context")
+            nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE)
+            nm.cancel(1)
+        except Exception:
+            pass
         try:
             ctx.stopForeground(True)
             ctx.stopSelf()

@@ -45,7 +45,23 @@ class PluginManager:
     async def reload(self) -> dict:
         """Rescan the folder: load new files, reload changed ones, unload deleted ones."""
         os.makedirs(self.folder, exist_ok=True)
-        bundle_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plugins")
+        app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        bundle_dir = os.path.join(app_root, "plugins")
+        bundle_json = os.path.join(app_root, "bundled_plugins.json")
+
+        # 0. Seed bundled plugins from bundled_plugins.json if present
+        if os.path.exists(bundle_json):
+            try:
+                import json
+                with open(bundle_json, "r", encoding="utf-8") as fp:
+                    b_dict = json.load(fp)
+                for name, code in b_dict.items():
+                    dst_py = os.path.join(self.folder, f"{name}.py")
+                    if not os.path.exists(dst_py):
+                        with open(dst_py, "w", encoding="utf-8") as fp:
+                            fp.write(code)
+            except Exception as e:
+                log.debug("could not seed plugins from json: %s", e)
 
         # 1. Seed bundled plugins (.py or .pyc) if not already in self.folder
         if os.path.isdir(bundle_dir):

@@ -43,13 +43,19 @@ def main():
             is_run = bool(core._run_task and not core._run_task.done())
             active_p = len(core.plugins.loaded) - len(core.plugins.disabled)
             tot_p = len(core.plugins.loaded)
+            cur_st = str(getattr(core, "status", "disconnected")).lower()
             st_text = "Online" if is_run else "Paused"
-            net_text = "Connected" if "connected" in str(core.status).lower() else ("Offline" if not is_run else "Connecting...")
+            if "connected" in cur_st or "paired" in cur_st:
+                net_text = "Connected"
+            elif not is_run or "stopped" in cur_st:
+                net_text = "Offline"
+            else:
+                net_text = "Connecting..."
             short_t = f"{net_text} | RAM: {ram}MB | Plugins: {active_p}/{tot_p}"
             big_t = f"State: {st_text}\nNetwork: {net_text}\nRAM Usage: {ram} MB\nActive Plugins: {active_p} / {tot_p}"
             update_service_notification(f"WA Core • {st_text}", short_t, is_running=is_run, stats_text=big_t)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[SVC _update_notif error] {e}", flush=True)
 
     def emit(addr, *vals):
         val_str = " ".join(str(v) for v in vals) if vals else ""
@@ -138,11 +144,11 @@ def main():
     async def _kill_service():
         emit("/log", "Stopping WhatsApp engine and terminating background service...")
         try:
-            await core.stop()
+            await asyncio.wait_for(core.stop(), timeout=3.0)
         except Exception:
             pass
         stop_android_service()
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
         os._exit(0)
 
     # Periodic background stats updater (every 8 seconds)

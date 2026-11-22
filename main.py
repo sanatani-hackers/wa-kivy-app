@@ -33,6 +33,27 @@ from kivy.utils import get_color_from_hex, platform
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 
+# UbuntuMono Nerd Font Icons (verified in custom user font.ttf)
+ICON_STOP = "\uf04d"       # nf-fa-stop
+ICON_PLAY = "\uf04b"       # nf-fa-play
+ICON_PAUSE = "\uf04c"      # nf-fa-pause
+ICON_GEAR = "\uf013"       # nf-fa-cog
+ICON_REFRESH = "\uf021"    # nf-fa-refresh
+ICON_EDIT = "\uf040"       # nf-fa-pencil
+ICON_DELETE = "\uf1f8"     # nf-fa-trash
+ICON_CLOSE = "\uf00d"      # nf-fa-times
+ICON_CHECK = "\uf00c"      # nf-fa-check
+ICON_DOT_ON = "\uf111"     # nf-fa-circle
+ICON_DOT_OFF = "\uf10c"    # nf-fa-circle_o
+ICON_DOWNLOAD = "\uf019"   # nf-fa-download
+ICON_UPLOAD = "\uf093"     # nf-fa-upload
+ICON_BOLT = "\uf0e7"       # nf-fa-bolt
+ICON_POWER = "\uf011"      # nf-fa-power_off
+ICON_WARNING = "\uf071"    # nf-fa-warning
+ICON_BROOM = "\uf12d"      # nf-fa-eraser
+ICON_PREV = "\uf053"       # nf-fa-chevron_left
+ICON_NEXT = "\uf054"       # nf-fa-chevron_right
+
 from common import (
     HOST,
     PACKAGE,
@@ -691,7 +712,7 @@ class PluginsScreen(Screen):
         btn_add = Factory.PrimaryButton(text="+ Add", size_hint=(None, None), size=(dp(70), dp(38)))
         btn_add.bind(on_release=lambda *_: self.open_editor())
 
-        btn_reload = Factory.SecondaryButton(text="↻", size_hint=(None, None), size=(dp(46), dp(38)))
+        btn_reload = Factory.SecondaryButton(text=ICON_REFRESH, size_hint=(None, None), size=(dp(46), dp(38)))
         btn_reload.font_size = "17sp"
         btn_reload.bold = True
         btn_reload.bind(on_release=lambda *_: self.root.send("/reload"))
@@ -775,17 +796,17 @@ class PluginsScreen(Screen):
             row.add_widget(btn_toggle)
 
             # In-app Code Editor symbol button (pencil icon)
-            btn_edit = Factory.SymbolEditBtn(text="✎")
+            btn_edit = Factory.SymbolEditBtn(text=ICON_EDIT)
             btn_edit.bind(on_release=lambda _, n=name: self.edit_plugin(n))
             row.add_widget(btn_edit)
 
-            # Delete symbol button (cross icon)
-            btn_del = Factory.SymbolDeleteBtn(text="✕")
+            # Delete symbol button (trash icon)
+            btn_del = Factory.SymbolDeleteBtn(text=ICON_DELETE)
             btn_del.bind(on_release=lambda _, n=name: self.root.send("/delete_plugin", n))
             row.add_widget(btn_del)
 
             # Subtitle description
-            sub_text = "[color=10B981]● Active & Handling Messages[/color]" if is_on else "[color=64748B]○ Disabled (Muted)[/color]"
+            sub_text = f"[color=10B981]{ICON_DOT_ON} Active & Handling Messages[/color]" if is_on else f"[color=64748B]{ICON_DOT_OFF} Disabled (Muted)[/color]"
             lbl_sub = Label(
                 text=sub_text,
                 markup=True,
@@ -836,7 +857,7 @@ class QuickSendScreen(Screen):
         btn_send = Factory.PrimaryButton(text="Queue Outbound Message")
         btn_send.bind(on_release=self.on_send)
 
-        btn_ping_self = Factory.SecondaryButton(text="💬 Ping Myself (Test Bot)")
+        btn_ping_self = Factory.SecondaryButton(text=f"{ICON_PLAY} Ping Myself (Test Bot)")
         btn_ping_self.bind(on_release=lambda *_: self.root.send("/send", "self", "!ping"))
 
         self.lbl_feedback = Label(
@@ -862,12 +883,12 @@ class QuickSendScreen(Screen):
         if target and msg:
             self.lbl_feedback.color = get_color_from_hex("#10B981")
             self.root.send("/send", target, msg)
-            self.lbl_feedback.text = f"✓ Dispatched to queue for {target}"
+            self.lbl_feedback.text = f"{ICON_CHECK} Dispatched to queue for {target}"
             self.input_msg.text = ""
             Clock.schedule_once(lambda dt: setattr(self.lbl_feedback, "text", ""), 4)
         else:
             self.lbl_feedback.color = get_color_from_hex("#EF4444")
-            self.lbl_feedback.text = "⚠️ Please enter both target number and message."
+            self.lbl_feedback.text = f"{ICON_WARNING} Please enter both target number and message."
             Clock.schedule_once(lambda dt: setattr(self.lbl_feedback, "text", ""), 3)
 
 
@@ -895,13 +916,13 @@ class ConsoleScreen(Screen):
         )
         title.bind(size=title.setter('text_size'))
 
-        btn_prev = Factory.SecondaryButton(text="◀", size_hint=(None, None), size=(dp(36), dp(34)))
+        btn_prev = Factory.SecondaryButton(text=ICON_PREV, size_hint=(None, None), size=(dp(36), dp(34)))
         btn_prev.bind(on_release=self.prev_page)
 
         self.lbl_page = Label(text="1/1", font_size="11sp", bold=True,
                               color=get_color_from_hex("#94A3B8"), size_hint_x=None, width=dp(42))
 
-        btn_next = Factory.SecondaryButton(text="▶", size_hint=(None, None), size=(dp(36), dp(34)))
+        btn_next = Factory.SecondaryButton(text=ICON_NEXT, size_hint=(None, None), size=(dp(36), dp(34)))
         btn_next.bind(on_release=self.next_page)
 
         self.btn_scroll = Factory.SecondaryButton(text="Auto: ON", size_hint=(None, None), size=(dp(72), dp(34)))
@@ -1026,7 +1047,7 @@ class SettingsScreen(Screen):
         row_wipe.add_widget(self.btn_auto_wipe)
 
         # Row 2: Manual Flush button
-        btn_flush = Factory.SecondaryButton(text="🧹 Wipe Intercepted Cache Now")
+        btn_flush = Factory.SecondaryButton(text=f"{ICON_BROOM} Wipe Intercepted Cache Now")
         btn_flush.bind(on_release=lambda *_: self.root.send("/wipe_cache"))
 
         # Row 3: Stealth Read Toggle
@@ -1049,10 +1070,10 @@ class SettingsScreen(Screen):
                             color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left")
         lbl_e_title.bind(size=lbl_e_title.setter('text_size'))
 
-        btn_battery = Factory.SecondaryButton(text="⚡ Battery Exemption Setting")
+        btn_battery = Factory.SecondaryButton(text=f"{ICON_BOLT} Battery Exemption Setting")
         btn_battery.bind(on_release=lambda *_: ask_ignore_battery_optimizations())
 
-        btn_kill_svc = Factory.DangerButton(text="⏹ Terminate Background Service (Complete Offline)")
+        btn_kill_svc = Factory.DangerButton(text=f"{ICON_POWER} Terminate Background Service (Complete Offline)")
         btn_kill_svc.bind(on_release=self.terminate_service)
 
         card_engine.add_widget(lbl_e_title)
@@ -1065,7 +1086,7 @@ class SettingsScreen(Screen):
                             color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left")
         lbl_s_title.bind(size=lbl_s_title.setter('text_size'))
 
-        btn_export = Factory.SecondaryButton(text="💾 Export Session (.zip)")
+        btn_export = Factory.SecondaryButton(text=f"{ICON_DOWNLOAD} Export Session (.zip)")
         btn_export.bind(on_release=self.export_session)
 
         lbl_import_hint = Label(text="Restore session from backup path:", font_size="11sp",
@@ -1075,7 +1096,7 @@ class SettingsScreen(Screen):
         self.input_import = Factory.ModernInput()
         self.input_import.hint_text = "/sdcard/Download/WA_Session_...zip"
 
-        btn_import = Factory.SecondaryButton(text="Restore & Connect")
+        btn_import = Factory.SecondaryButton(text=f"{ICON_UPLOAD} Restore & Connect")
         btn_import.bind(on_release=self.import_session)
 
         card_session.add_widget(lbl_s_title)
@@ -1090,7 +1111,7 @@ class SettingsScreen(Screen):
                             color=get_color_from_hex("#EF4444"), size_hint_y=None, height=dp(26), halign="left")
         lbl_d_title.bind(size=lbl_d_title.setter('text_size'))
 
-        btn_logout = Factory.DangerButton(text="⚠️ Logout & Reset WhatsApp Session")
+        btn_logout = Factory.DangerButton(text=f"{ICON_WARNING} Logout & Reset WhatsApp Session")
         btn_logout.bind(on_release=self.on_logout)
 
         card_danger.add_widget(lbl_d_title)
@@ -1115,6 +1136,12 @@ class SettingsScreen(Screen):
         self.root.on_log(f"Stealth Read Mode {'enabled' if self.stealth_read_active else 'disabled'}.")
 
     def terminate_service(self, *_):
+        self.root.engine_state = "stopped"
+        self.root.is_connected = False
+        self.root.btn_master.text = ICON_PLAY
+        self.root.btn_master.is_running = False
+        self.root.lbl_pill.text = f"{ICON_DOT_OFF} OFFLINE"
+        self.root.lbl_pill.color = get_color_from_hex("#EF4444")
         self.root.send("/kill_service")
         stop_android_service()
         self.root.on_log("Background service terminated by user request.")
@@ -1161,12 +1188,12 @@ class Root(BoxLayout):
 
             # Live Status Pill
             self.status_pill = Factory.StatusPill()
-            self.lbl_pill = Label(text="● CONNECTING", font_size="11sp", bold=True,
+            self.lbl_pill = Label(text=f"{ICON_DOT_ON} CONNECTING", font_size="11sp", bold=True,
                                   color=get_color_from_hex("#F59E0B"))
             self.status_pill.add_widget(self.lbl_pill)
 
             # Master Header Quick Start/Stop Toggle Button with crisp symbols
-            self.btn_master = Factory.MasterHeaderBtn(text="⏹")
+            self.btn_master = Factory.MasterHeaderBtn(text=ICON_STOP)
             self.btn_master.bind(on_release=self.on_master_toggle)
 
             top_bar.add_widget(self.title_lbl)
@@ -1234,7 +1261,7 @@ class Root(BoxLayout):
                 ("plugins", "Plugins"),
                 ("send", "Quick Send"),
                 ("console", "Console"),
-                ("settings", "⚙ Settings"),
+                ("settings", f"{ICON_GEAR} Settings"),
             ]
             default_tab = "plugins"
         else:
@@ -1243,7 +1270,7 @@ class Root(BoxLayout):
                 ("plugins", "Plugins"),
                 ("send", "Quick Send"),
                 ("console", "Console"),
-                ("settings", "⚙ Settings"),
+                ("settings", f"{ICON_GEAR} Settings"),
             ]
             default_tab = "connect"
 
@@ -1274,13 +1301,13 @@ class Root(BoxLayout):
         st = str(state[0]).lower() if state else "running"
         self.engine_state = st
         if st == "running":
-            self.btn_master.text = "⏹"
+            self.btn_master.text = ICON_STOP
             self.btn_master.is_running = True
         elif st == "stopped":
-            self.btn_master.text = "▶"
+            self.btn_master.text = ICON_PLAY
             self.btn_master.is_running = False
         elif st == "connecting":
-            self.btn_master.text = "⏳"
+            self.btn_master.text = ICON_REFRESH
             self.btn_master.is_running = True
 
     def on_status(self, *s):
@@ -1290,19 +1317,19 @@ class Root(BoxLayout):
 
         if "DISCONNECTED" in s_str or "STOPPED" in s_str:
             self.is_connected = False
-            self.lbl_pill.text = "○ OFFLINE"
+            self.lbl_pill.text = f"{ICON_DOT_OFF} OFFLINE"
             self.lbl_pill.color = get_color_from_hex("#EF4444")
         elif "CONNECTED" in s_str:
             self.is_connected = True
-            self.lbl_pill.text = "● CONNECTED"
+            self.lbl_pill.text = f"{ICON_DOT_ON} CONNECTED"
             self.lbl_pill.color = get_color_from_hex("#10B981")
         elif "PAIR" in s_str:
             self.is_connected = True
-            self.lbl_pill.text = "● PAIRED"
+            self.lbl_pill.text = f"{ICON_DOT_ON} PAIRED"
             self.lbl_pill.color = get_color_from_hex("#10B981")
         else:
             self.is_connected = False
-            self.lbl_pill.text = f"● {s_str[:12]}"
+            self.lbl_pill.text = f"{ICON_DOT_ON} {s_str[:12]}"
             self.lbl_pill.color = get_color_from_hex("#F59E0B")
 
         if old_connected != self.is_connected:
@@ -1333,8 +1360,26 @@ class Root(BoxLayout):
     def sync_bundled_plugins(self):
         """Ensure all bundled plugins are copied to user plugin directory for in-app editing."""
         try:
-            bundle_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
             target_dir = plugin_dir()
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+
+            # 1. Unpack from bundled_plugins.json (impervious to p4a python stripping)
+            bundle_json = os.path.join(app_dir, "bundled_plugins.json")
+            if os.path.exists(bundle_json):
+                try:
+                    import json
+                    with open(bundle_json, "r", encoding="utf-8") as fp:
+                        b_dict = json.load(fp)
+                    for name, code in b_dict.items():
+                        dst = os.path.join(target_dir, f"{name}.py")
+                        if not os.path.exists(dst):
+                            with open(dst, "w", encoding="utf-8") as fp:
+                                fp.write(code)
+                except Exception as e:
+                    self.on_log(f"JSON plugin seed error: {e}")
+
+            # 2. Also check file-based bundle directory
+            bundle_dir = os.path.join(app_dir, "plugins")
             if os.path.isdir(bundle_dir):
                 for f in os.listdir(bundle_dir):
                     if f.endswith(".py") and not f.startswith("_"):
@@ -1345,9 +1390,9 @@ class Root(BoxLayout):
             self.on_log(f"Plugin sync error: {e}")
 
     def get_plugin_source(self, name: str) -> str:
-        """Read source code of any plugin (user folder first, fallback to bundle)."""
+        """Read source code of any plugin (user folder first, fallback to JSON bundle)."""
         fname = f"{name}.py"
-        # 1. Check user plugin dir
+        # 1. Check user plugin dir (contains user edits)
         p1 = os.path.join(plugin_dir(), fname)
         if os.path.exists(p1):
             try:
@@ -1356,8 +1401,21 @@ class Root(BoxLayout):
             except Exception as e:
                 return f"# Error reading {p1}: {e}\n"
 
-        # 2. Check bundled plugins
-        bundle_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+        # 2. Check bundled_plugins.json
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        bundle_json = os.path.join(app_dir, "bundled_plugins.json")
+        if os.path.exists(bundle_json):
+            try:
+                import json
+                with open(bundle_json, "r", encoding="utf-8") as fp:
+                    b_dict = json.load(fp)
+                if name in b_dict:
+                    return b_dict[name]
+            except Exception:
+                pass
+
+        # 3. Check bundled plugins directory
+        bundle_dir = os.path.join(app_dir, "plugins")
         p2 = os.path.join(bundle_dir, fname)
         if os.path.exists(p2):
             try:

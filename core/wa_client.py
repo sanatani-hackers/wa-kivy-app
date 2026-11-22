@@ -38,10 +38,12 @@ class WhatsAppCore:
             on_error=lambda n, err: self.emit("/log", f"plugin {n} error: {err}"))
         self.plugins = PluginManager(plugin_dir, self)
         self._run_task = None
+        self.status = "stopped"
 
     # ---- lifecycle
     async def start(self):
         try:
+            self.status = "connecting"
             from neonize.aioze.client import NewAClient
             from neonize.aioze.events import (
                 ConnectedEv, ConnectFailureEv, DisconnectedEv, MessageEv,
@@ -53,6 +55,7 @@ class WhatsAppCore:
 
             @c.event(ConnectedEv)
             async def _connected(_, __):
+                self.status = "connected"
                 self.emit("/status", "connected")
                 self.emit("/log", "WhatsApp client connected successfully.")
                 if self._ws_ready:
@@ -60,19 +63,23 @@ class WhatsAppCore:
 
             @c.event(ConnectFailureEv)
             async def _conn_fail(_, ev):
+                self.status = "disconnected"
                 self.emit("/log", f"WhatsApp connection failure: {ev}")
 
             @c.event(StreamErrorEv)
             async def _stream_err(_, ev):
+                self.status = "disconnected"
                 self.emit("/log", f"WhatsApp stream error: {ev}")
 
             @c.event(DisconnectedEv)
             async def _disconnected(_, __):
+                self.status = "disconnected"
                 self.emit("/status", "disconnected")
                 self.emit("/log", "WhatsApp client disconnected.")
 
             @c.event(PairStatusEv)
             async def _paired(_, ev):
+                self.status = "paired"
                 self.emit("/status", "paired")
                 self.emit("/log", "Device paired successfully with WhatsApp.")
 
@@ -254,6 +261,7 @@ class WhatsAppCore:
                     await self.client.disconnect()
                 except Exception:
                     pass
+            self.status = "stopped"
             self.emit("/status", "stopped")
             self.emit("/engine_state", "stopped")
             self.emit("/log", "Bot stopped. WhatsApp client disconnected (Offline).")
@@ -264,6 +272,7 @@ class WhatsAppCore:
     async def resume(self):
         """Resume bot and reconnect to WhatsApp servers."""
         try:
+            self.status = "connecting"
             self.emit("/status", "connecting")
             self.emit("/engine_state", "connecting")
             self.emit("/log", "Starting bot engine and connecting...")
@@ -283,16 +292,20 @@ class WhatsAppCore:
         state = "running" if (self._run_task and not self._run_task.done()) else "stopped"
         self.emit("/engine_state", state)
         if state == "stopped":
+            self.status = "stopped"
             self.emit("/status", "stopped")
         elif self.client:
             try:
                 logged = await self.client.is_logged_in
                 conn = await self.client.is_connected
                 if logged and conn:
+                    self.status = "connected"
                     self.emit("/status", "connected")
                 elif conn:
+                    self.status = "ready_to_pair"
                     self.emit("/status", "ready_to_pair")
                 else:
+                    self.status = "connecting"
                     self.emit("/status", "connecting")
             except Exception:
                 pass
