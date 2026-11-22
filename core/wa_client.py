@@ -31,6 +31,7 @@ class WhatsAppCore:
         self.db = os.path.join(private_dir, "session.sqlite3")
         self.process_own = process_own_messages
         self.client = None
+        self._ws_ready = None   # asyncio.Event: set when WS connected
         self.queue = OutboundQueue(self._send_job, typing=self._typing)
         self.supervisor = PluginSupervisor(
             on_quarantine=lambda n, why: self.emit("/log", f"plugin {n} quarantined: {why}"))
@@ -53,6 +54,8 @@ class WhatsAppCore:
             async def _connected(_, __):
                 self.emit("/status", "connected")
                 self.emit("/log", "WhatsApp client connected successfully.")
+                if self._ws_ready:
+                    self._ws_ready.set()
 
             @c.event(ConnectFailureEv)
             async def _conn_fail(_, ev):
@@ -101,6 +104,7 @@ class WhatsAppCore:
             except AttributeError:
                 log.info("this neonize build has no qr event hook; use pairing code")
 
+            self._ws_ready = asyncio.Event()
             self.queue.start()
             self.supervisor.start_monitor()
             rep = await self.plugins.reload()
@@ -134,19 +138,34 @@ class WhatsAppCore:
                 self.emit("/log", "Please enter a valid phone number with country code.")
                 return
 
-            # Auto-wait for WebSocket connection if still handshaking
-            if not getattr(self.client, "is_connected", False):
-                self.emit("/log", "Connecting to WhatsApp servers, please wait...")
-                for i in range(15):
-                    await asyncio.sleep(1)
-                    if getattr(self.client, "is_connected", False):
-                        self.emit("/log", "WebSocket connection established!")
-                        break
-                    if (i + 1) % 3 == 0:
-                        self.emit("/log", f"Handshaking with WhatsApp... ({i+1}s)")
+            # Check if already paired
+            try:
+                already_logged = await self.client.is_logged_in
+                if already_logged:
+                    self.emit("/log", "Already paired! Tap 'Clear Session' first to re-pair.")
+                    return
+            except Exception:
+                pass
 
-            if not getattr(self.client, "is_connected", False):
-                self.emit("/log", "WhatsApp server not connected yet. Please wait 5s and tap again.")
+            # Wait for WebSocket connection (polling is_connected coroutine)
+            try:
+                ws_ok = await self.client.is_connected
+            except Exception:
+                ws_ok = False
+
+            if not ws_ok:
+                self.emit("/log", "Waiting for WhatsApp WebSocket connection...")
+                for i in range(20):
+                    await asyncio.sleep(0.5)
+                    try:
+                        if await self.client.is_connected:
+                            ws_ok = True
+                            break
+                    except Exception:
+                        pass
+
+            if not ws_ok:
+                self.emit("/log", "WhatsApp server not connected yet. Check internet connection and retry.")
                 return
 
             self.emit("/log", f"Requesting pairing code for +{phone}...")
@@ -155,7 +174,6 @@ class WhatsAppCore:
             self.emit("/log", f"Pairing code received: {code}")
         except Exception as e:
             self.emit("/log", f"Pairing failed: {e!r}")
-
     async def send_direct(self, recipient: str, text: str) -> bool:
         if not recipient or not text:
             return False

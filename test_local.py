@@ -147,8 +147,9 @@ def pair_phone(phone):
     logs = []
     server = OSCThreadServer(encoding="utf8")
     try:
-        server.listen(HOST, port=UI_PORT + 2, default=True)
+        server.listen(HOST, port=UI_PORT, default=True)
     except OSError:
+        print(f"⚠️ UI Port {UI_PORT} already in use (is Kivy UI open?). Listening on alternate port...")
         server.listen(HOST, port=0, default=True)
 
     server.bind(b"/pair_code", lambda *c: got_code.append(str(c[0])))
@@ -173,12 +174,22 @@ def pair_phone(phone):
         print("\n⏳ Pairing code timeout. Check logs above.")
 
 
+def send_msg(recipient, text):
+    from oscpy.client import OSCClient
+    from oscpy.server import OSCThreadServer
+
+    print(f"✉️ Sending '{text}' to {recipient}...")
+    client = OSCClient(HOST, SVC_PORT, encoding="utf8")
+    client.send_message(b"/send", [recipient.encode(), text.encode()])
+    print("✓ Sent to queue!")
+
 def main():
     parser = argparse.ArgumentParser(description="WA Core Local Test CLI")
     parser.add_argument("--check", action="store_true", help="Run sanity checks")
     parser.add_argument("--service", action="store_true", help="Run service in foreground")
     parser.add_argument("--status", action="store_true", help="Ping running service")
     parser.add_argument("--pair", type=str, help="Request 8-digit pairing code for phone")
+    parser.add_argument("--send", nargs=2, metavar=("TO", "MSG"), help="Send message to recipient")
     args = parser.parse_args()
 
     if args.service:
@@ -187,6 +198,8 @@ def main():
         ping_service()
     elif args.pair:
         pair_phone(args.pair)
+    elif args.send:
+        send_msg(args.send[0], args.send[1])
     else:
         run_checks()
 
