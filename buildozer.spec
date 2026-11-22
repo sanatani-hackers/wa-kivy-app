@@ -3,7 +3,7 @@ title = WA Core
 package.name = waapp
 package.domain = org.sanatani
 source.dir = .
-source.include_exts = py,png,jpg,kv,json,so
+source.include_exts = py,png,jpg,kv,json,so,ttf
 version = 0.1.0
 orientation = portrait
 android.softinput_mode = resize
@@ -15,7 +15,7 @@ p4a.branch = v2024.01.21
 # Separate process, foreground notification, restarted if killed
 services = whatsapp:service/main.py:foreground:sticky
 
-android.permissions = INTERNET,FOREGROUND_SERVICE,FOREGROUND_SERVICE_DATA_SYNC,POST_NOTIFICATIONS,REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+android.permissions = INTERNET,FOREGROUND_SERVICE,FOREGROUND_SERVICE_DATA_SYNC,POST_NOTIFICATIONS,REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE
 # targetSdk 33 avoids the Android 14 "foregroundServiceType" manifest requirement (targetSdk >= 34)
 android.api = 33
 android.minapi = 26

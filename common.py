@@ -1,5 +1,8 @@
 """Shared constants + path helpers (imported by both the UI and the service process)."""
 import os
+import shutil
+import time
+import zipfile
 
 PACKAGE = "org.sanatani.waapp"      # package.domain + "." + package.name in buildozer.spec
 SERVICE = "Whatsapp"                # services = whatsapp:...  ->  class <PACKAGE>.ServiceWhatsapp
@@ -48,8 +51,25 @@ def qr_cache_path():
     return os.path.join(private_dir(), "wa_qr.png")
 
 
+def activity_log_path():
+    """Persistent log file for all engine and plugin activity."""
+    return os.path.join(private_dir(), "wa_activity.log")
+
+
+def get_ram_usage_mb() -> int:
+    """Return real-time VmRSS memory usage in Megabytes."""
+    try:
+        with open("/proc/self/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 0
+
+
 def send_android_notification(title: str, text: str, notif_id: int = 1001):
-    """Post or update an Android system notification using native Java APIs."""
+    """Post an Android heads-up alert notification (for Anti-delete, Anti-edit, Reminders)."""
     ctx = _android_ctx()
     if not ctx:
         return
@@ -89,3 +109,138 @@ def send_android_notification(title: str, text: str, notif_id: int = 1001):
         nm.notify(notif_id, builder.build())
     except Exception as e:
         print(f"send_android_notification failed: {e}")
+
+
+def update_service_notification(title: str, text: str, is_running: bool = True, stats_text: str = ""):
+    """Update persistent foreground notification (ID 1) with live stats and [STOP]/[START] action button."""
+    ctx = _android_ctx()
+    if not ctx:
+        return
+    try:
+        from jnius import autoclass
+        NotificationBuilder = autoclass("android.app.Notification$Builder")
+        NotificationManager = autoclass("android.app.NotificationManager")
+        Context = autoclass("android.content.Context")
+        Intent = autoclass("android.content.Intent")
+        PendingIntent = autoclass("android.app.PendingIntent")
+
+        nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE)
+        channel_id = "org.kivy.p4a1"
+        try:
+            NotificationChannel = autoclass("android.app.NotificationChannel")
+            channel = NotificationChannel(channel_id, "WA Core Background Service", NotificationManager.IMPORTANCE_LOW)
+            nm.createNotificationChannel(channel)
+            builder = NotificationBuilder(ctx, channel_id)
+        except Exception:
+            builder = NotificationBuilder(ctx)
+
+        builder.setContentTitle(str(title))
+        builder.setContentText(str(text))
+        builder.setOngoing(True)
+        try:
+            builder.setSmallIcon(ctx.getApplicationInfo().icon)
+        except Exception:
+            pass
+
+        # Open UI on notification click
+        try:
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            app_intent = Intent(ctx, PythonActivity)
+            p_app = PendingIntent.getActivity(ctx, 0, app_intent, 0x04000000 | PendingIntent.FLAG_UPDATE_CURRENT)
+            builder.setContentIntent(p_app)
+        except Exception:
+            pass
+
+        # Controllable Action button: STOP or START via Broadcast
+        try:
+            action_name = "org.sanatani.waapp.ACTION_STOP" if is_running else "org.sanatani.waapp.ACTION_START"
+            btn_label = "⏹ STOP" if is_running else "▶ START"
+            action_intent = Intent(action_name)
+            p_action = PendingIntent.getBroadcast(ctx, 101, action_intent, 0x04000000 | PendingIntent.FLAG_UPDATE_CURRENT)
+            builder.addAction(0, btn_label, p_action)
+        except Exception:
+            pass
+
+        # BigTextStyle multiline stats
+        if stats_text:
+            try:
+                BigTextStyle = autoclass("android.app.Notification$BigTextStyle")
+                big = BigTextStyle()
+                big.setBigContentTitle(str(title))
+                big.bigText(str(stats_text))
+                builder.setStyle(big)
+            except Exception:
+                pass
+
+        nm.notify(1, builder.build())
+    except Exception as e:
+        print(f"update_service_notification failed: {e}")
+
+
+def stop_android_service():
+    """Completely stop foreground status, clear notification, and terminate service process."""
+    ctx = _android_ctx()
+    if ctx:
+        try:
+            ctx.stopForeground(True)
+            ctx.stopSelf()
+        except Exception as e:
+            print(f"stop_android_service failed: {e}")
+
+
+def export_session_zip() -> tuple[bool, str]:
+    """Export session.sqlite3 to public /sdcard/Download or app storage."""
+    base = private_dir()
+    db_file = os.path.join(base, "session.sqlite3")
+    if not os.path.exists(db_file):
+        return False, "No active session file found to export."
+
+    target_dir = "/sdcard/Download"
+    if not os.path.isdir(target_dir):
+        target_dir = base
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    out_zip = os.path.join(target_dir, f"WA_Session_{ts}.zip")
+    try:
+        with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(db_file, "session.sqlite3")
+        return True, out_zip
+    except Exception as e:
+        return False, str(e)
+
+
+def import_session_zip(path: str) -> tuple[bool, str]:
+    """Restore session.sqlite3 from a backup zip or sqlite3 file."""
+    path = path.strip()
+    if not os.path.exists(path):
+        return False, f"File does not exist: {path}"
+
+    base = private_dir()
+    db_dest = os.path.join(base, "session.sqlite3")
+    try:
+        if path.endswith(".zip"):
+            with zipfile.ZipFile(path, "r") as zf:
+                if "session.sqlite3" not in zf.namelist():
+                    return False, "Invalid archive: 'session.sqlite3' not found in zip."
+                zf.extract("session.sqlite3", base)
+        else:
+            shutil.copy2(path, db_dest)
+        return True, "Session restored successfully!"
+    except Exception as e:
+        return False, str(e)
+
+
+def export_activity_log() -> tuple[bool, str]:
+    """Copy wa_activity.log to public Download directory."""
+    src = activity_log_path()
+    if not os.path.exists(src):
+        return False, "Activity log file is empty."
+    target_dir = "/sdcard/Download"
+    if not os.path.isdir(target_dir):
+        target_dir = private_dir()
+    dst = os.path.join(target_dir, "WA_Activity_Logs.txt")
+    try:
+        shutil.copy2(src, dst)
+        return True, dst
+    except Exception as e:
+        return False, str(e)

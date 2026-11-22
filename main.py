@@ -1,16 +1,15 @@
 """WA Core - Minimalistic Modern WhatsApp Automation Engine for Android.
 Features:
 - Pure Kivy Dark Design System (obsidian & emerald palette, rounded cards)
-- 4-Tab ScreenManager: Connect, Plugins, Quick Send, Console
-- Master Start/Stop Engine Toggle (Quick Header & Dynamic Account Card)
-- Dynamic Connected Account Card (Auto-collapses QR/Pairing when connected)
-- Per-Plugin Interactive ON/OFF Toggles, In-App Code Editor & Deleter
-- Direct Message Dispatcher via Paced Anti-spam Outbound Queue
-- Real-time Monospace Activity Console with Auto-scroll Toggle & Clipboard Copy
-- Native Android System Notifications via PyJNIus
-- Foreground Service integration over OSC
+- Dynamic Tab Navigation: Auto-hides Connect tab once paired
+- Settings Screen: Ghost & Privacy Mode, Auto-Wipe, Full Service Kill, Session Export/Import, Logout
+- Full In-App Plugin Editor: Edit bundled and custom plugins live with hot-reload
+- Monospace Console with Pagination, Log File Persistence and 1-tap Log Export
+- Controllable Android Foreground Notification with Live Stats (RAM, Network, Plugins) & Action Buttons
+- DejaVuSans font integration for crisp symbol rendering without tofu glyph boxes
 """
 import os
+import shutil
 import time
 import traceback
 
@@ -18,6 +17,7 @@ from kivy.metrics import dp, sp
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
+from kivy.core.text import DEFAULT_FONT, LabelBase
 from kivy.factory import Factory
 from kivy.lang import Builder
 from kivy.properties import BooleanProperty
@@ -33,7 +33,33 @@ from kivy.utils import get_color_from_hex, platform
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 
-from common import HOST, PACKAGE, SERVICE, SVC_PORT, UI_PORT, plugin_dir, private_dir, qr_cache_path
+from common import (
+    HOST,
+    PACKAGE,
+    SERVICE,
+    SVC_PORT,
+    UI_PORT,
+    activity_log_path,
+    export_activity_log,
+    export_session_zip,
+    get_ram_usage_mb,
+    import_session_zip,
+    plugin_dir,
+    private_dir,
+    qr_cache_path,
+    stop_android_service,
+)
+
+# Register DejaVuSans for crisp symbol support
+_font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+_dejavu_reg = os.path.join(_font_dir, "DejaVuSans.ttf")
+_dejavu_bold = os.path.join(_font_dir, "DejaVuSans-Bold.ttf")
+if os.path.exists(_dejavu_reg):
+    LabelBase.register(
+        DEFAULT_FONT,
+        fn_regular=_dejavu_reg,
+        fn_bold=_dejavu_bold if os.path.exists(_dejavu_bold) else _dejavu_reg,
+    )
 
 
 def log_exception(exc_text):
@@ -43,22 +69,6 @@ def log_exception(exc_text):
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {exc_text}\n")
     except Exception:
         pass
-
-
-def clean_display_text(s: str) -> str:
-    """Strip or replace symbols that cause missing glyph tofu boxes on Android SDL2."""
-    replacements = [
-        ("●", ""), ("✓", ""), ("⚠️", "!"), ("⚡", ""),
-        ("🟢", ""), ("⏸️", ""), ("🔄", ""), ("📱", ""),
-        ("🔍", ""), ("🧩", ""), ("✏️", ""), ("🗑️", ""),
-        ("⏰", ""), ("▶", ""), ("⏹", ""), ("🤖", ""),
-        ("💬", ""), ("📸", ""), ("🎥", ""), ("🎵", ""),
-        ("📄", ""), ("🎭", ""), ("🔔", ""), ("📌", ""),
-        ("⏱️", ""), ("🧹", ""), ("💾", "")
-    ]
-    for ch, rep in replacements:
-        s = s.replace(ch, rep)
-    return s.strip()
 
 
 # Modern Minimalistic Design Styles
@@ -161,9 +171,9 @@ KV_STYLES = """
     background_normal: ''
     background_down: ''
     bold: True
-    font_size: '12sp'
+    font_size: '14sp'
     size_hint: (None, None)
-    size: (dp(76), dp(34))
+    size: (dp(54), dp(34))
     color: get_color_from_hex('#EF4444') if self.is_running else get_color_from_hex('#0B0F19')
     canvas.before:
         Color:
@@ -240,7 +250,7 @@ KV_STYLES = """
     bold: True
     font_size: '11sp'
     size_hint: (None, None)
-    size: (dp(50), dp(34))
+    size: (dp(48), dp(34))
     canvas.before:
         Color:
             rgba: get_color_from_hex('#059669') if self.state == 'down' else get_color_from_hex('#10B981')
@@ -257,28 +267,6 @@ KV_STYLES = """
     bold: True
     font_size: '11sp'
     size_hint: (None, None)
-    size: (dp(50), dp(34))
-    canvas.before:
-        Color:
-            rgba: get_color_from_hex('#2A384C') if self.state == 'down' else get_color_from_hex('#1F293A')
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(8)]
-        Color:
-            rgba: get_color_from_hex('#334155')
-        Line:
-            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
-            width: dp(1)
-
-<EditPluginBtn@Button>:
-    background_color: (0, 0, 0, 0)
-    background_normal: ''
-    background_down: ''
-    color: get_color_from_hex('#F3F4F6')
-    font_size: '11sp'
-    bold: True
-    size_hint: (None, None)
     size: (dp(48), dp(34))
     canvas.before:
         Color:
@@ -293,15 +281,37 @@ KV_STYLES = """
             rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
             width: dp(1)
 
-<DeletePluginBtn@Button>:
+<SymbolEditBtn@Button>:
+    background_color: (0, 0, 0, 0)
+    background_normal: ''
+    background_down: ''
+    color: get_color_from_hex('#F3F4F6')
+    font_size: '14sp'
+    bold: True
+    size_hint: (None, None)
+    size: (dp(40), dp(34))
+    canvas.before:
+        Color:
+            rgba: get_color_from_hex('#2A384C') if self.state == 'down' else get_color_from_hex('#1F293A')
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+        Color:
+            rgba: get_color_from_hex('#334155')
+        Line:
+            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
+            width: dp(1)
+
+<SymbolDeleteBtn@Button>:
     background_color: (0, 0, 0, 0)
     background_normal: ''
     background_down: ''
     color: get_color_from_hex('#EF4444')
-    font_size: '11sp'
+    font_size: '14sp'
     bold: True
     size_hint: (None, None)
-    size: (dp(44), dp(34))
+    size: (dp(40), dp(34))
     canvas.before:
         Color:
             rgba: get_color_from_hex('#451A1A') if self.state == 'down' else get_color_from_hex('#2A1818')
@@ -403,7 +413,7 @@ def ask_permissions():
         return
     try:
         from android.permissions import request_permissions
-        request_permissions(["android.permission.POST_NOTIFICATIONS"])
+        request_permissions(["android.permission.POST_NOTIFICATIONS", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE"])
     except Exception as e:
         log_exception(f"ask_permissions error: {e}")
 
@@ -539,6 +549,28 @@ class PluginEditorDialog(ModalView):
         self.on_save(self, name, code)
 
 
+class InfoDialog(ModalView):
+    """Clean popup alert for notifications, export paths, and feedback."""
+    def __init__(self, title_text, msg_text, **kw):
+        super().__init__(size_hint=(0.88, 0.40), auto_dismiss=True, **kw)
+        self.background_color = (0, 0, 0, 0.75)
+        card = Factory.DialogCard()
+
+        lbl_t = Label(text=title_text, font_size="16sp", bold=True,
+                      color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(30))
+        lbl_m = Label(text=msg_text, font_size="12sp", color=get_color_from_hex("#94A3B8"),
+                      halign="center", valign="middle")
+        lbl_m.bind(size=lbl_m.setter('text_size'))
+
+        btn_ok = Factory.PrimaryButton(text="OK")
+        btn_ok.bind(on_release=lambda *_: self.dismiss())
+
+        card.add_widget(lbl_t)
+        card.add_widget(lbl_m)
+        card.add_widget(btn_ok)
+        self.add_widget(card)
+
+
 # --------------------------------------------------------------------------- Screens
 class ConnectScreen(Screen):
     """Pairing with phone number, viewing live QR code, and session status."""
@@ -546,93 +578,19 @@ class ConnectScreen(Screen):
     def __init__(self, app_root, **kw):
         super().__init__(name="connect", **kw)
         self.root = app_root
-        self.is_connected = False
-        self.show_pairing_info = False
 
         scroll = ScrollView(size_hint=(1, 1))
-        self.content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(14), size_hint_y=None)
-        self.content.bind(minimum_height=self.content.setter("height"))
+        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(14), size_hint_y=None)
+        content.bind(minimum_height=content.setter("height"))
 
-        # ---------------- Card 1: Master Engine Control & System Health
-        self.card_engine = Factory.Card()
-
-        row_header = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
-        lbl_ctrl_title = Label(
-            text="BOT ENGINE CONTROLS", font_size="13sp", bold=True,
-            color=get_color_from_hex("#94A3B8"), halign="left", valign="middle"
-        )
-        lbl_ctrl_title.bind(size=lbl_ctrl_title.setter('text_size'))
-
-        btn_battery = Factory.SecondaryButton(text="Battery Exemption", size_hint=(None, None), size=(dp(155), dp(36)))
-        btn_battery.font_size = "11sp"
-        btn_battery.bind(on_release=lambda *_: ask_ignore_battery_optimizations())
-
-        row_header.add_widget(lbl_ctrl_title)
-        row_header.add_widget(btn_battery)
-
-        # Big Engine Status Banner
-        self.lbl_engine_banner = Label(
-            text="ONLINE • ACTIVE",
-            font_size="16sp", bold=True,
-            color=get_color_from_hex("#10B981"),
-            size_hint_y=None, height=dp(32),
-            halign="left", valign="middle"
-        )
-        self.lbl_engine_banner.bind(size=self.lbl_engine_banner.setter('text_size'))
-
-        self.lbl_engine_desc = Label(
-            text="WhatsApp Multi-Device background engine running with native alerts.",
-            font_size="11sp", color=get_color_from_hex("#64748B"),
-            size_hint_y=None, height=dp(20), halign="left", valign="middle"
-        )
-        self.lbl_engine_desc.bind(size=self.lbl_engine_desc.setter('text_size'))
-
-        # Big Master Start/Stop Action Button
-        self.btn_master_large = Factory.DangerButton(text="Stop Engine (Go Offline)")
-        self.btn_master_large.bind(on_release=self.on_master_btn_click)
-
-        self.card_engine.add_widget(row_header)
-        self.card_engine.add_widget(self.lbl_engine_banner)
-        self.card_engine.add_widget(self.lbl_engine_desc)
-        self.card_engine.add_widget(self.btn_master_large)
-
-        # ---------------- Card 2: Connected Account Summary (Visible when connected)
-        self.card_connected = Factory.Card()
-        lbl_acc_title = Label(
-            text="WhatsApp Session Active", font_size="15sp", bold=True,
-            color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left", valign="middle"
-        )
-        lbl_acc_title.bind(size=lbl_acc_title.setter('text_size'))
-
-        lbl_acc_sub = Label(
-            text="Linked device is synchronized and receiving events.",
-            font_size="11sp", color=get_color_from_hex("#10B981"),
-            size_hint_y=None, height=dp(24), halign="left", valign="middle"
-        )
-        lbl_acc_sub.bind(size=lbl_acc_sub.setter('text_size'))
-
-        row_acc_actions = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(10))
-        btn_test_ping = Factory.SecondaryButton(text="Test Ping")
-        btn_test_ping.bind(on_release=lambda *_: self.root.send("/send", "self", "!ping"))
-
-        self.btn_toggle_pairing = Factory.SecondaryButton(text="Pairing Info")
-        self.btn_toggle_pairing.bind(on_release=self.toggle_pairing_visibility)
-
-        row_acc_actions.add_widget(btn_test_ping)
-        row_acc_actions.add_widget(self.btn_toggle_pairing)
-
-        self.card_connected.add_widget(lbl_acc_title)
-        self.card_connected.add_widget(lbl_acc_sub)
-        self.card_connected.add_widget(row_acc_actions)
-
-        # ---------------- Card 3: Pairing with Phone Code
+        # Card 1: Pairing with Phone Code
         self.card_pair = Factory.Card()
         lbl_pair_title = Label(
             text="Pair with Phone Number", font_size="15sp", bold=True,
             color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(28), halign="left", valign="middle"
         )
         lbl_pair_title.bind(size=lbl_pair_title.setter('text_size'))
-        
+
         self.lbl_pair_sub = Label(
             text="Enter full phone with country code (e.g. 919876543210):",
             font_size="11sp", color=get_color_from_hex("#94A3B8"),
@@ -647,7 +605,7 @@ class ConnectScreen(Screen):
         btn_get_code = Factory.PrimaryButton(text="Request 8-Digit Pairing Code")
         btn_get_code.bind(on_release=self.on_request_code)
 
-        # Code display box (styled clickable card)
+        # Code display box
         self.code_box = Factory.CodeBox()
         self.lbl_code = Label(text="------", font_size="22sp", bold=True,
                               color=get_color_from_hex("#10B981"))
@@ -663,7 +621,7 @@ class ConnectScreen(Screen):
         self.card_pair.add_widget(btn_get_code)
         self.card_pair.add_widget(self.code_box)
 
-        # ---------------- Card 4: QR Code Section (Optional scan)
+        # Card 2: QR Code Section
         self.card_qr = Factory.Card()
         lbl_qr_title = Label(
             text="Scan QR Code", font_size="15sp", bold=True,
@@ -681,69 +639,10 @@ class ConnectScreen(Screen):
         self.card_qr.add_widget(self.lbl_qr_sub)
         self.card_qr.add_widget(self.qr_image)
 
-        # ---------------- Card 5: Danger Zone
-        self.card_ctrl = Factory.Card()
-        btn_clear = Factory.DangerButton(text="Reset & Clear Session")
-        btn_clear.bind(on_release=lambda *_: self.root.send("/clear_session"))
-        self.card_ctrl.add_widget(btn_clear)
-
-        # Build initial layout
-        self.refresh_layout()
-
-        scroll.add_widget(self.content)
+        content.add_widget(self.card_pair)
+        content.add_widget(self.card_qr)
+        scroll.add_widget(content)
         self.add_widget(scroll)
-
-    def refresh_layout(self):
-        """Dynamically assemble the Connect Screen cards based on link status."""
-        self.content.clear_widgets()
-        self.content.add_widget(self.card_engine)
-        if self.is_connected:
-            self.content.add_widget(self.card_connected)
-            if self.show_pairing_info:
-                self.content.add_widget(self.card_pair)
-                self.content.add_widget(self.card_qr)
-        else:
-            self.content.add_widget(self.card_pair)
-            self.content.add_widget(self.card_qr)
-        self.content.add_widget(self.card_ctrl)
-
-    def toggle_pairing_visibility(self, *_):
-        self.show_pairing_info = not self.show_pairing_info
-        self.btn_toggle_pairing.text = "Hide Pairing Info" if self.show_pairing_info else "Show Pairing Info"
-        self.refresh_layout()
-
-    def on_master_btn_click(self, *_):
-        if self.root.engine_state == "running":
-            self.root.send("/stop_bot")
-        else:
-            self.root.send("/start_bot")
-
-    def on_engine_state_change(self, state_str):
-        st = state_str.lower()
-        if st == "stopped":
-            self.lbl_engine_banner.text = "OFFLINE • PAUSED"
-            self.lbl_engine_banner.color = get_color_from_hex("#94A3B8")
-            self.lbl_engine_desc.text = "WhatsApp client disconnected. Tap Start to resume automation."
-            self.btn_master_large.text = "Start Engine (Go Online)"
-            self.btn_master_large.color = get_color_from_hex("#0B0F19")
-        elif st == "connecting":
-            self.lbl_engine_banner.text = "CONNECTING..."
-            self.lbl_engine_banner.color = get_color_from_hex("#F59E0B")
-            self.lbl_engine_desc.text = "Connecting to WhatsApp network and synchronizing session..."
-            self.btn_master_large.text = "Cancel / Stop Engine"
-            self.btn_master_large.color = get_color_from_hex("#FFFFFF")
-        else:
-            # Running
-            if self.is_connected:
-                self.lbl_engine_banner.text = "ONLINE • CONNECTED"
-                self.lbl_engine_banner.color = get_color_from_hex("#10B981")
-                self.lbl_engine_desc.text = "WhatsApp multi-device session active and listening 24/7."
-            else:
-                self.lbl_engine_banner.text = "ONLINE • READY TO PAIR"
-                self.lbl_engine_banner.color = get_color_from_hex("#10B981")
-                self.lbl_engine_desc.text = "Bot engine ready. Scan QR or request pairing code below."
-            self.btn_master_large.text = "Stop Engine (Go Offline)"
-            self.btn_master_large.color = get_color_from_hex("#FFFFFF")
 
     def on_request_code(self, *_):
         phone = self.input_phone.text.strip().lstrip("+")
@@ -761,21 +660,6 @@ class ConnectScreen(Screen):
             Clipboard.put(c)
             self.btn_copy.text = "Copied!"
             Clock.schedule_once(lambda dt: setattr(self.btn_copy, "text", "Copy"), 2)
-
-    def on_status_change(self, s_str):
-        old_connected = self.is_connected
-        if "DISCONNECTED" in s_str or "STOPPED" in s_str:
-            self.is_connected = False
-            self.lbl_code.text = "------"
-            self.lbl_qr_sub.text = "QR code will appear here when ready for link."
-        elif "CONNECTED" in s_str:
-            self.is_connected = True
-            self.lbl_code.text = "LINKED"
-            self.lbl_qr_sub.text = "Connected to WhatsApp servers"
-        
-        self.on_engine_state_change(self.root.engine_state)
-        if old_connected != self.is_connected:
-            self.refresh_layout()
 
     def set_qr(self, path_or_str):
         if os.path.exists(path_or_str):
@@ -804,10 +688,12 @@ class PluginsScreen(Screen):
         )
         self.lbl_title.bind(size=self.lbl_title.setter('text_size'))
 
-        btn_add = Factory.PrimaryButton(text="+ Add", size_hint=(None, None), size=(dp(75), dp(38)))
+        btn_add = Factory.PrimaryButton(text="+ Add", size_hint=(None, None), size=(dp(70), dp(38)))
         btn_add.bind(on_release=lambda *_: self.open_editor())
 
-        btn_reload = Factory.SecondaryButton(text="Reload", size_hint=(None, None), size=(dp(80), dp(38)))
+        btn_reload = Factory.SecondaryButton(text="↻", size_hint=(None, None), size=(dp(46), dp(38)))
+        btn_reload.font_size = "17sp"
+        btn_reload.bold = True
         btn_reload.bind(on_release=lambda *_: self.root.send("/reload"))
 
         row.add_widget(self.lbl_title)
@@ -834,17 +720,8 @@ class PluginsScreen(Screen):
         dlg.open()
 
     def edit_plugin(self, name):
+        code = self.root.get_plugin_source(name)
         fname = f"{name}.py"
-        fpath = os.path.join(plugin_dir(), fname)
-        code = ""
-        if os.path.exists(fpath):
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    code = f.read()
-            except Exception as e:
-                code = f"# Error reading file {fname}: {e}\n"
-        else:
-            code = f"# Plugin: {name}\nNAME = '{name}'\n\nasync def on_message(ctx, msg):\n    pass\n"
         self.open_editor(filename=fname, initial_code=code)
 
     def update_plugins(self, plugin_data_str):
@@ -897,18 +774,18 @@ class PluginsScreen(Screen):
             btn_toggle.bind(on_release=lambda _, n=name: self.root.send("/toggle_plugin", n))
             row.add_widget(btn_toggle)
 
-            # In-app Code Editor button
-            btn_edit = Factory.EditPluginBtn(text="Edit")
+            # In-app Code Editor symbol button (pencil icon)
+            btn_edit = Factory.SymbolEditBtn(text="✎")
             btn_edit.bind(on_release=lambda _, n=name: self.edit_plugin(n))
             row.add_widget(btn_edit)
 
-            # Delete button
-            btn_del = Factory.DeletePluginBtn(text="Del")
+            # Delete symbol button (cross icon)
+            btn_del = Factory.SymbolDeleteBtn(text="✕")
             btn_del.bind(on_release=lambda _, n=name: self.root.send("/delete_plugin", n))
             row.add_widget(btn_del)
 
             # Subtitle description
-            sub_text = "[color=10B981]Active & Handling Messages[/color]" if is_on else "[color=64748B]Disabled (Muted)[/color]"
+            sub_text = "[color=10B981]● Active & Handling Messages[/color]" if is_on else "[color=64748B]○ Disabled (Muted)[/color]"
             lbl_sub = Label(
                 text=sub_text,
                 markup=True,
@@ -959,7 +836,7 @@ class QuickSendScreen(Screen):
         btn_send = Factory.PrimaryButton(text="Queue Outbound Message")
         btn_send.bind(on_release=self.on_send)
 
-        btn_ping_self = Factory.SecondaryButton(text="Ping Myself (Test Bot)")
+        btn_ping_self = Factory.SecondaryButton(text="💬 Ping Myself (Test Bot)")
         btn_ping_self.bind(on_release=lambda *_: self.root.send("/send", "self", "!ping"))
 
         self.lbl_feedback = Label(
@@ -985,57 +862,72 @@ class QuickSendScreen(Screen):
         if target and msg:
             self.lbl_feedback.color = get_color_from_hex("#10B981")
             self.root.send("/send", target, msg)
-            self.lbl_feedback.text = f"Dispatched to queue for {target}"
+            self.lbl_feedback.text = f"✓ Dispatched to queue for {target}"
             self.input_msg.text = ""
             Clock.schedule_once(lambda dt: setattr(self.lbl_feedback, "text", ""), 4)
         else:
             self.lbl_feedback.color = get_color_from_hex("#EF4444")
-            self.lbl_feedback.text = "Please enter both target number and message."
+            self.lbl_feedback.text = "⚠️ Please enter both target number and message."
             Clock.schedule_once(lambda dt: setattr(self.lbl_feedback, "text", ""), 3)
 
 
 class ConsoleScreen(Screen):
-    """Live terminal logs from foreground service and plugins."""
+    """Live terminal logs with pagination, log file persistence, and storage export."""
 
     def __init__(self, app_root, **kw):
         super().__init__(name="console", **kw)
         self.root = app_root
         self.auto_scroll = True
+        self.all_logs = []
+        self.current_page = 1
+        self.page_size = 50
 
         layout = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
 
-        # Header - Optimized to avoid any wrapping or clipping on mobile screens
+        # Header - Pagination & Export Toolbar
         header = Factory.Card()
-        row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+
         title = Label(
-            text="Console", font_size="16sp", bold=True,
+            text="Console", font_size="15sp", bold=True,
             color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle",
-            size_hint_x=None, width=dp(75)
+            size_hint_x=None, width=dp(65)
         )
         title.bind(size=title.setter('text_size'))
 
-        self.btn_scroll = Factory.SecondaryButton(text="Auto: ON", size_hint=(None, None), size=(dp(82), dp(36)))
-        self.btn_scroll.font_size = "11sp"
+        btn_prev = Factory.SecondaryButton(text="◀", size_hint=(None, None), size=(dp(36), dp(34)))
+        btn_prev.bind(on_release=self.prev_page)
+
+        self.lbl_page = Label(text="1/1", font_size="11sp", bold=True,
+                              color=get_color_from_hex("#94A3B8"), size_hint_x=None, width=dp(42))
+
+        btn_next = Factory.SecondaryButton(text="▶", size_hint=(None, None), size=(dp(36), dp(34)))
+        btn_next.bind(on_release=self.next_page)
+
+        self.btn_scroll = Factory.SecondaryButton(text="Auto: ON", size_hint=(None, None), size=(dp(72), dp(34)))
+        self.btn_scroll.font_size = "10sp"
         self.btn_scroll.bind(on_release=self.toggle_scroll)
 
-        self.btn_copy = Factory.SecondaryButton(text="Copy", size_hint=(None, None), size=(dp(58), dp(36)))
-        self.btn_copy.font_size = "11sp"
-        self.btn_copy.bind(on_release=self.copy_logs)
+        btn_export = Factory.SecondaryButton(text="Export", size_hint=(None, None), size=(dp(54), dp(34)))
+        btn_export.font_size = "10sp"
+        btn_export.bind(on_release=self.export_logs)
 
-        btn_clear = Factory.SecondaryButton(text="Clear", size_hint=(None, None), size=(dp(58), dp(36)))
-        btn_clear.font_size = "11sp"
-        btn_clear.bind(on_release=lambda *_: setattr(self.log_label, "text", ""))
+        btn_clear = Factory.SecondaryButton(text="Clear", size_hint=(None, None), size=(dp(46), dp(34)))
+        btn_clear.font_size = "10sp"
+        btn_clear.bind(on_release=self.clear_logs)
 
         row.add_widget(title)
+        row.add_widget(btn_prev)
+        row.add_widget(self.lbl_page)
+        row.add_widget(btn_next)
         row.add_widget(self.btn_scroll)
-        row.add_widget(self.btn_copy)
+        row.add_widget(btn_export)
         row.add_widget(btn_clear)
         header.add_widget(row)
         layout.add_widget(header)
 
         # Monospace Terminal Card
         terminal_card = Factory.TerminalCard()
-
         self.scroll = ScrollView(size_hint=(1, 1))
         self.log_label = Label(
             text="[System initialized. Listening for engine events...]",
@@ -1053,26 +945,200 @@ class ConsoleScreen(Screen):
 
         self.add_widget(layout)
 
+    def total_pages(self):
+        return max(1, (len(self.all_logs) + self.page_size - 1) // self.page_size)
+
+    def render_page(self):
+        tot = self.total_pages()
+        self.current_page = max(1, min(self.current_page, tot))
+        self.lbl_page.text = f"{self.current_page}/{tot}"
+        start = (self.current_page - 1) * self.page_size
+        page_lines = self.all_logs[start : start + self.page_size]
+        self.log_label.text = "\n".join(page_lines) if page_lines else "[No logs on this page]"
+        if self.auto_scroll and self.current_page == tot:
+            Clock.schedule_once(lambda dt: setattr(self.scroll, "scroll_y", 0), 0.05)
+
+    def prev_page(self, *_):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.auto_scroll = False
+            self.btn_scroll.text = "Auto: OFF"
+            self.render_page()
+
+    def next_page(self, *_):
+        if self.current_page < self.total_pages():
+            self.current_page += 1
+            self.render_page()
+
     def toggle_scroll(self, *_):
         self.auto_scroll = not self.auto_scroll
         self.btn_scroll.text = f"Auto: {'ON' if self.auto_scroll else 'OFF'}"
+        if self.auto_scroll:
+            self.current_page = self.total_pages()
+            self.render_page()
 
-    def copy_logs(self, *_):
-        txt = self.log_label.text.strip()
-        if txt:
-            Clipboard.put(txt)
-            self.btn_copy.text = "Copied!"
-            Clock.schedule_once(lambda dt: setattr(self.btn_copy, "text", "Copy"), 2)
+    def clear_logs(self, *_):
+        self.all_logs.clear()
+        self.current_page = 1
+        self.render_page()
+
+    def export_logs(self, *_):
+        ok, res = export_activity_log()
+        title = "Logs Exported" if ok else "Export Failed"
+        msg = f"Saved to:\n{res}" if ok else f"Error: {res}"
+        InfoDialog(title, msg).open()
 
     def append_log(self, text):
-        clean_text = clean_display_text(str(text))
         t_str = time.strftime("%H:%M:%S")
-        line = f"[{t_str}] {clean_text}"
-        current = self.log_label.text
-        updated = (current + "\n" + line)[-6000:]
-        self.log_label.text = updated
+        line = f"[{t_str}] {text}"
+        self.all_logs.append(line)
         if self.auto_scroll:
-            Clock.schedule_once(lambda dt: setattr(self.scroll, "scroll_y", 0), 0.05)
+            self.current_page = self.total_pages()
+        self.render_page()
+
+
+class SettingsScreen(Screen):
+    """Configuration, Ghost Mode, Auto-Wipe, Service Shutdown, and Session Import/Export."""
+
+    def __init__(self, app_root, **kw):
+        super().__init__(name="settings", **kw)
+        self.root = app_root
+        self.auto_wipe_active = True
+        self.stealth_read_active = True
+
+        scroll = ScrollView(size_hint=(1, 1))
+        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(14), size_hint_y=None)
+        content.bind(minimum_height=content.setter("height"))
+
+        # Card 1: Ghost & Privacy Mode
+        card_privacy = Factory.Card()
+        lbl_p_title = Label(text="Ghost & Privacy Controls", font_size="15sp", bold=True,
+                            color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left")
+        lbl_p_title.bind(size=lbl_p_title.setter('text_size'))
+
+        # Row 1: Auto-Wipe Toggle
+        row_wipe = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
+        lbl_wipe = Label(text="Auto-Wipe RAM Cache (24h)", font_size="13sp", color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle")
+        lbl_wipe.bind(size=lbl_wipe.setter('text_size'))
+        self.btn_auto_wipe = Factory.ToggleActiveBtn(text="ON")
+        self.btn_auto_wipe.bind(on_release=self.toggle_auto_wipe)
+        row_wipe.add_widget(lbl_wipe)
+        row_wipe.add_widget(self.btn_auto_wipe)
+
+        # Row 2: Manual Flush button
+        btn_flush = Factory.SecondaryButton(text="🧹 Wipe Intercepted Cache Now")
+        btn_flush.bind(on_release=lambda *_: self.root.send("/wipe_cache"))
+
+        # Row 3: Stealth Read Toggle
+        row_stealth = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
+        lbl_stealth = Label(text="Stealth Mode (No Blue Ticks)", font_size="13sp", color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle")
+        lbl_stealth.bind(size=lbl_stealth.setter('text_size'))
+        self.btn_stealth = Factory.ToggleActiveBtn(text="ON")
+        self.btn_stealth.bind(on_release=self.toggle_stealth)
+        row_stealth.add_widget(lbl_stealth)
+        row_stealth.add_widget(self.btn_stealth)
+
+        card_privacy.add_widget(lbl_p_title)
+        card_privacy.add_widget(row_wipe)
+        card_privacy.add_widget(btn_flush)
+        card_privacy.add_widget(row_stealth)
+
+        # Card 2: Engine & Service Lifecycle
+        card_engine = Factory.Card()
+        lbl_e_title = Label(text="Service & Power Management", font_size="15sp", bold=True,
+                            color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left")
+        lbl_e_title.bind(size=lbl_e_title.setter('text_size'))
+
+        btn_battery = Factory.SecondaryButton(text="⚡ Battery Exemption Setting")
+        btn_battery.bind(on_release=lambda *_: ask_ignore_battery_optimizations())
+
+        btn_kill_svc = Factory.DangerButton(text="⏹ Terminate Background Service (Complete Offline)")
+        btn_kill_svc.bind(on_release=self.terminate_service)
+
+        card_engine.add_widget(lbl_e_title)
+        card_engine.add_widget(btn_battery)
+        card_engine.add_widget(btn_kill_svc)
+
+        # Card 3: Session Backup & Restore
+        card_session = Factory.Card()
+        lbl_s_title = Label(text="Session Backup & Transfer", font_size="15sp", bold=True,
+                            color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left")
+        lbl_s_title.bind(size=lbl_s_title.setter('text_size'))
+
+        btn_export = Factory.SecondaryButton(text="💾 Export Session (.zip)")
+        btn_export.bind(on_release=self.export_session)
+
+        lbl_import_hint = Label(text="Restore session from backup path:", font_size="11sp",
+                                color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(22), halign="left")
+        lbl_import_hint.bind(size=lbl_import_hint.setter('text_size'))
+
+        self.input_import = Factory.ModernInput()
+        self.input_import.hint_text = "/sdcard/Download/WA_Session_...zip"
+
+        btn_import = Factory.SecondaryButton(text="Restore & Connect")
+        btn_import.bind(on_release=self.import_session)
+
+        card_session.add_widget(lbl_s_title)
+        card_session.add_widget(btn_export)
+        card_session.add_widget(lbl_import_hint)
+        card_session.add_widget(self.input_import)
+        card_session.add_widget(btn_import)
+
+        # Card 4: Danger Zone (Logout)
+        card_danger = Factory.Card()
+        lbl_d_title = Label(text="Account Disconnect", font_size="15sp", bold=True,
+                            color=get_color_from_hex("#EF4444"), size_hint_y=None, height=dp(26), halign="left")
+        lbl_d_title.bind(size=lbl_d_title.setter('text_size'))
+
+        btn_logout = Factory.DangerButton(text="⚠️ Logout & Reset WhatsApp Session")
+        btn_logout.bind(on_release=self.on_logout)
+
+        card_danger.add_widget(lbl_d_title)
+        card_danger.add_widget(btn_logout)
+
+        content.add_widget(card_privacy)
+        content.add_widget(card_engine)
+        content.add_widget(card_session)
+        content.add_widget(card_danger)
+
+        scroll.add_widget(content)
+        self.add_widget(scroll)
+
+    def toggle_auto_wipe(self, *_):
+        self.auto_wipe_active = not self.auto_wipe_active
+        self.btn_auto_wipe.text = "ON" if self.auto_wipe_active else "OFF"
+        self.root.on_log(f"Auto-wipe {'enabled' if self.auto_wipe_active else 'disabled'}.")
+
+    def toggle_stealth(self, *_):
+        self.stealth_read_active = not self.stealth_read_active
+        self.btn_stealth.text = "ON" if self.stealth_read_active else "OFF"
+        self.root.on_log(f"Stealth Read Mode {'enabled' if self.stealth_read_active else 'disabled'}.")
+
+    def terminate_service(self, *_):
+        self.root.send("/kill_service")
+        stop_android_service()
+        self.root.on_log("Background service terminated by user request.")
+
+    def export_session(self, *_):
+        ok, res = export_session_zip()
+        title = "Session Exported" if ok else "Export Failed"
+        msg = f"Archive saved to:\n{res}" if ok else f"Error: {res}"
+        InfoDialog(title, msg).open()
+
+    def import_session(self, *_):
+        path = self.input_import.text.strip()
+        ok, res = import_session_zip(path)
+        title = "Session Restored" if ok else "Restore Failed"
+        msg = res if ok else f"Error: {res}"
+        InfoDialog(title, msg).open()
+        if ok:
+            self.root.send("/start_bot")
+
+    def on_logout(self, *_):
+        self.root.send("/clear_session")
+        self.root.is_connected = False
+        self.root.update_tab_bar()
+        self.root.switch_tab("connect")
 
 
 # --------------------------------------------------------------------------- Root Layout
@@ -1081,6 +1147,8 @@ class Root(BoxLayout):
         try:
             super().__init__(**kw)
             self.engine_state = "running"
+            self.is_connected = False
+            self.tabs = {}
 
             # Top Bar
             top_bar = BoxLayout(size_hint_y=None, height=dp(56), padding=[dp(12), dp(6), dp(12), dp(6)], spacing=dp(8))
@@ -1093,12 +1161,12 @@ class Root(BoxLayout):
 
             # Live Status Pill
             self.status_pill = Factory.StatusPill()
-            self.lbl_pill = Label(text="CONNECTING", font_size="11sp", bold=True,
+            self.lbl_pill = Label(text="● CONNECTING", font_size="11sp", bold=True,
                                   color=get_color_from_hex("#F59E0B"))
             self.status_pill.add_widget(self.lbl_pill)
 
-            # Master Header Quick Start/Stop Toggle Button
-            self.btn_master = Factory.MasterHeaderBtn(text="STOP")
+            # Master Header Quick Start/Stop Toggle Button with crisp symbols
+            self.btn_master = Factory.MasterHeaderBtn(text="⏹")
             self.btn_master.bind(on_release=self.on_master_toggle)
 
             top_bar.add_widget(self.title_lbl)
@@ -1108,13 +1176,6 @@ class Root(BoxLayout):
 
             # Tab Navigation Row
             self.tab_bar = BoxLayout(size_hint_y=None, height=dp(46), padding=[dp(8), dp(2), dp(8), dp(4)], spacing=dp(6))
-            self.tabs = {}
-            for tab_id, tab_label in [("connect", "Connect"), ("plugins", "Plugins"),
-                                      ("send", "Quick Send"), ("console", "Console")]:
-                btn = TabButton(text=tab_label)
-                btn.bind(on_release=lambda _, t=tab_id: self.switch_tab(t))
-                self.tabs[tab_id] = btn
-                self.tab_bar.add_widget(btn)
             self.add_widget(self.tab_bar)
 
             # Screen Manager
@@ -1123,15 +1184,20 @@ class Root(BoxLayout):
             self.screen_plugins = PluginsScreen(self)
             self.screen_send = QuickSendScreen(self)
             self.screen_console = ConsoleScreen(self)
+            self.screen_settings = SettingsScreen(self)
 
             self.sm.add_widget(self.screen_connect)
             self.sm.add_widget(self.screen_plugins)
             self.sm.add_widget(self.screen_send)
             self.sm.add_widget(self.screen_console)
+            self.sm.add_widget(self.screen_settings)
             self.add_widget(self.sm)
 
-            # Default Active Tab
-            self.switch_tab("connect")
+            # Build initial Tab Bar (Connect visible before pairing)
+            self.update_tab_bar()
+
+            # Seed bundled plugins into user plugin dir on first launch
+            self.sync_bundled_plugins()
 
             # OSC Setup
             self.client = OSCClient(HOST, SVC_PORT, encoding="utf8")
@@ -1158,6 +1224,41 @@ class Root(BoxLayout):
             log_exception(f"Root.__init__ failed: {traceback.format_exc()}")
             raise
 
+    def update_tab_bar(self):
+        """Dynamic tab bar: hides Connect tab once paired, shows Settings."""
+        self.tab_bar.clear_widgets()
+        self.tabs.clear()
+
+        if self.is_connected:
+            tab_defs = [
+                ("plugins", "Plugins"),
+                ("send", "Quick Send"),
+                ("console", "Console"),
+                ("settings", "⚙ Settings"),
+            ]
+            default_tab = "plugins"
+        else:
+            tab_defs = [
+                ("connect", "Connect"),
+                ("plugins", "Plugins"),
+                ("send", "Quick Send"),
+                ("console", "Console"),
+                ("settings", "⚙ Settings"),
+            ]
+            default_tab = "connect"
+
+        for tab_id, tab_label in tab_defs:
+            btn = TabButton(text=tab_label)
+            btn.bind(on_release=lambda _, t=tab_id: self.switch_tab(t))
+            self.tabs[tab_id] = btn
+            self.tab_bar.add_widget(btn)
+
+        cur = self.sm.current
+        if cur not in self.tabs:
+            self.switch_tab(default_tab)
+        else:
+            self.switch_tab(cur)
+
     def switch_tab(self, tab_id):
         self.sm.current = tab_id
         for tid, btn in self.tabs.items():
@@ -1173,35 +1274,39 @@ class Root(BoxLayout):
         st = str(state[0]).lower() if state else "running"
         self.engine_state = st
         if st == "running":
-            self.btn_master.text = "STOP"
+            self.btn_master.text = "⏹"
             self.btn_master.is_running = True
         elif st == "stopped":
-            self.btn_master.text = "START"
+            self.btn_master.text = "▶"
             self.btn_master.is_running = False
         elif st == "connecting":
-            self.btn_master.text = "WAIT..."
+            self.btn_master.text = "⏳"
             self.btn_master.is_running = True
-        self.screen_connect.on_engine_state_change(st)
 
     def on_status(self, *s):
         s_val = s[0] if s else ""
         s_str = str(s_val).upper()
-        if "DISCONNECTED" in s_str:
-            self.lbl_pill.text = "OFFLINE"
+        old_connected = self.is_connected
+
+        if "DISCONNECTED" in s_str or "STOPPED" in s_str:
+            self.is_connected = False
+            self.lbl_pill.text = "○ OFFLINE"
             self.lbl_pill.color = get_color_from_hex("#EF4444")
-        elif "STOPPED" in s_str:
-            self.lbl_pill.text = "PAUSED"
-            self.lbl_pill.color = get_color_from_hex("#94A3B8")
         elif "CONNECTED" in s_str:
-            self.lbl_pill.text = "CONNECTED"
+            self.is_connected = True
+            self.lbl_pill.text = "● CONNECTED"
             self.lbl_pill.color = get_color_from_hex("#10B981")
         elif "PAIR" in s_str:
-            self.lbl_pill.text = "PAIRED"
+            self.is_connected = True
+            self.lbl_pill.text = "● PAIRED"
             self.lbl_pill.color = get_color_from_hex("#10B981")
         else:
-            self.lbl_pill.text = f"{s_str[:12]}"
+            self.is_connected = False
+            self.lbl_pill.text = f"● {s_str[:12]}"
             self.lbl_pill.color = get_color_from_hex("#F59E0B")
-        self.screen_connect.on_status_change(s_str)
+
+        if old_connected != self.is_connected:
+            self.update_tab_bar()
 
     def on_pair_code(self, *code):
         c = code[0] if code else ""
@@ -1225,16 +1330,55 @@ class Root(BoxLayout):
         except Exception as e:
             self.on_log(f"OSC Send failed: {e}")
 
+    def sync_bundled_plugins(self):
+        """Ensure all bundled plugins are copied to user plugin directory for in-app editing."""
+        try:
+            bundle_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+            target_dir = plugin_dir()
+            if os.path.isdir(bundle_dir):
+                for f in os.listdir(bundle_dir):
+                    if f.endswith(".py") and not f.startswith("_"):
+                        dst = os.path.join(target_dir, f)
+                        if not os.path.exists(dst):
+                            shutil.copy2(os.path.join(bundle_dir, f), dst)
+        except Exception as e:
+            self.on_log(f"Plugin sync error: {e}")
+
+    def get_plugin_source(self, name: str) -> str:
+        """Read source code of any plugin (user folder first, fallback to bundle)."""
+        fname = f"{name}.py"
+        # 1. Check user plugin dir
+        p1 = os.path.join(plugin_dir(), fname)
+        if os.path.exists(p1):
+            try:
+                with open(p1, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception as e:
+                return f"# Error reading {p1}: {e}\n"
+
+        # 2. Check bundled plugins
+        bundle_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+        p2 = os.path.join(bundle_dir, fname)
+        if os.path.exists(p2):
+            try:
+                with open(p2, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception as e:
+                return f"# Error reading {p2}: {e}\n"
+
+        return f"# Plugin: {name}\nNAME = '{name}'\n\nasync def on_message(ctx, msg):\n    pass\n"
+
     def save_plugin(self, dialog, name, code):
+        """Write modified plugin to storage and immediately hot-reload."""
         try:
             target = os.path.join(plugin_dir(), name)
             with open(target, "w", encoding="utf-8") as f:
                 f.write(code)
-            self.on_log(f"Plugin {name} installed successfully.")
+            self.on_log(f"Plugin {name} saved successfully.")
             self.send("/reload")
             dialog.dismiss()
         except Exception as e:
-            self.on_log(f"Failed to install {name}: {e}")
+            self.on_log(f"Failed to save {name}: {e}")
 
 
 class WaApp(App):
