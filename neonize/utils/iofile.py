@@ -1,11 +1,11 @@
+import asyncio
 import io
 import os
 import re
 import tempfile
-import typing
+import weakref
 import zipfile
 from pathlib import Path
-from typing import Optional
 
 import httpx
 import requests
@@ -13,9 +13,20 @@ import requests
 from .log import log
 
 URL_MATCH = re.compile(r"^https?://")
+_DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36",
+}
+_SYNC_SESSION = requests.Session()
+_SYNC_SESSION.headers.update(_DEFAULT_HEADERS)
 
 
-def get_bytes_from_name_or_url(args: typing.Union[str, bytes]) -> bytes:
+def _read_file_bytes(path: str) -> bytes:
+    with open(path, "rb") as file:
+        return file.read()
+
+
+def get_bytes_from_name_or_url(args: str | bytes) -> bytes:
     """Gets bytes from either a file name or a URL.
 
     :param args: Either a file name (str) or binary data (bytes).
@@ -23,21 +34,30 @@ def get_bytes_from_name_or_url(args: typing.Union[str, bytes]) -> bytes:
     :return: The bytes extracted from the specified file name or URL.
     :rtype: bytes
     """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36",
-    }
     if isinstance(args, str):
         if URL_MATCH.match(args):
-            return requests.get(args, headers=headers).content
-        else:
-            with open(args, "rb") as file:
-                return file.read()
-    else:
-        return args
+            resp = _SYNC_SESSION.get(args, timeout=30)
+            resp.raise_for_status()
+            return resp.content
+        return _read_file_bytes(args)
+    return args
 
 
-async def get_bytes_from_name_or_url_async(args: typing.Union[str, bytes]) -> bytes:
+_ASYNC_HTTP_CLIENTS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _get_async_http_client() -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    client = _ASYNC_HTTP_CLIENTS.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(timeout=30.0)
+        _ASYNC_HTTP_CLIENTS[loop] = client
+    return client
+
+
+async def get_bytes_from_name_or_url_async(args: str | bytes) -> bytes:
     """Gets bytes from either a file name or a URL.
 
     :param args: Either a file name (str) or binary data (bytes).
@@ -45,22 +65,17 @@ async def get_bytes_from_name_or_url_async(args: typing.Union[str, bytes]) -> by
     :return: The bytes extracted from the specified file name or URL.
     :rtype: bytes
     """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36",
-    }
     if isinstance(args, str):
         if URL_MATCH.match(args):
-            async with httpx.AsyncClient(timeout=None) as client:
-                return (await client.get(args, headers=headers)).content
-        else:
-            with open(args, "rb") as file:
-                return file.read()
-    else:
-        return args
+            client = _get_async_http_client()
+            resp = await client.get(args, headers=_DEFAULT_HEADERS)
+            resp.raise_for_status()
+            return resp.content
+        return await asyncio.to_thread(_read_file_bytes, args)
+    return args
 
 
-def write_from_bytesio_or_filename(fn_or_bytesio: typing.Union[io.BytesIO, str], data: bytes):
+def write_from_bytesio_or_filename(fn_or_bytesio: io.BytesIO | str, data: bytes):
     """Writes bytes to either a BytesIO object or a file specified by its name.
 
     :param fn_or_bytesio: Either a BytesIO object or the name of the file to write data to.
@@ -78,9 +93,9 @@ def write_from_bytesio_or_filename(fn_or_bytesio: typing.Union[io.BytesIO, str],
 class TemporaryFile:
     def __init__(
         self,
-        prefix: Optional[str] = None,
-        suffix: Optional[str] = None,
-        dir: Optional[str] = None,
+        prefix: str | None = None,
+        suffix: str | None = None,
+        dir: str | None = None,
         touch: bool = True,
     ) -> None:
         """
@@ -103,15 +118,23 @@ class TemporaryFile:
             params["suffix"] = suffix
         if dir is not None:
             params["dir"] = dir
-        self.path = Path(tempfile.mktemp(**params))
-        if touch:
-            self.path.touch()
+        fd, name = tempfile.mkstemp(**params)
+        os.close(fd)
+        self.path = Path(name)
+        if not touch:
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        os.remove(self.path)
+        try:
+            os.remove(self.path)
+        except FileNotFoundError:
+            pass
         log.debug("exc_type: %r, exc_value: %r, traceback: %r" % (exc_type, exc_value, traceback))
 
 

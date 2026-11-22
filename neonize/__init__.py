@@ -1,11 +1,8 @@
-try:
-    import core._shims
-except Exception:
-    pass
-
 from .client import NewClient
 from .events import Event
 from .utils.ffmpeg import FFmpeg
 from .utils.iofile import TemporaryFile
-__version__ = '0.4.3.post0'
-__all__ = ('NewClient', 'FFmpeg', 'TemporaryFile', 'Event')
+from .utils.message import extract_text
+
+__version__ = "0.12.4"
+__all__ = ("Event", "FFmpeg", "NewClient", "TemporaryFile", "extract_text")

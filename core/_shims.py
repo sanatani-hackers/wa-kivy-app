@@ -116,10 +116,16 @@ def setup_shims():
             def new(*a, **kw):
                 return ImgObj()
 
+        class ImageFilterMod:
+            BLUR = "BLUR"
+            GaussianBlur = lambda *a, **kw: None
+
         pil.Image = ImageMod
+        pil.ImageFilter = ImageFilterMod
         pil.ImageSequence = type("ImageSequence", (), {"Iterator": lambda *a: []})
         sys.modules["PIL"] = pil
         sys.modules["PIL.Image"] = ImageMod
+        sys.modules["PIL.ImageFilter"] = ImageFilterMod
         sys.modules["PIL.ImageSequence"] = pil.ImageSequence
 
     # 4. httpx fallback

@@ -3,50 +3,83 @@ from __future__ import annotations
 import asyncio
 import ctypes
 from asyncio import Event as IOEvent
-from typing import TYPE_CHECKING, Awaitable, Callable, Coroutine, Dict, Type, TypeVar
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import TYPE_CHECKING, TypeVar
 
 import segno
 from google.protobuf.message import Message
 
 from ..events import EVENT_TO_INT, INT_TO_EVENT, UnsupportedEvent, log
 from ..proto.Neonize_pb2 import QR as QREv
+from ..proto.Neonize_pb2 import AppState as AppStateEv
+from ..proto.Neonize_pb2 import AppStateSyncComplete as AppStateSyncCompleteEv
+from ..proto.Neonize_pb2 import AppStateSyncError as AppStateSyncErrorEv
 from ..proto.Neonize_pb2 import BlocklistChange as BlocklistChangeEv
 from ..proto.Neonize_pb2 import BlocklistEvent as BlocklistEv
+from ..proto.Neonize_pb2 import BusinessName as BusinessNameEv
 from ..proto.Neonize_pb2 import CallAccept as CallAcceptEv
 from ..proto.Neonize_pb2 import CallOffer as CallOfferEv
 from ..proto.Neonize_pb2 import CallOfferNotice as CallOfferNoticeEv
 from ..proto.Neonize_pb2 import CallPreAccept as CallPreAcceptEv
+from ..proto.Neonize_pb2 import CallReject as CallRejectEv
 from ..proto.Neonize_pb2 import CallRelayLatency as CallRelayLatencyEv
 from ..proto.Neonize_pb2 import CallTerminate as CallTerminateEv
 from ..proto.Neonize_pb2 import CallTransport as CallTransportEv
+from ..proto.Neonize_pb2 import CATRefreshError as CATRefreshErrorEv
+from ..proto.Neonize_pb2 import ChatArchive as ChatArchiveEv
+from ..proto.Neonize_pb2 import ChatClear as ChatClearEv
+from ..proto.Neonize_pb2 import ChatDelete as ChatDeleteEv
+from ..proto.Neonize_pb2 import ChatMarkAsRead as ChatMarkAsReadEv
+from ..proto.Neonize_pb2 import ChatMute as ChatMuteEv
+from ..proto.Neonize_pb2 import ChatPin as ChatPinEv
 from ..proto.Neonize_pb2 import ChatPresence as ChatPresenceEv
 from ..proto.Neonize_pb2 import ClientOutdated as ClientOutdatedEv
 from ..proto.Neonize_pb2 import Connected as ConnectedEv
 from ..proto.Neonize_pb2 import ConnectFailure as ConnectFailureEv
+from ..proto.Neonize_pb2 import ContactSync as ContactSyncEv
 from ..proto.Neonize_pb2 import Disconnected as DisconnectedEv
+from ..proto.Neonize_pb2 import FBCallEvent as FBCallEventEv
 from ..proto.Neonize_pb2 import GroupInfoEvent as GroupInfoEv
 from ..proto.Neonize_pb2 import HistorySync as HistorySyncEv
 from ..proto.Neonize_pb2 import IdentityChange as IdentityChangeEv
 from ..proto.Neonize_pb2 import JoinedGroup as JoinedGroupEv
 from ..proto.Neonize_pb2 import KeepAliveRestored as KeepAliveRestoredEv
 from ..proto.Neonize_pb2 import KeepAliveTimeout as KeepAliveTimeoutEv
+from ..proto.Neonize_pb2 import LabelAssociationChat as LabelAssociationChatEv
+from ..proto.Neonize_pb2 import LabelAssociationMessage as LabelAssociationMessageEv
+from ..proto.Neonize_pb2 import LabelEdit as LabelEditEv
 from ..proto.Neonize_pb2 import LoggedOut as LoggedOutEv
+from ..proto.Neonize_pb2 import ManualLoginReconnect as ManualLoginReconnectEv
+from ..proto.Neonize_pb2 import MediaRetry as MediaRetryEv
 from ..proto.Neonize_pb2 import Message as MessageEv
+from ..proto.Neonize_pb2 import MessageDeleteForMe as MessageDeleteForMeEv
+from ..proto.Neonize_pb2 import MessageStar as MessageStarEv
 from ..proto.Neonize_pb2 import NewsletterJoin as NewsletterJoinEv
 from ..proto.Neonize_pb2 import NewsletterLeave as NewsletterLeaveEv
 from ..proto.Neonize_pb2 import NewsletterLiveUpdate as NewsletterLiveUpdateEv
 from ..proto.Neonize_pb2 import NewsLetterMessageMeta as NewsLetterMessageMetaEv
+from ..proto.Neonize_pb2 import NewsletterMilestone as NewsletterMilestoneEv
 from ..proto.Neonize_pb2 import NewsletterMuteChange as NewsletterMuteChangeEv
+from ..proto.Neonize_pb2 import NotifyAccountReachoutTimelock as NotifyAccountReachoutTimelockEv
 from ..proto.Neonize_pb2 import OfflineSyncCompleted as OfflineSyncCompletedEv
 from ..proto.Neonize_pb2 import OfflineSyncPreview as OfflineSyncPreviewEv
+from ..proto.Neonize_pb2 import PairPasskeyConfirmation as PairPasskeyConfirmationEv
+from ..proto.Neonize_pb2 import PairPasskeyError as PairPasskeyErrorEv
 from ..proto.Neonize_pb2 import PairStatus as PairStatusEv
 from ..proto.Neonize_pb2 import Picture as PictureEv
 from ..proto.Neonize_pb2 import Presence as PresenceEv
+from ..proto.Neonize_pb2 import PushName as PushNameEv
+from ..proto.Neonize_pb2 import PushNameSetting as PushNameSettingEv
+from ..proto.Neonize_pb2 import QRScannedWithoutMultidevice as QRScannedWithoutMultideviceEv
 from ..proto.Neonize_pb2 import Receipt as ReceiptEv
+from ..proto.Neonize_pb2 import RotateADVSecret as RotateADVSecretEv
 from ..proto.Neonize_pb2 import StreamError as StreamErrorEv
 from ..proto.Neonize_pb2 import StreamReplaced as StreamReplacedEv
 from ..proto.Neonize_pb2 import TemporaryBan as TemporaryBanEv
+from ..proto.Neonize_pb2 import UnarchiveChatsSetting as UnarchiveChatsSettingEv
 from ..proto.Neonize_pb2 import UnknownCallEvent as UnknownCallEventEv
+from ..proto.Neonize_pb2 import UserAbout as UserAboutEv
+from ..proto.Neonize_pb2 import UserStatusMute as UserStatusMuteEv
 from ..proto.Neonize_pb2 import privacySettingsEvent as PrivacySettingsEv
 
 event_global_loop: asyncio.AbstractEventLoop | None = None
@@ -65,45 +98,77 @@ if TYPE_CHECKING:
 EventType = TypeVar("EventType", bound=Message)
 event = IOEvent()
 __all__ = [
-    "QREv",
-    "PairStatusEv",
-    "ConnectedEv",
-    "KeepAliveTimeoutEv",
-    "KeepAliveRestoredEv",
-    "LoggedOutEv",
-    "StreamReplacedEv",
-    "TemporaryBanEv",
-    "ConnectFailureEv",
-    "ClientOutdatedEv",
-    "StreamErrorEv",
-    "DisconnectedEv",
-    "HistorySyncEv",
-    "NewsLetterMessageMetaEv",
-    "MessageEv",
-    "ReceiptEv",
-    "ChatPresenceEv",
-    "PresenceEv",
-    "JoinedGroupEv",
-    "GroupInfoEv",
-    "PictureEv",
-    "IdentityChangeEv",
-    "PrivacySettingsEv",
-    "OfflineSyncPreviewEv",
-    "OfflineSyncCompletedEv",
-    "BlocklistEv",
+    "AppStateEv",
+    "AppStateSyncCompleteEv",
+    "AppStateSyncErrorEv",
     "BlocklistChangeEv",
+    "BlocklistEv",
+    "BusinessNameEv",
+    "CATRefreshErrorEv",
+    "CallAcceptEv",
+    "CallOfferEv",
+    "CallOfferNoticeEv",
+    "CallPreAcceptEv",
+    "CallRejectEv",
+    "CallRelayLatencyEv",
+    "ChatArchiveEv",
+    "ChatMarkAsReadEv",
+    "ChatMuteEv",
+    "ChatPinEv",
+    "CallTerminateEv",
+    "CallTransportEv",
+    "ChatClearEv",
+    "ChatDeleteEv",
+    "ChatPresenceEv",
+    "ClientOutdatedEv",
+    "ConnectFailureEv",
+    "ConnectedEv",
+    "ContactSyncEv",
+    "DisconnectedEv",
+    "FBCallEventEv",
+    "GroupInfoEv",
+    "HistorySyncEv",
+    "IdentityChangeEv",
+    "JoinedGroupEv",
+    "KeepAliveRestoredEv",
+    "KeepAliveTimeoutEv",
+    "LabelAssociationChatEv",
+    "LabelAssociationMessageEv",
+    "LabelEditEv",
+    "LoggedOutEv",
+    "ManualLoginReconnectEv",
+    "MediaRetryEv",
+    "MessageDeleteForMeEv",
+    "MessageEv",
+    "MessageStarEv",
+    "NewsLetterMessageMetaEv",
     "NewsletterJoinEv",
     "NewsletterLeaveEv",
-    "NewsletterMuteChangeEv",
     "NewsletterLiveUpdateEv",
-    "CallOfferEv",
-    "CallAcceptEv",
-    "CallPreAcceptEv",
-    "CallTransportEv",
-    "CallOfferNoticeEv",
-    "CallRelayLatencyEv",
-    "CallTerminateEv",
+    "NewsletterMilestoneEv",
+    "NewsletterMuteChangeEv",
+    "NotifyAccountReachoutTimelockEv",
+    "OfflineSyncCompletedEv",
+    "OfflineSyncPreviewEv",
+    "PairPasskeyConfirmationEv",
+    "PairPasskeyErrorEv",
+    "PairStatusEv",
+    "PictureEv",
+    "PresenceEv",
+    "PrivacySettingsEv",
+    "PushNameEv",
+    "PushNameSettingEv",
+    "QREv",
+    "QRScannedWithoutMultideviceEv",
+    "ReceiptEv",
+    "RotateADVSecretEv",
+    "StreamErrorEv",
+    "StreamReplacedEv",
+    "TemporaryBanEv",
+    "UnarchiveChatsSettingEv",
     "UnknownCallEventEv",
+    "UserAboutEv",
+    "UserStatusMuteEv",
 ]
 
 
@@ -118,7 +183,7 @@ class Event:
         """
         self.client = client
         self.blocking_func = self.paircode(self.default_paircode_cb)
-        self.list_func: Dict[int, Callable[[NewAClient, Message], Coroutine[None, None, None]]] = {}
+        self.list_func: dict[int, Callable[[NewAClient, Message], Coroutine[None, None, None]]] = {}
         self._qr = self.__onqr
 
     def execute(self, uuid: int, binary: int, size: int, code: int):
@@ -131,11 +196,10 @@ class Event:
         :param code: The index of the function to be executed from the list of functions.
         :type code: int
         """
-        if code not in INT_TO_EVENT:
+        event_cls = INT_TO_EVENT.get(code)
+        if event_cls is None:
             raise UnsupportedEvent()
-        # print("key", code, "uuid", uuid, "size", size)
-        # print(f"Executing function for event code {ctypes.string_at(code, size)} with UUID {uuid}")
-        message = INT_TO_EVENT[code].FromString(ctypes.string_at(binary, size))
+        message = event_cls.FromString(ctypes.string_at(binary, size))
 
         if code == 0:
             self.client.me = message
@@ -144,9 +208,7 @@ class Event:
             self.client.connected = True
         handler = self.list_func.get(code)
         if handler is not None:
-            asyncio.run_coroutine_threadsafe(
-                handler(self.client, message), event_global_loop
-            )
+            asyncio.run_coroutine_threadsafe(handler(self.client, message), event_global_loop)
 
     async def __onqr(self, _: NewAClient, data_qr: bytes):
         """
@@ -208,7 +270,7 @@ class Event:
             log.info("Pair code: %s", data)
 
     def __call__(
-        self, event: Type[EventType]
+        self, event: type[EventType]
     ) -> Callable[[Callable[[NewAClient, EventType], Awaitable[None]]], None]:
         """
         Registers a callback function for a specific event type.
@@ -228,10 +290,10 @@ class Event:
 class EventsManager:
     def __init__(self, client_factory: ClientFactory):
         self.client_factory = client_factory
-        self.list_func: Dict[int, Callable[[NewAClient, Message], Awaitable[None]]] = {}
+        self.list_func: dict[int, Callable[[NewAClient, Message], Awaitable[None]]] = {}
 
     def __call__(
-        self, event: Type[EventType]
+        self, event: type[EventType]
     ) -> Callable[[Callable[[NewAClient, EventType], Awaitable[None]]], None]:
         """
         Registers a callback function for a specific event type.

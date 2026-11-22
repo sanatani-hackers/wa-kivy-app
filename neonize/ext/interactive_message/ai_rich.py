@@ -14,42 +14,35 @@ from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
-    List,
-    Literal,
-    Optional,
     Self,
-    Sequence,
-    Union,
 )
 
-from ...proto.waE2E.WAWebProtobufsE2E_pb2 import (
-    AIRichResponseMessage,
-    ContextInfo,
-    FutureProofMessage,
-    Message,
-    MessageContextInfo,
+from ...proto.waAICommon.WAWebProtobufsAICommon_pb2 import (
+    AIRichResponseUnifiedResponse,
+    BotMetadata,
+    BotSourcesMetadata,
+    ForwardedAIBotMessageInfo,
 )
 from ...proto.waAICommonDeprecated.WAAICommonDeprecated_pb2 import (
-    AIRichResponseCodeMetadata,
-    AIRichResponseContentItemsMetadata,
-    AIRichResponseGridImageMetadata,
-    AIRichResponseImageURL,
-    AIRichResponseSubMessage,
-    AIRichResponseSubMessageType,
-    AIRichResponseTableMetadata,
     AI_RICH_RESPONSE_CODE,
     AI_RICH_RESPONSE_CONTENT_ITEMS,
     AI_RICH_RESPONSE_GRID_IMAGE,
     AI_RICH_RESPONSE_TABLE,
     AI_RICH_RESPONSE_TEXT,
     AI_RICH_RESPONSE_TYPE_STANDARD,
+    AIRichResponseCodeMetadata,
+    AIRichResponseContentItemsMetadata,
+    AIRichResponseGridImageMetadata,
+    AIRichResponseImageURL,
+    AIRichResponseSubMessage,
+    AIRichResponseTableMetadata,
 )
-from ...proto.waAICommon.WAWebProtobufsAICommon_pb2 import (
-    AIRichResponseUnifiedResponse,
-    BotMetadata,
-    BotSourcesMetadata,
-    ForwardedAIBotMessageInfo,
+from ...proto.waE2E.WAWebProtobufsE2E_pb2 import (
+    AIRichResponseMessage,
+    ContextInfo,
+    FutureProofMessage,
+    Message,
+    MessageContextInfo,
 )
 from .base import CustomInteractiveMessage, InteractiveMessageBuilder
 
@@ -67,7 +60,7 @@ if TYPE_CHECKING:
 class _InlineEntity:
     key: str
     type: str  # "hyperlink", "citation", "latex"
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _extract_inline_entities(
@@ -382,7 +375,9 @@ def _build_table_metadata(table: list[list[str]]):
         raise ValueError("Table must have at least one row (header).")
     header, *data_rows = table
     max_len = max(len(header), *(len(r) for r in data_rows)) if data_rows else len(header)
-    normalize = lambda r: r + [""] * (max_len - len(r))
+
+    def normalize(r: list[str]) -> list[str]:
+        return r + [""] * (max_len - len(r))
 
     rows_proto = [
         AIRichResponseTableMetadata.AIRichResponseTableRow(items=normalize(header), isHeading=True)
@@ -573,13 +568,41 @@ class AIRichMessage(CustomInteractiveMessage, InteractiveMessageBuilder):
                 messageText=extracted,
             )
         )
-        primitive: Dict[str, Any] = {
+        primitive: dict[str, Any] = {
             "text": extracted,
             "__typename": "GenAIMarkdownTextUXPrimitive",
         }
         if inline_entities:
             primitive["inline_entities"] = inline_entities
         self._sections.append(_new_layout("Single", primitive))
+        return self
+
+    def add_html(
+        self,
+        html: str,
+        *,
+        fallback_text: str = "HTML interaktif",
+        trusted_sources: list[str] | None = None,
+    ) -> Self:
+        """Add an experimental HTML rich-response primitive."""
+        if not html.strip():
+            raise ValueError("html must not be empty")
+        self._submessages.append(
+            AIRichResponseSubMessage(
+                messageType=AI_RICH_RESPONSE_TEXT,
+                messageText=fallback_text,
+            )
+        )
+        self._sections.append(
+            _new_layout(
+                "Single",
+                {
+                    "__typename": "GenAIaeacdsnwHtmlPrimitive",
+                    "payload": html,
+                    "trusted_sources": trusted_sources or [],
+                },
+            )
+        )
         return self
 
     def add_code(self, language: str, code: str) -> Self:
@@ -626,7 +649,7 @@ class AIRichMessage(CustomInteractiveMessage, InteractiveMessageBuilder):
         )
         return self
 
-    def add_image(self, image_url: Union[str, list[str]]) -> Self:
+    def add_image(self, image_url: str | list[str]) -> Self:
         """Add one or more images by URL."""
         urls = image_url if isinstance(image_url, list) else [image_url]
         image_urls_proto = [
@@ -655,7 +678,7 @@ class AIRichMessage(CustomInteractiveMessage, InteractiveMessageBuilder):
             )
         return self
 
-    def add_video(self, url: Union[str, list[str]], *, duration: int = 0) -> Self:
+    def add_video(self, url: str | list[str], *, duration: int = 0) -> Self:
         """Add one or more videos by URL.
 
         :param url: A single video URL or a list of video URLs.
@@ -682,7 +705,7 @@ class AIRichMessage(CustomInteractiveMessage, InteractiveMessageBuilder):
             )
         return self
 
-    def add_source(self, source: Union["Source", list["Source"]]) -> Self:
+    def add_source(self, source: Source | list[Source]) -> Self:
         """Add search result sources.
 
         :param source: A single :class:`Source` or a list of them.
@@ -714,7 +737,7 @@ class AIRichMessage(CustomInteractiveMessage, InteractiveMessageBuilder):
         )
         return self
 
-    def add_reels(self, reel: Union["Reel", list["Reel"]]) -> Self:
+    def add_reels(self, reel: Reel | list[Reel]) -> Self:
         """Add reel/short-video item(s).
 
         :param reel: A single :class:`Reel` or a list of them.
@@ -773,7 +796,7 @@ class AIRichMessage(CustomInteractiveMessage, InteractiveMessageBuilder):
 
     def add_product(
         self,
-        product: Union["Product", list["Product"]],
+        product: Product | list[Product],
     ) -> Self:
         """Add product card(s).
 
@@ -804,7 +827,7 @@ class AIRichMessage(CustomInteractiveMessage, InteractiveMessageBuilder):
         self._sections.append(_new_layout(layout, products if is_multi else products[0]))
         return self
 
-    def add_post(self, post: Union["Post", list["Post"]]) -> Self:
+    def add_post(self, post: Post | list[Post]) -> Self:
         """Add social-media post card(s).
 
         :param post: A single :class:`Post` or a list of them.
@@ -862,7 +885,7 @@ class AIRichMessage(CustomInteractiveMessage, InteractiveMessageBuilder):
         )
         return self
 
-    def add_suggest(self, suggestions: Union[str, list[str]]) -> Self:
+    def add_suggest(self, suggestions: str | list[str]) -> Self:
         """Add follow-up suggestion pill(s)."""
         items = suggestions if isinstance(suggestions, list) else [suggestions]
         pills = [
@@ -939,10 +962,10 @@ class AIRichMessage(CustomInteractiveMessage, InteractiveMessageBuilder):
             botForwardedMessage=FutureProofMessage(message=inner_message),
         )
 
-    def prepare_send(self, client: "NewClient") -> Message:
+    def prepare_send(self, client: NewClient) -> Message:
         """Build the full ``Message`` protobuf (synchronous)."""
         return self._build_message()
 
-    async def prepare_asend(self, client: "NewAClient") -> Message:
+    async def prepare_asend(self, client: NewAClient) -> Message:
         """Build the full ``Message`` protobuf (asynchronous)."""
         return self._build_message()

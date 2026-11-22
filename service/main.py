@@ -26,6 +26,8 @@ def main():
     ui = OSCClient(HOST, UI_PORT, encoding="utf8")
 
     def emit(addr, *vals):
+        val_str = " ".join(str(v) for v in vals) if vals else ""
+        print(f"[SVC] {addr} {val_str}", flush=True)
         try:
             ui.send_message(addr.encode(), list(vals) or [""])
         except Exception:

@@ -2,7 +2,6 @@ import os
 import platform
 import shutil
 import sys
-from typing import Dict
 
 
 def arch_normalizer(arch_: str) -> str:
@@ -14,7 +13,7 @@ def arch_normalizer(arch_: str) -> str:
     :return: The normalized architecture name.
     :rtype: str
     """
-    arch: Dict[str, str] = {
+    arch: dict[str, str] = {
         "aarch64": "arm64",
         "x86_64": "amd64",
     }
@@ -37,16 +36,11 @@ def generated_name(os_name="", arch_name=""):
     if os_name == "windows":
         ext = "dll"
     elif os_name == "linux":
-        try:
-            uname_str = os.popen("uname -a").read().strip().lower()
-        except Exception:
-            uname_str = ""
+        uname = platform.uname()
         is_android = (
-            hasattr(sys, "getandroidapilevel")
-            or "ANDROID_ARGUMENT" in os.environ
+            "android" in uname.release.lower()
+            or "android" in uname.version.lower()
             or "ANDROID_ROOT" in os.environ
-            or "android" in sys.platform
-            or "android" in uname_str
         )
         if is_android:
             os_name = "android"

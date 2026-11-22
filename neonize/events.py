@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import weakref
+from collections.abc import Callable
 from threading import Event as EventThread
-from typing import TYPE_CHECKING, Callable, Dict, Type, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import segno
 from google.protobuf.message import Message
@@ -11,52 +13,84 @@ from google.protobuf.message import Message
 from neonize.exc import UnsupportedEvent
 
 from .proto.Neonize_pb2 import QR as QREv
+from .proto.Neonize_pb2 import AppState as AppStateEv
+from .proto.Neonize_pb2 import AppStateSyncComplete as AppStateSyncCompleteEv
+from .proto.Neonize_pb2 import AppStateSyncError as AppStateSyncErrorEv
 from .proto.Neonize_pb2 import BlocklistChange as BlocklistChangeEv
 from .proto.Neonize_pb2 import BlocklistEvent as BlocklistEv
+from .proto.Neonize_pb2 import BusinessName as BusinessNameEv
 from .proto.Neonize_pb2 import CallAccept as CallAcceptEv
 from .proto.Neonize_pb2 import CallOffer as CallOfferEv
 from .proto.Neonize_pb2 import CallOfferNotice as CallOfferNoticeEv
 from .proto.Neonize_pb2 import CallPreAccept as CallPreAcceptEv
+from .proto.Neonize_pb2 import CallReject as CallRejectEv
 from .proto.Neonize_pb2 import CallRelayLatency as CallRelayLatencyEV
 from .proto.Neonize_pb2 import CallTerminate as CallTerminateEv
 from .proto.Neonize_pb2 import CallTransport as CallTransportEv
+from .proto.Neonize_pb2 import CATRefreshError as CATRefreshErrorEv
+from .proto.Neonize_pb2 import ChatArchive as ChatArchiveEv
+from .proto.Neonize_pb2 import ChatClear as ChatClearEv
+from .proto.Neonize_pb2 import ChatDelete as ChatDeleteEv
+from .proto.Neonize_pb2 import ChatMarkAsRead as ChatMarkAsReadEv
+from .proto.Neonize_pb2 import ChatMute as ChatMuteEv
+from .proto.Neonize_pb2 import ChatPin as ChatPinEv
 from .proto.Neonize_pb2 import ChatPresence as ChatPresenceEv
 from .proto.Neonize_pb2 import ClientOutdated as ClientOutdatedEv
 from .proto.Neonize_pb2 import Connected as ConnectedEv
 from .proto.Neonize_pb2 import ConnectFailure as ConnectFailureEv
+from .proto.Neonize_pb2 import ContactSync as ContactSyncEv
 from .proto.Neonize_pb2 import Device
 from .proto.Neonize_pb2 import Disconnected as DisconnectedEv
+from .proto.Neonize_pb2 import FBCallEvent as FBCallEventEv
 from .proto.Neonize_pb2 import GroupInfoEvent as GroupInfoEv
 from .proto.Neonize_pb2 import HistorySync as HistorySyncEv
 from .proto.Neonize_pb2 import IdentityChange as IdentityChangeEv
 from .proto.Neonize_pb2 import JoinedGroup as JoinedGroupEv
 from .proto.Neonize_pb2 import KeepAliveRestored as KeepAliveRestoredEv
 from .proto.Neonize_pb2 import KeepAliveTimeout as KeepAliveTimeoutEv
+from .proto.Neonize_pb2 import LabelAssociationChat as LabelAssociationChatEv
+from .proto.Neonize_pb2 import LabelAssociationMessage as LabelAssociationMessageEv
+from .proto.Neonize_pb2 import LabelEdit as LabelEditEv
 from .proto.Neonize_pb2 import LoggedOut as LoggedOutEv
+from .proto.Neonize_pb2 import ManualLoginReconnect as ManualLoginReconnectEv
+from .proto.Neonize_pb2 import MediaRetry as MediaRetryEv
 from .proto.Neonize_pb2 import Message as MessageEv
+from .proto.Neonize_pb2 import MessageDeleteForMe as MessageDeleteForMeEv
+from .proto.Neonize_pb2 import MessageStar as MessageStarEv
 from .proto.Neonize_pb2 import NewsletterJoin as NewsletterJoinEv
 from .proto.Neonize_pb2 import NewsletterLeave as NewsletterLeaveEv
 from .proto.Neonize_pb2 import NewsletterLiveUpdate as NewsletterLiveUpdateEV
 from .proto.Neonize_pb2 import NewsLetterMessageMeta as NewsLetterMessageMetaEv
+from .proto.Neonize_pb2 import NewsletterMilestone as NewsletterMilestoneEv
 from .proto.Neonize_pb2 import NewsletterMuteChange as NewsletterMuteChangeEv
+from .proto.Neonize_pb2 import NotifyAccountReachoutTimelock as NotifyAccountReachoutTimelockEv
 from .proto.Neonize_pb2 import OfflineSyncCompleted as OfflineSyncCompletedEv
 from .proto.Neonize_pb2 import OfflineSyncPreview as OfflineSyncPreviewEv
+from .proto.Neonize_pb2 import PairPasskeyConfirmation as PairPasskeyConfirmationEv
+from .proto.Neonize_pb2 import PairPasskeyError as PairPasskeyErrorEv
 from .proto.Neonize_pb2 import PairStatus as PairStatusEv
 from .proto.Neonize_pb2 import Picture as PictureEv
 from .proto.Neonize_pb2 import Presence as PresenceEv
+from .proto.Neonize_pb2 import PushName as PushNameEv
+from .proto.Neonize_pb2 import PushNameSetting as PushNameSettingEv
+from .proto.Neonize_pb2 import QRScannedWithoutMultidevice as QRScannedWithoutMultideviceEv
 from .proto.Neonize_pb2 import Receipt as ReceiptEv
+from .proto.Neonize_pb2 import RotateADVSecret as RotateADVSecretEv
 from .proto.Neonize_pb2 import StreamError as StreamErrorEv
 from .proto.Neonize_pb2 import StreamReplaced as StreamReplacedEv
 from .proto.Neonize_pb2 import TemporaryBan as TemporaryBanEv
+from .proto.Neonize_pb2 import UnarchiveChatsSetting as UnarchiveChatsSettingEv
 from .proto.Neonize_pb2 import UndecryptableMessage as UndecryptableMessageEv
 from .proto.Neonize_pb2 import UnknownCallEvent as UnknownCallEventEV
+from .proto.Neonize_pb2 import UserAbout as UserAboutEv
+from .proto.Neonize_pb2 import UserStatusMute as UserStatusMuteEv
 from .proto.Neonize_pb2 import privacySettingsEvent as PrivacySettingsEv
 
 log = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from .client import ClientFactory, NewClient
 EventType = TypeVar("EventType", bound=Message)
-EVENT_TO_INT: Dict[Type[Message], int] = {
+EVENT_TO_INT: dict[type[Message], int] = {
     Device: 0,
     QREv: 1,
     PairStatusEv: 2,
@@ -83,6 +117,7 @@ EVENT_TO_INT: Dict[Type[Message], int] = {
     PrivacySettingsEv: 25,
     OfflineSyncPreviewEv: 26,
     OfflineSyncCompletedEv: 27,
+    MediaRetryEv: 29,
     BlocklistEv: 30,
     BlocklistChangeEv: 31,
     NewsletterJoinEv: 32,
@@ -98,8 +133,39 @@ EVENT_TO_INT: Dict[Type[Message], int] = {
     CallTerminateEv: 42,
     UnknownCallEventEV: 43,
     UndecryptableMessageEv: 44,
+    RotateADVSecretEv: 45,
+    ChatArchiveEv: 46,
+    ChatPinEv: 47,
+    ChatMuteEv: 48,
+    ChatMarkAsReadEv: 49,
+    ChatDeleteEv: 51,
+    MessageDeleteForMeEv: 52,
+    MessageStarEv: 53,
+    ChatClearEv: 54,
+    AppStateEv: 55,
+    AppStateSyncCompleteEv: 56,
+    AppStateSyncErrorEv: 57,
+    ContactSyncEv: 58,
+    PushNameEv: 59,
+    PushNameSettingEv: 60,
+    BusinessNameEv: 61,
+    UserAboutEv: 62,
+    UserStatusMuteEv: 63,
+    UnarchiveChatsSettingEv: 64,
+    LabelEditEv: 65,
+    LabelAssociationChatEv: 66,
+    LabelAssociationMessageEv: 67,
+    CallRejectEv: 68,
+    FBCallEventEv: 69,
+    NewsletterMilestoneEv: 70,
+    CATRefreshErrorEv: 71,
+    ManualLoginReconnectEv: 72,
+    QRScannedWithoutMultideviceEv: 73,
+    NotifyAccountReachoutTimelockEv: 74,
+    PairPasskeyConfirmationEv: 75,
+    PairPasskeyErrorEv: 76,
 }
-INT_TO_EVENT: Dict[int, Type[Message]] = {code: ev for ev, code in EVENT_TO_INT.items()}
+INT_TO_EVENT: dict[int, type[Message]] = {code: ev for ev, code in EVENT_TO_INT.items()}
 
 event = EventThread()
 
@@ -107,10 +173,10 @@ event = EventThread()
 class EventsManager:
     def __init__(self, client_factory: ClientFactory):
         self.client_factory = client_factory
-        self.list_func: Dict[int, Callable[[NewClient, Message], None]] = {}
+        self.list_func: dict[int, Callable[[NewClient, Message], None] | weakref.WeakMethod] = {}
 
     def __call__(
-        self, event: Type[EventType]
+        self, event: type[EventType]
     ) -> Callable[[Callable[[NewClient, EventType], None]], None]:
         """
         Registers a callback function for a specific event type.
@@ -118,11 +184,14 @@ class EventsManager:
         :param event: The type of event to register the callback for.
         :type event: Type[EventType]
         :return: A decorator that registers the callback function.
-        :rtype: Callablae[[Callable[[NewClient, EventType], None]], None]
+        :rtype: Callable[[Callable[[NewClient, EventType], None]], None]
         """
 
         def callback(func: Callable[[NewClient, EventType], None]) -> None:
-            self.list_func.update({EVENT_TO_INT[event]: func})
+            if hasattr(func, "__self__") and func.__self__ is not None:
+                self.list_func[EVENT_TO_INT[event]] = weakref.WeakMethod(func)
+            else:
+                self.list_func[EVENT_TO_INT[event]] = func
 
         return callback
 
@@ -138,7 +207,7 @@ class Event:
         """
         self.client = client
         self.paircode_cb = self.paircode(self.default_paircode_cb)
-        self.list_func: Dict[int, Callable[[NewClient, Message], None]] = {}
+        self.list_func: dict[int, Callable[[NewClient, Message], None] | weakref.WeakMethod] = {}
         self._qr = self.__onqr
 
     def execute(self, uuid: int, binary: int, size: int, code: int):  # Demands Attention
@@ -151,9 +220,10 @@ class Event:
         :param code: The index of the function to be executed from the list of functions.
         :type code: int
         """
-        if code not in INT_TO_EVENT:
+        event_cls = INT_TO_EVENT.get(code)
+        if event_cls is None:
             raise UnsupportedEvent()
-        message = INT_TO_EVENT[code].FromString(ctypes.string_at(binary, size))
+        message = event_cls.FromString(ctypes.string_at(binary, size))
         if code == 0:
             self.client.me = message
             return
@@ -161,7 +231,12 @@ class Event:
             self.client.connected = True
         handler = self.list_func.get(code)
         if handler is not None:
-            handler(self.client, message)
+            if isinstance(handler, weakref.WeakMethod):
+                func = handler()
+                if func is not None:
+                    func(self.client, message)
+            else:
+                handler(self.client, message)
 
     def __onqr(self, _: NewClient, data_qr: bytes):
         """
@@ -217,7 +292,7 @@ class Event:
             log.info("Pair code: %s", data)
 
     def __call__(
-        self, event: Type[EventType]
+        self, event: type[EventType]
     ) -> Callable[[Callable[[NewClient, EventType], None]], None]:
         """
         Registers a callback function for a specific event type.
@@ -229,6 +304,9 @@ class Event:
         """
 
         def callback(func: Callable[[NewClient, EventType], None]) -> None:
-            self.list_func.update({EVENT_TO_INT[event]: func})
+            if hasattr(func, "__self__") and func.__self__ is not None:
+                self.list_func[EVENT_TO_INT[event]] = weakref.WeakMethod(func)
+            else:
+                self.list_func[EVENT_TO_INT[event]] = func
 
         return callback

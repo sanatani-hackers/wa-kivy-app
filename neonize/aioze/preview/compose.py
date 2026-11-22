@@ -1,7 +1,8 @@
+import asyncio
+
 from httpx import ConnectTimeout, HTTPStatusError
-from linkpreview import Link
+from linkpreview import Link, LinkPreview
 from linkpreview import LinkGrabber as fallback_LinkGrabber
-from linkpreview import LinkPreview
 from linkpreview.exceptions import InvalidMimeTypeError
 
 from .grabber import LinkGrabber
@@ -37,7 +38,7 @@ async def link_preview(
         except ConnectTimeout:
             return False
         except HTTPStatusError:
-            content, url = fallback_grab_link(url)
+            content, url = await asyncio.to_thread(fallback_grab_link, url)
             if not content:
                 return
 

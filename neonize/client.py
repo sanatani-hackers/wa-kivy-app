@@ -8,43 +8,57 @@ import struct
 import time
 import traceback
 import typing
+import weakref
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from functools import partial
 from io import BytesIO
 from os import urandom
-from threading import Event as ThreadEvent, Thread
+from threading import Event as ThreadEvent
+from threading import Thread
 from types import NoneType
-from typing import List, Optional, Sequence, overload
+from typing import overload
 from uuid import uuid4
 
 import magic
 from google.protobuf.internal.containers import RepeatedCompositeFieldContainer
 from linkpreview import link_preview
-from PIL import Image, ImageSequence
-from .ext.interactive_message.base import CustomInteractiveMessage
+from PIL import Image, ImageFilter
 
 from ._binder import (
-    free_bytes,
+    ProxySettings,
     func_callback_bytes,
     func_callback_bytes2,
     func_string,
-    ProxySettings,
     gocode,
 )
 from .builder import build_edit, build_revoke
-from .events import Event, EventsManager, event as stop_event
+from .events import Event, EventsManager
+from .events import event as stop_event
 from .exc import (
+    BuildEditError,
     BuildPollVoteCreationError,
     BuildPollVoteError,
+    BuildUnavailableMessageRequestError,
     ContactStoreError,
     ConvertStickerError,
     CreateGroupError,
     CreateNewsletterError,
+    DecryptCommentError,
     DecryptPollVoteError,
+    DecryptReactionError,
+    DeleteMediaError,
     DownloadError,
+    EncryptCommentError,
+    EncryptPollVoteError,
+    EncryptReactionError,
+    FetchStickerPackError,
     FollowNewsletterError,
     GetBlocklistError,
+    GetBotListV2Error,
+    GetBotProfilesError,
+    GetBusinessProfileError,
     GetChatSettingsError,
     GetContactQrLinkError,
     GetGroupInfoError,
@@ -57,6 +71,7 @@ from .exc import (
     GetNewsletterInfoWithInviteError,
     GetNewsletterMessagesError,
     GetNewsletterMessageUpdateError,
+    GetOrderDetailsError,
     GetProfilePictureError,
     GetStatusPrivacyError,
     GetSubGroupsError,
@@ -68,6 +83,7 @@ from .exc import (
     JoinGroupWithInviteError,
     LinkGroupError,
     LogoutError,
+    MarkNotDirtyError,
     MarkReadError,
     NeonizeError,
     NewsletterMarkViewedError,
@@ -80,29 +96,38 @@ from .exc import (
     PutPinnedError,
     ResolveContactQRLinkError,
     SendAppStateError,
+    SendMediaRetryReceiptError,
     SendMessageError,
     SendPresenceError,
     SetDefaultDisappearingTimerError,
     SetDisappearingTimerError,
     SetGroupAnnounceError,
+    SetGroupJoinApprovalModeError,
     SetGroupLockedError,
+    SetGroupMemberAddModeError,
     SetGroupPhotoError,
     SetGroupTopicError,
     SetPassiveError,
     SetPrivacySettingError,
     SetProxyAddressError,
     SetStatusMessageError,
+    StoreLIDPNMappingError,
     SubscribePresenceError,
+    TryFetchPrivacySettingsError,
     UnfollowNewsletterError,
     UnlinkGroupError,
     UpdateBlocklistError,
     UpdateGroupParticipantsError,
+    UpdateGroupRequestParticipantsError,
     UploadError,
 )
+from .ext.interactive_message.base import CustomInteractiveMessage
 from .proto import Neonize_pb2 as neonize_proto
 from .proto.Neonize_pb2 import (
     JID,
     Blocklist,
+    BotListInfo,
+    BotProfileInfo,
     BuildMessageReturnFunction,
     Contact,
     ContactEntry,
@@ -131,6 +156,7 @@ from .proto.Neonize_pb2 import (
     MessageInfo,
     NewsletterMessage,
     NewsletterMetadata,
+    OrderDetails,
     PrivacySettings,
     ProfilePictureInfo,
     ReqCreateGroup,
@@ -140,6 +166,7 @@ from .proto.Neonize_pb2 import (
     SendResponse,
     SetGroupPhotoReturnFunction,
     StatusPrivacy,
+    StickerPack,
     UploadResponse,
     UploadReturnFunction,
 )
@@ -152,12 +179,15 @@ from .proto.waE2E.WAWebProtobufsE2E_pb2 import (
     ContactMessage,
     ContextInfo,
     DocumentMessage,
+    EncReactionMessage,
     ExtendedTextMessage,
     GroupMention,
     ImageMessage,
     Message,
     MessageAssociation,
+    PollUpdateMessage,
     PollVoteMessage,
+    ReactionMessage,
     StickerMessage,
     StickerPackMessage,
     VideoMessage,
@@ -172,17 +202,24 @@ from .utils import (
     log_whatsmeow,
     validate_link,
 )
-from .utils.calc import AspectRatioMethod, auto_sticker, original_sticker
+from .utils.calc import (
+    AspectRatioMethod,
+    auto_sticker,
+    get_sidecar_from_upload,
+    original_sticker,
+)
 from .utils.enum import (
     BlocklistAction,
     ChatPresence,
     ChatPresenceMedia,
     ClientName,
     ClientType,
+    GroupMemberAddMode,
     LogLevel,
     MediaType,
     MediaTypeToMMS,
     ParticipantChange,
+    ParticipantRequestChange,
     Presence,
     PrivacySetting,
     PrivacySettingType,
@@ -192,13 +229,26 @@ from .utils.enum import (
 from .utils.ffmpeg import FFmpeg
 from .utils.iofile import get_bytes_from_name_or_url, prepare_zip_file_content
 from .utils.jid import Jid2String, JIDToNonAD, build_jid, jid_is_lid
-from .utils.sticker import convert_to_sticker, convert_to_webp
+from .utils.sticker import add_exif_to_sticker, convert_to_sticker, convert_to_webp
 
 _log_ = logging.getLogger(__name__)
+_YOUTUBE_URL_RE = re.compile(
+    r"(?:https?:)?//(?:www\.)?(?:youtube\.com/(?:[^/\n\s]+"
+    r"/\S+/|(?:v|e(?:mbed)?)/|\S*?[?&]v=)|youtu\.be/)([a-zA-Z0-9_-]{11})",
+    re.IGNORECASE,
+)
+_HTTP_LINK_RE = re.compile(r"https?://\S+")
+_MENTION_RE = re.compile(r"@([0-9]{5,16}|0)")
+_GROUP_MENTION_RE = re.compile(r"@([0-9-]{11,26}|0)@g\.us")
 
 
 class ContactStore:
     def __init__(self, uuid: bytes) -> None:
+        """Initializes the contact store bound to a specific client session.
+
+        :param uuid: Unique identifier of the client session that owns this store.
+        :type uuid: bytes
+        """
         self.uuid = uuid
         self.__client = gocode
 
@@ -215,29 +265,27 @@ class ContactStore:
         :rtype: ContactsPutPushNameReturnFunction
         """
         user_bytes = user.SerializeToString()
-        bytes_ptr = self.__client.PutPushName(user_bytes, len(user_bytes), pushname.encode())
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.PutPushName(
+            self.uuid, user_bytes, len(user_bytes), pushname.encode()
+        )
         model = ContactsPutPushNameReturnFunction.FromString(protobytes)
         if model.Error:
             raise ContactStoreError(model.Error)
         return model
 
     def put_contact_name(self, user: JID, fullname: str, firstname: str):
-        """
-        This method is used to update the contact name in the contact store. It takes the user's JID,
-        full name and first name as input parameters,
-        then calls the PutContactName method of the client with the user's JID, full name and first name.
-        If there is an error, it returns a ContactStoreError with the error message.
+        """Update the locally-stored display name for a contact.
 
-        :param user: The JID of the user whose contact name is to be updated
+        This writes to the **local** contact store only; it does not notify the
+        remote user.
+
+        :param user: JID of the contact to rename.
         :type user: JID
-        :param fullname: The full name of the user
+        :param fullname: Full display name.
         :type fullname: str
-        :param firstname: The first name of the user
+        :param firstname: Short / first name.
         :type firstname: str
-        :return: If there is an error, return a ContactStoreError with the error message, else None
-        :rtype: ContactStoreError or None
+        :raises ContactStoreError: If the Go core reports an error.
         """
         user_bytes = user.SerializeToString()
         err = self.__client.PutContactName(
@@ -248,9 +296,9 @@ class ContactStore:
             firstname.encode(),
         ).decode()
         if err:
-            return ContactStoreError(err)
+            raise ContactStoreError(err)
 
-    def put_all_contact_name(self, contact_entry: List[ContactEntry]):
+    def put_all_contact_name(self, contact_entry: list[ContactEntry]):
         """
         This method serializes a list of ContactEntry objects and sends them to a
         remote service using the client's PutAllContactNames method. If the service
@@ -276,9 +324,7 @@ class ContactStore:
         :rtype: ContactInfo
         """
         jid = user.SerializeToString()
-        bytes_ptr = self.__client.GetContact(self.uuid, jid, len(jid))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetContact(self.uuid, jid, len(jid))
         model = ContactsGetContactReturnFunction.FromString(protobytes)
         if model.Error:
             raise ContactStoreError(model.Error)
@@ -293,9 +339,7 @@ class ContactStore:
         :return: A list of all contacts.
         :rtype: RepeatedCompositeFieldContainer[Contact]
         """
-        bytes_ptr = self.__client.GetAllContacts(self.uuid)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetAllContacts(self.uuid)
         model = neonize_proto.ContactsGetAllContactsReturnFunction.FromString(protobytes)
         if model.Error:
             raise ContactStoreError(model.Error)
@@ -371,37 +415,72 @@ class ChatSettingsStore:
         :rtype: LocalChatSettings
         """
         user_buf = user.SerializeToString()
-        bytes_ptr = self.__client.GetChatSettings(self.uuid, user_buf, len(user_buf))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetChatSettings(self.uuid, user_buf, len(user_buf))
         return_ = ReturnFunctionWithError.FromString(protobytes)
         if return_.Error:
             raise GetChatSettingsError(return_.Error)
         return return_.LocalChatSettings
 
 
+def _ensure_jid(value: JID | str, server: str = "s.whatsapp.net") -> JID:
+    """Coerce a phone-number string into a :class:`JID`.
+
+    If *value* is already a ``JID`` instance it is returned unchanged.
+    If it is a ``str`` of digits it is treated as a phone number and
+    wrapped with :func:`build_jid`.  Strings containing ``@`` are
+    assumed to be full JID strings and parsed via ``Jid2String`` in
+    reverse (by splitting on ``@``).
+
+    :param value: A JID object **or** a phone number string.
+    :param server: WhatsApp server suffix, default ``s.whatsapp.net``.
+    :return: A ``JID`` protobuf ready for the Go core.
+    :rtype: JID
+    """
+    if isinstance(value, JID):
+        return value
+    if "@" in value:
+        user, srv = value.rsplit("@", 1)
+        return JID(User=user, Server=srv, Device=0, RawAgent=0, Integrator=0, IsEmpty=False)
+    return build_jid(value, server)
+
+
 class NewClient:
     def __init__(
         self,
         name: str,
-        jid: Optional[JID] = None,
-        props: Optional[DeviceProps] = None,
-        uuid: Optional[str] = None,
+        jid: JID | None = None,
+        props: DeviceProps | None = None,
+        uuid: str | None = None,
+        new_device: bool = False,
     ):
         """Initializes a new client instance.
 
-        :param name: The name or identifier for the new client.
+        :param name: The name or identifier for the new client, also used as the
+            default database file name when *uuid* is not supplied.
         :type name: str
-        :param jid: Optional. The JID (Jabber Identifier) for the client. If not provided, first client is used.
-        :param qrCallback: Optional. A callback function for handling QR code updates, defaults to None.
-        :type qrCallback: Optional[Callable[[NewClient, bytes], None]], optional
-        :param messageCallback: Optional. A callback function for handling incoming messages, defaults to None.
-        :type messageCallback: Optional[Callable[[NewClient, MessageSource, Message], None]], optional
-        :param uuid: Optional. A unique identifier for the client, defaults to None.
-        :type uuid: Optional[str], optional
+        :param jid: Optional JID to resume a specific existing session.  When
+            *None*, the first stored session is resumed (or a new QR-pairing
+            session is started).
+        :type jid: JID | None
+        :param props: Optional device properties forwarded to the Go core.
+        :type props: DeviceProps | None
+        :param uuid: Optional unique identifier for the client session.  When
+            *None*, falls back to *jid.User* or *name*.
+        :type uuid: str | None
+        :param new_device: Pair a brand-new account (fresh QR) even if the
+            database already stores other sessions; without it, connecting
+            without a *jid* resumes the first stored session.
+        :type new_device: bool
+
+        .. note::
+
+           To handle QR codes, register a callback via
+           ``client.event.qr(my_qr_handler)`` **before** calling
+           ``client.connect()``.
         """
         self.name = name
         self.device_props = props
+        self.new_device = new_device
         self.jid = jid
         self.uuid = (jid.User if jid else (uuid or name)).encode()
         self.__client = gocode
@@ -411,9 +490,33 @@ class NewClient:
         self.chat_settings = ChatSettingsStore(self.uuid)
         self.connected = False
         self.me = None
+        # Register a weak-reference destructor that fires when the Python
+        # object is garbage-collected.  Unlike __del__, weakref.finalize is
+        # safe from reference-cycle issues and interpreter-shutdown hazards.
+        # It ensures the Go-side context is cancelled even if the caller
+        # forgets to call stop()/disconnect().
+        self._stop_finalizer = weakref.finalize(self, NewClient._release_ffi, self.uuid, gocode)
         _log_.debug("🔨 Creating a NewClient instance")
 
+    @staticmethod
+    def _release_ffi(uuid: bytes, gocode_ref):
+        """Release Go-side resources when the Python client is GC'd.
+
+        Called by weakref.finalize — must NOT reference ``self``.
+        """
+        try:
+            gocode_ref.Stop(uuid)
+        except Exception:
+            pass  # Best-effort; the library may already be unloaded.
+
     def __onLoginStatus(self, uuid: int, status: int):
+        """Internal callback invoked when a client's login status changes.
+
+        :param uuid: Numeric identifier of the client session reporting the status.
+        :type uuid: int
+        :param status: Login status code reported by the underlying client.
+        :type status: int
+        """
         print(status)
 
     def __onQr(self, uuid: int, qr_protoaddr: int):
@@ -425,7 +528,7 @@ class NewClient:
         """
         self.event._qr(self, ctypes.string_at(qr_protoaddr))
 
-    def _parse_mention(self, text: Optional[str] = None, are_lids: bool = False) -> list[str]:
+    def _parse_mention(self, text: str | None = None, are_lids: bool = False) -> list[str]:
         """
         This function parses a given text and returns a list of 'mentions' in the format of 'mention@s.whatsapp.net'.
         A 'mention' is defined as a sequence of numbers (5 to 16 digits long) that is prefixed by '@' in the text.
@@ -437,14 +540,12 @@ class NewClient:
         :return: A list of mentions in the format of 'mention@s.whatsapp.net'
         :rtype: list[str]
         """
-        if text is None:
+        if not text or "@" not in text:
             return []
-        # Definitely need a better method
-        # WIP
         server = "@s.whatsapp.net" if not are_lids else "@lid"
-        return [jid.group(1) + server for jid in re.finditer(r"@([0-9]{5,16}|0)", text)]
+        return [jid.group(1) + server for jid in _MENTION_RE.finditer(text)]
 
-    def _parse_group_mention(self, text: Optional[str] = None) -> list[GroupMention]:
+    def _parse_group_mention(self, text: str | None = None) -> list[GroupMention]:
         """
         This function parses a given text and returns a list of 'mentions' in the format of 'GroupMention(…'
         A 'mention' is defined as a sequence of numbers (11 to 26 digits long) (might also include an hypen) that is prefixed by '@' and suffixed by @g.us in the text.
@@ -454,11 +555,11 @@ class NewClient:
         :return: A list of mentions in the format of 'GroupMention(groupJID="group_id@g.us", groupSubject="group_name")'
         :rtype: list[GroupMention]
         """
-        if text is None:
+        if not text or "@g.us" not in text:
             return []
 
         gc_mentions = []
-        for jid in re.finditer(r"@([0-9-]{11,26}|0)@g\.us", text):
+        for jid in _GROUP_MENTION_RE.finditer(text):
             try:
                 group = self.get_group_info(build_jid(jid.group(1), "g.us"))
             except GetGroupInfoError:
@@ -473,18 +574,13 @@ class NewClient:
         return gc_mentions
 
     def _generate_link_preview(self, text: str) -> ExtendedTextMessage | None:
-        youtube_url_pattern = re.compile(
-            r"(?:https?:)?//(?:www\.)?(?:youtube\.com/(?:[^/\n\s]+"
-            r"/\S+/|(?:v|e(?:mbed)?)/|\S*?[?&]v=)|youtu\.be/)([a-zA-Z0-9_-]{11})",
-            re.IGNORECASE,
-        )
-        links = re.findall(r"https?://\S+", text)
+        links = _HTTP_LINK_RE.findall(text)
         valid_links = list(filter(validate_link, links))
         if valid_links:
             preview = link_preview(valid_links[0])
             preview_type = (
                 ExtendedTextMessage.PreviewType.VIDEO
-                if re.match(youtube_url_pattern, valid_links[0])
+                if _YOUTUBE_URL_RE.match(valid_links[0])
                 else ExtendedTextMessage.PreviewType.NONE
             )
             msg = ExtendedTextMessage(
@@ -495,7 +591,7 @@ class NewClient:
             )
             if preview.absolute_image:
                 thumbnail = get_bytes_from_name_or_url(str(preview.absolute_image))
-                mimetype = magic.from_buffer(thumbnail, mime=True)
+                mimetype = magic.from_buffer(thumbnail[:4096], mime=True)
                 if "jpeg" in mimetype or "png" in mimetype:
                     image = Image.open(BytesIO(thumbnail))
                     upload = self.upload(thumbnail, MediaType.MediaLinkThumbnail)
@@ -526,7 +622,7 @@ class NewClient:
         sender = message.Info.MessageSource.Sender
         if jid_is_lid(sender):
             senderalt = message.Info.MessageSource.SenderAlt
-            sender = senderalt if senderalt.ListFields() else sender
+            sender = senderalt if senderalt.ListFields() and not senderalt.IsEmpty else sender
         return ContextInfo(
             stanzaID=message.Info.ID,
             participant=Jid2String(JIDToNonAD(sender)),
@@ -541,7 +637,7 @@ class NewClient:
         to: JID,
         interactive_message: CustomInteractiveMessage,
         link_preview: bool = False,
-        ghost_mentions: Optional[str] = None,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
         add_msg_secret: bool = False,
     ) -> SendResponse:
@@ -575,17 +671,19 @@ class NewClient:
 
     def send_message(
         self,
-        to: JID,
-        message: typing.Union[Message, str],
+        to: JID | str,
+        message: Message | str,
         link_preview: bool = False,
-        ghost_mentions: Optional[str] = None,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
         add_msg_secret: bool = False,
     ) -> SendResponse:
         """Send a message to the specified JID.
 
-        :param to: The JID to send the message to.
-        :type to: JID
+        :param to: The recipient.  A :class:`JID` **or** a phone-number
+            string (e.g. ``"6281234567890"``) -- strings are
+            auto-wrapped via :func:`build_jid`.
+        :type to: JID | str
         :param message: The message to send.
         :type message: typing.Union[Message, str]
         :param link_preview: Whether to send a link preview, defaults to False
@@ -600,6 +698,7 @@ class NewClient:
         :return: The response from the server.
         :rtype: SendResponse
         """
+        to = _ensure_jid(to)
         to_bytes = to.SerializeToString()
         if isinstance(message, str):
             mentioned_groups = self._parse_group_mention(message)
@@ -621,24 +720,64 @@ class NewClient:
         if add_msg_secret:
             msg.messageContextInfo.messageSecret = urandom(32)
         message_bytes = msg.SerializeToString()
-        bytes_ptr = self.__client.SendMessage(
+        protobytes = self.__client.SendMessage(
             self.uuid, to_bytes, len(to_bytes), message_bytes, len(message_bytes)
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = SendMessageReturnFunction.FromString(protobytes)
         if model.Error:
             raise SendMessageError(model.Error)
         model.SendResponse.MergeFrom(model.SendResponse.__class__(Message=msg))
         return model.SendResponse
 
+    def send_spr_group(
+        self,
+        group: JID | str,
+        targets: Sequence[JID | str],
+        target_message: str,
+        decoy_message: str,
+    ) -> SendResponse:
+        """Send an experimental SPR group message with a decoy retry body.
+
+        Selected group members receive ``target_message``. Other members may
+        receive ``decoy_message`` if WhatsApp asks the sender to retry the
+        message. This method never falls back to a normal group or DM send.
+        """
+        if isinstance(targets, (str, bytes)) or not 1 <= len(targets) <= 25:
+            raise ValueError("SPR requires between 1 and 25 selected targets")
+        if not isinstance(target_message, str) or not target_message.strip():
+            raise ValueError("SPR target message must not be empty")
+        if not isinstance(decoy_message, str) or not decoy_message.strip():
+            raise ValueError("SPR decoy message must not be empty")
+        if "\x00" in target_message or "\x00" in decoy_message:
+            raise ValueError("SPR messages must not contain NUL characters")
+
+        group_jid = _ensure_jid(group, server="g.us")
+        target_jids = [JIDToNonAD(_ensure_jid(target)) for target in targets]
+        group_bytes = group_jid.SerializeToString()
+        targets_bytes = JIDArray(JIDS=target_jids).SerializeToString()
+        protobytes = self.__client.SendSPRMessage(
+            self.uuid,
+            group_bytes,
+            len(group_bytes),
+            targets_bytes,
+            len(targets_bytes),
+            target_message.encode(),
+            decoy_message.encode(),
+        )
+        model = SendMessageReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise SendMessageError(model.Error)
+        sent_message = Message(conversation=target_message)
+        model.SendResponse.MergeFrom(model.SendResponse.__class__(Message=sent_message))
+        return model.SendResponse
+
     def build_reply_message(
         self,
-        message: typing.Union[str, MessageWithContextInfo],
+        message: str | MessageWithContextInfo,
         quoted: neonize_proto.Message,
         link_preview: bool = False,
         reply_privately: bool = False,
-        ghost_mentions: Optional[str] = None,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
     ) -> Message:
         """Send a reply message to a specified JID.
@@ -684,12 +823,12 @@ class NewClient:
 
     def reply_message(
         self,
-        message: typing.Union[str, MessageWithContextInfo],
+        message: str | MessageWithContextInfo,
         quoted: neonize_proto.Message,
-        to: Optional[JID] = None,
+        to: JID | None = None,
         link_preview: bool = False,
         reply_privately: bool = False,
-        ghost_mentions: Optional[str] = None,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
         add_msg_secret: bool = False,
     ) -> SendResponse:
@@ -764,36 +903,57 @@ class NewClient:
         """
         return self.send_message(chat, self.build_revoke(chat, sender, message_id))
 
+    def reject_call(self, call_from: JID, call_id: str) -> None:
+        """Reject (decline) an incoming call.
+
+        Wraps whatsmeow's ``Client.RejectCall``: the call is terminated on the same
+        connection that received the offer. ``call_from`` must be the caller's JID
+        exactly as delivered in the CallOffer (a phone-number or a hosted ``@lid`` JID).
+
+        :param call_from: JID of the caller (the CallOffer creator).
+        :type call_from: JID
+        :param call_id: The call id (CallOffer id).
+        :type call_id: str
+        :raises RejectCallError: If the server rejects the request.
+        """
+        from .exc import RejectCallError
+
+        jidbuf = call_from.SerializeToString()
+        err = self.__client.RejectCall(
+            self.uuid, jidbuf, len(jidbuf), ctypes.create_string_buffer(call_id.encode())
+        ).decode()
+        if err:
+            raise RejectCallError(err)
+
     def build_poll_vote_creation(
         self,
         name: str,
-        options: List[str],
+        options: list[str],
         selectable_count: VoteType,
-        quoted: Optional[neonize_proto.Message] = None,
+        quoted: neonize_proto.Message | None = None,
     ) -> Message:
         """Build a poll vote creation message.
 
-        :param name: The name of the poll.
+        :param name: The question / title of the poll.
         :type name: str
-        :param options: The options for the poll.
-        :type options: List[str]
-        :param selectable_count: The number of selectable options.
-        :type selectable_count: int
-        :param quoted: A message that the poll message is a reply to, defaults to None
-        :type quoted: Optional[neonize_proto.Message], optional
-        :return: The poll vote creation message.
+        :param options: The answer options for the poll (2--12 items).
+        :type options: list[str]
+        :param selectable_count: How many options a voter may choose.
+        :type selectable_count: VoteType
+        :param quoted: Optional message to quote (reply to).
+        :type quoted: neonize_proto.Message | None
+        :return: A ``Message`` protobuf ready for :meth:`send_message`.
         :rtype: Message
+        :raises BuildPollVoteCreationError: If the Go core rejects the payload.
         """
         options_buf = neonize_proto.ArrayString(data=options).SerializeToString()
-        bytes_ptr = self.__client.BuildPollVoteCreation(
+        protobytes = self.__client.BuildPollVoteCreation(
             self.uuid,
             name.encode(),
             options_buf,
             len(options_buf),
             selectable_count.value,
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = BuildMessageReturnFunction.FromString(protobytes)
         if model.Error:
             raise BuildPollVoteCreationError(model.Error)
@@ -803,7 +963,7 @@ class NewClient:
             message.pollCreationMessage.contextInfo.MergeFrom(self._make_quoted_message(quoted))
         return message
 
-    def build_poll_vote(self, poll_info: MessageInfo, option_names: List[str]) -> Message:
+    def build_poll_vote(self, poll_info: MessageInfo, option_names: list[str]) -> Message:
         """Builds a poll vote.
 
         :param poll_info: The information about the poll.
@@ -816,15 +976,13 @@ class NewClient:
         """
         option_names_proto = neonize_proto.ArrayString(data=option_names).SerializeToString()
         poll_info_proto = poll_info.SerializeToString()
-        bytes_ptr = self.__client.BuildPollVote(
+        protobytes = self.__client.BuildPollVote(
             self.uuid,
             poll_info_proto,
             len(poll_info_proto),
             option_names_proto,
             len(option_names_proto),
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = neonize_proto.BuildPollVoteReturnFunction.FromString(protobytes)
         if model.Error:
             raise BuildPollVoteError(model.Error)
@@ -851,7 +1009,7 @@ class NewClient:
         """
         sender_proto = sender.SerializeToString()
         chat_proto = chat.SerializeToString()
-        bytes_ptr = self.__client.BuildReaction(
+        protobytes = self.__client.BuildReaction(
             self.uuid,
             chat_proto,
             len(chat_proto),
@@ -860,8 +1018,6 @@ class NewClient:
             message_id.encode(),
             reaction.encode(),
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         result = BuildMessageReturnFunction.FromString(protobytes)
         if result.Error:
             raise SendMessageError(result.Error)
@@ -884,7 +1040,7 @@ class NewClient:
         if with_go:
             chat_buf = chat.SerializeToString()
             sender_buf = sender.SerializeToString()
-            bytes_ptr = self.__client.BuildRevoke(
+            protobytes = self.__client.BuildRevoke(
                 self.uuid,
                 chat_buf,
                 len(chat_buf),
@@ -892,22 +1048,96 @@ class NewClient:
                 len(sender_buf),
                 message_id.encode(),
             )
-            protobytes = bytes_ptr.contents.get_bytes()
-            free_bytes(bytes_ptr)
             result = Message.FromString(protobytes)
             return result
         else:
-            return build_revoke(chat, sender, message_id, self.get_me().JID)
+            me = self.get_me()
+            return build_revoke(chat, sender, message_id, me.JID, me.LID)
+
+    def send_peer_message(self, message: Message) -> SendResponse:
+        """Send an already-built protocol message to your own devices.
+
+        Peer messages carry the ``PeerDataOperationRequest`` family — on-demand
+        history, full history sync over a time window, placeholder resends,
+        chunk retries. whatsmeow ships a builder for only one of them, so this
+        takes a constructed message and lets the caller choose the operation.
+
+        :param message: The protocol message to send.
+        :type message: Message
+        :raises SendMessageError: If the message could not be sent.
+        :return: Send response for the outgoing peer message.
+        :rtype: SendResponse
+        """
+        buf = message.SerializeToString()
+        protobytes = self.__client.SendPeerMessage(self.uuid, buf, len(buf))
+        model = SendMessageReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise SendMessageError(model.Error)
+        return model.SendResponse
+
+    def request_history_sync(
+        self,
+        chat: JID,
+        message_id: str,
+        from_me: bool,
+        timestamp: int,
+        count: int = 50,
+    ) -> SendResponse:
+        """Ask the primary device (the phone) for older messages in a chat.
+
+        WhatsApp keeps no server-side archive for a linked device, so history
+        older than what this client already holds can only be obtained by
+        asking the phone for it. The request is anchored on a message you
+        already have: the phone answers with up to ``count`` messages
+        immediately preceding it.
+
+        The answer does **not** come back from this call. It arrives
+        asynchronously as a :class:`HistorySyncEv` whose ``Data.syncType`` is
+        ``ON_DEMAND``; page further back by re-anchoring on the oldest message
+        you hold and calling this again.
+
+        The phone must be online to answer.
+
+        :param chat: The chat to fetch history for.
+        :type chat: JID
+        :param message_id: ID of the oldest message currently held (the anchor).
+        :type message_id: str
+        :param from_me: Whether that anchor message was sent by this account.
+        :type from_me: bool
+        :param timestamp: Unix timestamp (seconds) of the anchor message.
+        :type timestamp: int
+        :param count: How many messages to ask for, defaults to 50.
+        :type count: int, optional
+        :raises SendMessageError: If the request could not be sent.
+        :return: Send response for the outgoing peer message.
+        :rtype: SendResponse
+        """
+        chat_buf = chat.SerializeToString()
+        protobytes = self.__client.RequestHistorySync(
+            self.uuid,
+            chat_buf,
+            len(chat_buf),
+            message_id.encode(),
+            1 if from_me else 0,
+            int(timestamp),
+            count,
+        )
+        model = SendMessageReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise SendMessageError(model.Error)
+        return model.SendResponse
 
     def build_sticker_message(
         self,
-        file: typing.Union[str, bytes],
-        quoted: Optional[neonize_proto.Message] = None,
+        file: str | bytes,
+        quoted: neonize_proto.Message | None = None,
         name: str = "",
         packname: str = "",
         crop: bool = False,
         enforce_not_broken: bool = False,
         animated_gif: bool = False,
+        quality: int = 75,
+        compression_level: int = 4,
         passthrough: bool = False,
     ) -> Message:
         """
@@ -929,6 +1159,10 @@ class NewClient:
         :type enforce_not_broken: bool, optional
         :param animated_gif: Ensure transparent media are properly processed, defaults to False
         :type animated_gif: bool, optional
+        :param quality: Directly set sticker quality, ranges from 0-100, defaults to 75
+        :type quality: int, optional
+        :param compression_level: Directly set sticker processor compression_level, ranges from 1-6, defaults to 4
+        :type compression_level: int, optional
         :param passthrough: Don't process sticker, send as is, defaults to False.
         :type passthrough: bool, optional
         :return: The constructed sticker message
@@ -936,13 +1170,20 @@ class NewClient:
         """
         sticker = get_bytes_from_name_or_url(file)
         animated = is_webm = is_webp = is_image = saved_exif = False
-        mime = magic.from_buffer(sticker, mime=True)
+        mime = magic.from_buffer(sticker[:4096], mime=True)
         if mime == "image/webp":
             is_webp = True
             io_save = BytesIO(sticker)
             img = Image.open(io_save)
-            if len(ImageSequence.all_frames(img)) < 2:
+            if getattr(img, "n_frames", 1) < 2:
                 is_image = True
+        elif mime == "image/gif":
+            io_save = BytesIO(sticker)
+            img = Image.open(io_save)
+            if getattr(img, "n_frames", 1) < 2:
+                is_image = True
+            else:
+                animated_gif = True
         elif mime == "video/webm":
             is_webm = True
         elif (mime := mime.split("/"))[0] == "image":
@@ -956,7 +1197,14 @@ class NewClient:
         elif not passthrough:
             animated = True
             sticker, saved_exif = convert_to_sticker(
-                sticker, name, packname, enforce_not_broken, animated_gif, is_webm
+                sticker,
+                name,
+                packname,
+                enforce_not_broken,
+                animated_gif,
+                is_webm,
+                quality,
+                compression_level,
             )
             if saved_exif:
                 io_save = BytesIO(sticker)
@@ -966,6 +1214,10 @@ class NewClient:
         else:
             if not is_webp:
                 raise ConvertStickerError("File is not a webp, which is required for passthrough.")
+            if name or packname:
+                b = add_exif_to_sticker(sticker, name, packname)
+                io_save = BytesIO(b) if b else io_save
+
         if not (passthrough or saved_exif):
             stk.save(
                 io_save,
@@ -983,7 +1235,7 @@ class NewClient:
                 fileLength=upload.FileLength,
                 fileSHA256=upload.FileSHA256,
                 mediaKey=upload.MediaKey,
-                mimetype=magic.from_buffer(io_save.getvalue(), mime=True),
+                mimetype=magic.from_buffer(io_save.getvalue()[:4096], mime=True),
                 isAnimated=animated,
             )
         )
@@ -994,13 +1246,15 @@ class NewClient:
     def send_sticker(
         self,
         to: JID,
-        file: typing.Union[str, bytes],
-        quoted: Optional[neonize_proto.Message] = None,
+        file: str | bytes,
+        quoted: neonize_proto.Message | None = None,
         name: str = "",
         packname: str = "",
         crop: bool = False,
         enforce_not_broken: bool = False,
         animated_gif: bool = False,
+        quality: int = 75,
+        compression_level: int = 4,
         passthrough: bool = False,
         add_msg_secret: bool = False,
     ) -> SendResponse:
@@ -1023,6 +1277,10 @@ class NewClient:
         :type enforce_not_broken: bool, optional
         :param animated_gif: Ensure transparent media are properly processed, defaults to False
         :type animated_gif: bool, optional
+        :param quality: Directly set sticker quality, ranges from 0-100, defaults to 75
+        :type quality: int, optional
+        :param compression_level: Directly set sticker processor compression_level, ranges from 1-6, defaults to 4
+        :type compression_level: int, optional
         :param passthrough: Don't process sticker, send as is, defaults to False.
         :type passthrough: bool, optional
         :param add_msg_secret: Whether to generate 32 random bytes for messageSecret inside MessageContextInfo before sending, defaults to False
@@ -1040,6 +1298,8 @@ class NewClient:
                 crop,
                 enforce_not_broken,
                 animated_gif,
+                quality,
+                compression_level,
                 passthrough,
             ),
             add_msg_secret=add_msg_secret,
@@ -1047,10 +1307,10 @@ class NewClient:
 
     def _process_single_pack(
         self,
-        stickers: List[List[bytes, bool]],
+        stickers: list[list[bytes, bool]],
         pack_name: str,
         publisher: str = "",
-        quoted: Optional[neonize_proto.Message] = None,
+        quoted: neonize_proto.Message | None = None,
     ) -> Message:
         """
         Helper function to process a single sticker pack chunk
@@ -1128,7 +1388,7 @@ class NewClient:
         # b64 = base64.urlsafe_b64encode(upload.FileSHA256)
         # file_name = b64.decode("ascii") + ".webp"
         zip_dict.update({file_name: sticker})
-        mimetype = magic.from_buffer(sticker, mime=True)
+        mimetype = magic.from_buffer(sticker[:4096], mime=True)
         return StickerPackMessage.Sticker(
             fileName=file_name,
             isAnimated=animated,
@@ -1140,13 +1400,39 @@ class NewClient:
     def build_stickerpack_message(
         self,
         files: list,
-        quoted: Optional[neonize_proto.Message] = None,
+        quoted: neonize_proto.Message | None = None,
         packname: str = "Sticker pack",
         publisher: str = "",
         crop: bool = False,
         animated_gif: bool = False,
+        quality: int = 75,
+        compression_level: int = 4,
         passthrough: bool = False,
-    ) -> List[Message]:
+    ) -> list[Message]:
+        """Builds a list of sticker-pack messages from image or video files.
+
+        Every file is converted to WebP and grouped into packs of at most 60
+        stickers. Invalid stickers larger than 1 MB are dropped automatically to
+        prevent broken packs. When more than one pack is produced, each pack name
+        is suffixed with its index (e.g. ``"Sticker pack (2)"``).
+
+        :param files: List of file paths, URLs or binary data of the stickers.
+        :type files: list
+        :param quoted: Optional message to quote (reply to). Defaults to None.
+        :type quoted: Optional[Message], optional
+        :param packname: Name of the sticker pack. Defaults to "Sticker pack".
+        :type packname: str, optional
+        :param publisher: Publisher name embedded in the pack metadata. Defaults to "".
+        :type publisher: str, optional
+        :param crop: Whether to crop media into a square 512x512 frame. Defaults to False.
+        :type crop: bool, optional
+        :param animated_gif: Whether to preserve transparency so animated stickers keep working. Defaults to False.
+        :type animated_gif: bool, optional
+        :param passthrough: Whether to convert media without resizing. Defaults to False.
+        :type passthrough: bool, optional
+        :return: One ready-to-send message per sticker-pack chunk.
+        :rtype: List[Message]
+        """
         p_func = partial(
             convert_to_webp,
             name=packname,
@@ -1154,6 +1440,8 @@ class NewClient:
             crop=crop,
             passthrough=passthrough,
             transparent=animated_gif,
+            quality=quality,
+            compression_level=compression_level,
         )
 
         def ensure_non_broken_packs(stickers):
@@ -1188,14 +1476,16 @@ class NewClient:
         self,
         to: JID,
         files: list,
-        quoted: Optional[neonize_proto.Message] = None,
+        quoted: neonize_proto.Message | None = None,
         packname: str = "Sticker pack",
         publisher: str = "",
         crop: bool = False,
         animated_gif: bool = False,
+        quality: int = 75,
+        compression_level: int = 4,
         passthrough: bool = False,
         add_msg_secret: bool = False,
-    ) -> List[SendResponse]:
+    ) -> list[SendResponse]:
         """
         Send a sticker pack to a specific JID.
 
@@ -1211,6 +1501,12 @@ class NewClient:
         :type publisher: str, optional
         :param crop: Whether to crop-center the image, defaults to False
         :type crop: bool, optional
+        :param animated_gif: Ensure transparent media are properly processed, defaults to False
+        :type animated_gif: bool, optional
+        :param quality: Directly set sticker quality, ranges from 0-100, defaults to 75
+        :type quality: int, optional
+        :param compression_level: Directly set sticker processor compression_level, ranges from 1-6, defaults to 4
+        :type compression_level: int, optional
         :param add_msg_secret: Whether to generate 32 random bytes for messageSecret inside MessageContextInfo before sending, defaults to False
         :type add_msg_secret: bool, optional
         :return: A list of response(s) from the send message function.
@@ -1218,7 +1514,15 @@ class NewClient:
         """
         responses = []
         msgs = self.build_stickerpack_message(
-            files, quoted, packname, publisher, crop, animated_gif, passthrough
+            files,
+            quoted,
+            packname,
+            publisher,
+            crop,
+            animated_gif,
+            quality,
+            compression_level,
+            passthrough,
         )
         for msg in msgs:
             response = self.send_message(
@@ -1232,13 +1536,15 @@ class NewClient:
     def build_video_message(
         self,
         file: str | bytes,
-        caption: Optional[str] = None,
-        quoted: Optional[neonize_proto.Message] = None,
+        caption: str | None = None,
+        quoted: neonize_proto.Message | None = None,
         viewonce: bool = False,
         gifplayback: bool = False,
         is_gif: bool = False,
-        ghost_mentions: Optional[str] = None,
+        spoiler: bool = False,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
+        skip_sidecar: bool = False,
     ) -> Message:
         """
         This function is used to build a video message. It uploads a video file, extracts necessary information,
@@ -1256,11 +1562,15 @@ class NewClient:
         :type gifplayback: bool, optional
         :param is_gif: Optional. Whether the video to be sent is a gif. Defaults to False.
         :type is_gif: bool, optional
+        :param spoiler: Optional. Whether the image's thumbnail should be blurred. Defaults to False.
+        :type spoiler: bool, optional
         :return: A video message with the given parameters.
         :param ghost_mentions: List of users to tag silently (Takes precedence over auto detected mentions)
         :type ghost_mentions: str, optional
         :param mentions_are_lids: whether mentions contained in message or ghost_mentions are lids, defaults to False.
         :type mentions_are_lids: bool, optional
+        :param skip_sidecar: Optional. Whether to skip generation of sidecar, defaults to False
+        :type skip_sidecar: bool, optional
         :rtype: Message
         """
         io = BytesIO(get_bytes_from_name_or_url(file))
@@ -1269,9 +1579,30 @@ class NewClient:
         if is_gif:
             with FFmpeg(file) as ffmpeg:
                 buff = file = ffmpeg.gif_to_mp4()
+        is_avc = False
         with FFmpeg(file) as ffmpeg:
-            duration = int(ffmpeg.extract_info().format.duration)
-            thumbnail = ffmpeg.extract_thumbnail()
+            info = ffmpeg.extract_info()
+            duration = int(info.format.duration)
+            try:
+                thumbnail = ffmpeg.extract_thumbnail()
+            except Exception:
+                thumbnail = get_bytes_from_name_or_url(
+                    "https://upload.wikimedia.org/wikipedia/commons/d/d1/Image_not_available.png"
+                )
+            try:
+                is_avc = any(s.is_avc for s in info.streams)
+            except Exception:
+                pass
+            if is_avc:
+                buff = ffmpeg.to_mp4_copy()
+        if spoiler:
+            img = Image.open(BytesIO(thumbnail))
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img = img.filter(ImageFilter.GaussianBlur(radius=12))
+            thumbnail = BytesIO()
+            img.save(thumbnail, format="jpeg")
+            thumbnail = thumbnail.getvalue()
         upload = self.upload(buff)
         message = Message(
             videoMessage=VideoMessage(
@@ -1284,7 +1615,7 @@ class NewClient:
                 fileLength=upload.FileLength,
                 fileSHA256=upload.FileSHA256,
                 mediaKey=upload.MediaKey,
-                mimetype=magic.from_buffer(buff, mime=True),
+                mimetype=magic.from_buffer(buff[:4096], mime=True),
                 JPEGThumbnail=thumbnail,
                 thumbnailDirectPath=upload.DirectPath,
                 thumbnailEncSHA256=upload.FileEncSHA256,
@@ -1298,6 +1629,12 @@ class NewClient:
                 ),
             )
         )
+        if is_avc and not skip_sidecar:
+            message.videoMessage.streamingSidecar = (
+                upload.StreamingSidecar
+                if upload.StreamingSidecar
+                else get_sidecar_from_upload(buff, upload.MediaKey)
+            )
         if quoted:
             message.videoMessage.contextInfo.MergeFrom(self._make_quoted_message(quoted))
         return message
@@ -1306,13 +1643,15 @@ class NewClient:
         self,
         to: JID,
         file: str | bytes,
-        caption: Optional[str] = None,
-        quoted: Optional[neonize_proto.Message] = None,
+        caption: str | None = None,
+        quoted: neonize_proto.Message | None = None,
         viewonce: bool = False,
         gifplayback: bool = False,
         is_gif: bool = False,
-        ghost_mentions: Optional[str] = None,
+        spoiler: bool = False,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
+        skip_sidecar: bool = False,
         add_msg_secret: bool = False,
     ) -> SendResponse:
         """Sends a video to the specified recipient.
@@ -1331,10 +1670,14 @@ class NewClient:
         :type gifplayback: bool, optional
         :param is_gif: Optional. Whether the video to be sent is a gif. Defaults to False.
         :type is_gif: bool, optional
+        :param spoiler: Optional. Whether the image's thumbnail should be blurred. Defaults to False.
+        :type spoiler: bool, optional
         :param ghost_mentions: List of users to tag silently (Takes precedence over auto detected mentions)
         :type ghost_mentions: str, optional
         :param mentions_are_lids: whether mentions contained in message or ghost_mentions are lids, defaults to False.
         :type mentions_are_lids: bool, optional
+        :param skip_sidecar: Optional. Whether to skip generation of sidecar, defaults to False
+        :type skip_sidecar: bool, optional
         :param add_msg_secret: Optional. Whether to generate 32 random bytes for messageSecret inside MessageContextInfo before sending, defaults to False
         :type add_msg_secret: bool, optional
         :return: A function for handling the result of the video sending process.
@@ -1349,8 +1692,10 @@ class NewClient:
                 viewonce,
                 gifplayback,
                 is_gif,
+                spoiler,
                 ghost_mentions,
                 mentions_are_lids,
+                skip_sidecar,
             ),
             add_msg_secret=add_msg_secret,
         )
@@ -1358,10 +1703,11 @@ class NewClient:
     def build_image_message(
         self,
         file: str | bytes,
-        caption: Optional[str] = None,
-        quoted: Optional[neonize_proto.Message] = None,
+        caption: str | None = None,
+        quoted: neonize_proto.Message | None = None,
         viewonce: bool = False,
-        ghost_mentions: Optional[str] = None,
+        spoiler: bool = False,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
     ) -> Message:
         """
@@ -1379,6 +1725,8 @@ class NewClient:
         :type quoted: Optional[neonize_proto.Message], optional
         :param viewonce: Whether the image message should be viewable only once, defaults to False.
         :type viewonce: bool, optional
+        :param spoiler: Optional. Whether the image's thumbnail should be blurred. Defaults to False.
+        :type spoiler: bool, optional
         :param ghost_mentions: List of users to tag silently (Takes precedence over auto detected mentions)
         :type ghost_mentions: str, optional
         :param mentions_are_lids: whether mentions contained in message or ghost_mentions are lids, defaults to False.
@@ -1389,6 +1737,10 @@ class NewClient:
         n_file = get_bytes_from_name_or_url(file)
         img = Image.open(BytesIO(n_file))
         img.thumbnail(AspectRatioMethod(*img.size, res=200))
+        if spoiler:
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img = img.filter(ImageFilter.GaussianBlur(radius=12))
         thumbnail = BytesIO()
         img_saveable = img if img.mode == "RGB" else img.convert("RGB")
         img_saveable.save(thumbnail, format="jpeg")
@@ -1402,7 +1754,7 @@ class NewClient:
                 fileLength=upload.FileLength,
                 fileSHA256=upload.FileSHA256,
                 mediaKey=upload.MediaKey,
-                mimetype=magic.from_buffer(n_file, mime=True),
+                mimetype=magic.from_buffer(n_file[:4096], mime=True),
                 JPEGThumbnail=thumbnail.getvalue(),
                 thumbnailDirectPath=upload.DirectPath,
                 thumbnailEncSHA256=upload.FileEncSHA256,
@@ -1424,10 +1776,11 @@ class NewClient:
         self,
         to: JID,
         file: str | bytes,
-        caption: Optional[str] = None,
-        quoted: Optional[neonize_proto.Message] = None,
+        caption: str | None = None,
+        quoted: neonize_proto.Message | None = None,
         viewonce: bool = False,
-        ghost_mentions: Optional[str] = None,
+        spoiler: bool = False,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
         add_msg_secret: bool = False,
     ) -> SendResponse:
@@ -1443,6 +1796,8 @@ class NewClient:
         :type quoted: Optional[Message], optional
         :param viewonce: Optional. Whether the image should be viewonce. Defaults to False.
         :type viewonce: bool, optional
+        :param spoiler: Optional. Whether the image's thumbnail should be blurred. Defaults to False.
+        :type spoiler: bool, optional
         :param ghost_mentions: List of users to tag silently (Takes precedence over auto detected mentions)
         :type ghost_mentions: str, optional
         :param mentions_are_lids: whether mentions contained in message or ghost_mentions are lids, defaults to False.
@@ -1460,6 +1815,7 @@ class NewClient:
                 quoted,
                 viewonce=viewonce,
                 ghost_mentions=ghost_mentions,
+                spoiler=spoiler,
                 mentions_are_lids=mentions_are_lids,
             ),
             add_msg_secret=add_msg_secret,
@@ -1472,6 +1828,22 @@ class NewClient:
         msg_association: MessageAssociation,
         **kwargs,
     ) -> Message:
+        """Builds a single album entry (image or video) linked to an album.
+
+        This is a low-level helper used by :meth:`send_album`; most callers
+        should use that method instead.
+
+        :param file: File path, URL or binary data of the media.
+        :type file: str | bytes
+        :param media_type: Kind of media to build, either ``"image"`` or ``"video"``.
+        :type media_type: str
+        :param msg_association: Album association linking this message to its album.
+        :type msg_association: MessageAssociation
+        :keyword caption: Optional caption displayed under the media.
+        :kwtype caption: Optional[str]
+        :return: The built album-content message.
+        :rtype: Message
+        """
         build_message = (
             self.build_image_message if media_type == "image" else self.build_video_message
         )
@@ -1485,12 +1857,13 @@ class NewClient:
         self,
         to: JID,
         files: list,
-        caption: Optional[str] = None,
-        quoted: Optional[neonize_proto.Message] = None,
-        ghost_mentions: Optional[str] = None,
+        caption: str | None = None,
+        quoted: neonize_proto.Message | None = None,
+        spoiler: bool = False,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
         add_msg_secret: bool = False,
-    ) -> List[SendResponse, List[SendResponse]]:
+    ) -> list[SendResponse, list[SendResponse]]:
         """Sends an album containing images, videos or both to the specified recipient.
 
         :param to: The JID (Jabber Identifier) of the recipient.
@@ -1501,6 +1874,8 @@ class NewClient:
         :type caption: Optional[str], optional
         :param quoted: Optional. The message to which the album is a reply. Defaults to None.
         :type quoted: Optional[Message], optional
+        :param spoiler: Optional. Whether the image's thumbnail should be blurred. Defaults to False.
+        :type spoiler: bool, optional
         :param ghost_mentions: List of users to tag silently (Takes precedence over auto detected mentions)
         :type ghost_mentions: str, optional
         :param add_msg_secret: Optional. Whether to generate 32 random bytes for messageSecret inside MessageContextInfo before sending, defaults to False
@@ -1512,7 +1887,7 @@ class NewClient:
         medias = []
         for file in files:
             file = get_bytes_from_name_or_url(file)
-            mime = magic.from_buffer(file, mime=True)
+            mime = magic.from_buffer(file[:4096], mime=True)
             media_type = mime.split("/")[0]
             if media_type == "image":
                 image_count += 1
@@ -1560,6 +1935,7 @@ class NewClient:
                     msg_association,
                     caption=caption,
                     quoted=quoted,
+                    spoiler=spoiler,
                     ghost_mentions=ghost_mentions,
                     mentions_are_lids=mentions_are_lids,
                 )
@@ -1573,6 +1949,7 @@ class NewClient:
                         media_type,
                         msg_association,
                         quoted=quoted,
+                        spoiler=spoiler,
                     )
                     for file, media_type in medias[1:]
                 ]
@@ -1592,7 +1969,7 @@ class NewClient:
         self,
         file: str | bytes,
         ptt: bool = False,
-        quoted: Optional[neonize_proto.Message] = None,
+        quoted: neonize_proto.Message | None = None,
     ) -> Message:
         """
         This method builds an audio message from a given file or bytes.
@@ -1621,7 +1998,7 @@ class NewClient:
                 fileLength=upload.FileLength,
                 fileSHA256=upload.FileSHA256,
                 mediaKey=upload.MediaKey,
-                mimetype=magic.from_buffer(buff, mime=True),
+                mimetype=magic.from_buffer(buff[:4096], mime=True),
                 PTT=ptt,
             )
         )
@@ -1634,7 +2011,7 @@ class NewClient:
         to: JID,
         file: str | bytes,
         ptt: bool = False,
-        quoted: Optional[neonize_proto.Message] = None,
+        quoted: neonize_proto.Message | None = None,
         add_msg_secret: bool = False,
     ) -> SendResponse:
         """Sends an audio to the specified recipient.
@@ -1662,14 +2039,38 @@ class NewClient:
     def build_document_message(
         self,
         file: str | bytes,
-        caption: Optional[str] = None,
-        title: Optional[str] = None,
-        filename: Optional[str] = None,
-        mimetype: Optional[str] = None,
-        quoted: Optional[neonize_proto.Message] = None,
-        ghost_mentions: Optional[str] = None,
+        caption: str | None = None,
+        title: str | None = None,
+        filename: str | None = None,
+        mimetype: str | None = None,
+        quoted: neonize_proto.Message | None = None,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
     ):
+        """Builds a document message that can be sent with :meth:`send_message`.
+
+        The file is uploaded automatically; when *mimetype* is omitted it is
+        detected from the file content.
+
+        :param file: File path, URL or binary data of the document.
+        :type file: str | bytes
+        :param caption: Optional caption displayed under the document. Defaults to None.
+        :type caption: Optional[str], optional
+        :param title: Optional title of the document. Defaults to None.
+        :type title: Optional[str], optional
+        :param filename: Optional file name shown to recipients. Defaults to None.
+        :type filename: Optional[str], optional
+        :param mimetype: MIME type of the document; auto-detected when omitted. Defaults to None.
+        :type mimetype: Optional[str], optional
+        :param quoted: Optional message to quote (reply to). Defaults to None.
+        :type quoted: Optional[Message], optional
+        :param ghost_mentions: Optional text used to resolve @mentions instead of the caption. Defaults to None.
+        :type ghost_mentions: Optional[str], optional
+        :param mentions_are_lids: Whether resolved mentions are LID JIDs. Defaults to False.
+        :type mentions_are_lids: bool, optional
+        :return: The built document message.
+        :rtype: Message
+        """
         io = BytesIO(get_bytes_from_name_or_url(file))
         io.seek(0)
         buff = io.read()
@@ -1683,7 +2084,7 @@ class NewClient:
                 fileLength=upload.FileLength,
                 fileSHA256=upload.FileSHA256,
                 mediaKey=upload.MediaKey,
-                mimetype=mimetype or magic.from_buffer(buff, mime=True),
+                mimetype=mimetype or magic.from_buffer(buff[:4096], mime=True),
                 title=title,
                 fileName=filename,
                 contextInfo=ContextInfo(
@@ -1702,12 +2103,12 @@ class NewClient:
         self,
         to: JID,
         file: str | bytes,
-        caption: Optional[str] = None,
-        title: Optional[str] = None,
-        filename: Optional[str] = None,
-        mimetype: Optional[str] = None,
-        quoted: Optional[neonize_proto.Message] = None,
-        ghost_mentions: Optional[str] = None,
+        caption: str | None = None,
+        title: str | None = None,
+        filename: str | None = None,
+        mimetype: str | None = None,
+        quoted: neonize_proto.Message | None = None,
+        ghost_mentions: str | None = None,
         mentions_are_lids: bool = False,
         add_msg_secret: bool = False,
     ) -> SendResponse:
@@ -1754,7 +2155,7 @@ class NewClient:
         to: JID,
         contact_name: str,
         contact_number: str,
-        quoted: Optional[neonize_proto.Message] = None,
+        quoted: neonize_proto.Message | None = None,
     ) -> SendResponse:
         """Sends a contact to the specified recipient.
 
@@ -1779,7 +2180,7 @@ class NewClient:
             message.contactMessage.contextInfo.MergeFrom(self._make_quoted_message(quoted))
         return self.send_message(to, message)
 
-    def upload(self, binary: bytes, media_type: Optional[MediaType] = None) -> UploadResponse:
+    def upload(self, binary: bytes, media_type: MediaType | None = None) -> UploadResponse:
         """Uploads media content.
 
         :param binary: The binary data to be uploaded.
@@ -1794,23 +2195,21 @@ class NewClient:
             mime = MediaType.from_magic(binary)
         else:
             mime = media_type
-        bytes_ptr = self.__client.Upload(self.uuid, binary, len(binary), mime.value)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.Upload(self.uuid, binary, len(binary), mime.value)
         upload_model = UploadReturnFunction.FromString(protobytes)
         if upload_model.Error:
             raise UploadError(upload_model.Error)
         return upload_model.UploadResponse
 
     @overload
-    def download_any(self, message: Message) -> bytes: ...
+    def download_any(self, message: Message) -> bytes:
+        """Overload of :meth:`download_any` returning the content as bytes."""
 
     @overload
-    def download_any(self, message: Message, path: str) -> NoneType: ...
+    def download_any(self, message: Message, path: str) -> NoneType:
+        """Overload of :meth:`download_any` saving the content to *path*."""
 
-    def download_any(
-        self, message: Message, path: Optional[str] = None
-    ) -> typing.Union[None, bytes]:
+    def download_any(self, message: Message, path: str | None = None) -> None | bytes:
         """Downloads content from a message.
 
         :param message: The message containing the content to download.
@@ -1822,18 +2221,18 @@ class NewClient:
         :rtype: Union[None, bytes]
         """
         msg_protobuf = message.SerializeToString()
-        bytes_ptr = self.__client.DownloadAny(self.uuid, msg_protobuf, len(msg_protobuf))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        if path:
+            err = self.__client.DownloadAnyToFile(
+                self.uuid, msg_protobuf, len(msg_protobuf), path.encode()
+            ).decode()
+            if err:
+                raise DownloadError(err)
+            return None
+        protobytes = self.__client.DownloadAny(self.uuid, msg_protobuf, len(msg_protobuf))
         media = DownloadReturnFunction.FromString(protobytes)
         if media.Error:
             raise DownloadError(media.Error)
-        if path:
-            with open(path, "wb") as file:
-                file.write(media.Binary)
-        else:
-            return media.Binary
-        return None
+        return media.Binary
 
     def download_media_with_path(
         self,
@@ -1866,7 +2265,7 @@ class NewClient:
         :return: The downloaded media in bytes.
         :rtype: bytes
         """
-        bytes_ptr = self.__client.DownloadMediaWithPath(
+        protobytes = self.__client.DownloadMediaWithPath(
             self.uuid,
             direct_path.encode(),
             enc_file_hash,
@@ -1879,8 +2278,6 @@ class NewClient:
             media_type.value,
             mms_type.value.encode(),
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = neonize_proto.DownloadReturnFunction.FromString(protobytes)
         if model.Error:
             raise DownloadError(model.Error)
@@ -1894,8 +2291,8 @@ class NewClient:
         """
         return self.__client.GenerateMessageID(self.uuid).decode()
 
-    def send_chat_presence(self, jid: JID, state: ChatPresence, media: ChatPresenceMedia) -> str:
-        """Sends chat presence information.
+    def send_chat_presence(self, jid: JID, state: ChatPresence, media: ChatPresenceMedia) -> None:
+        """Sends chat presence information (typing / recording indicators).
 
         :param jid: The JID (Jabber Identifier) of the chat.
         :type jid: JID
@@ -1903,13 +2300,16 @@ class NewClient:
         :type state: ChatPresence
         :param media: The chat presence media information.
         :type media: ChatPresenceMedia
-        :return: A string indicating the result or status of the presence information sending.
-        :rtype: str
+        :raises SendPresenceError: If the server rejects the presence update.
         """
+        from .exc import SendPresenceError
+
         jidbyte = jid.SerializeToString()
-        return self.__client.SendChatPresence(
+        err = self.__client.SendChatPresence(
             self.uuid, jidbyte, len(jidbyte), state.value, media.value
         ).decode()
+        if err:
+            raise SendPresenceError(err)
 
     def is_on_whatsapp(self, *numbers: str) -> Sequence[IsOnWhatsAppResponse]:
         """
@@ -1923,9 +2323,7 @@ class NewClient:
         """
         if numbers:
             numbers_buf = " ".join(numbers).encode()
-            bytes_ptr = self.__client.IsOnWhatsApp(self.uuid, numbers_buf, len(numbers_buf))
-            protobytes = bytes_ptr.contents.get_bytes()
-            free_bytes(bytes_ptr)
+            protobytes = self.__client.IsOnWhatsApp(self.uuid, numbers_buf)
             model = IsOnWhatsAppReturnFunction.FromString(protobytes)
             if model.Error:
                 raise IsOnWhatsAppError(model.Error)
@@ -1965,9 +2363,7 @@ class NewClient:
         :rtype: RepeatedCompositeFieldContainer[GetUserInfoSingleReturnFunction]
         """
         jidbuf = JIDArray(JIDS=jid).SerializeToString()
-        bytes_ptr = self.__client.GetUserInfo(self.uuid, jidbuf, len(jidbuf))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetUserInfo(self.uuid, jidbuf, len(jidbuf))
         model = GetUserInfoReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetUserInfoError(model.Error)
@@ -1983,13 +2379,11 @@ class NewClient:
         :rtype: GroupInfo
         """
         jidbuf = jid.SerializeToString()
-        bytes_ptr = self.__client.GetGroupInfo(
+        protobytes = self.__client.GetGroupInfo(
             self.uuid,
             jidbuf,
             len(jidbuf),
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = GetGroupInfoReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetGroupInfoError(model.Error)
@@ -2004,9 +2398,7 @@ class NewClient:
         :rtype: GroupInfo
         :raises GetGroupInfoError: If there is an error retrieving the group information.
         """
-        bytes_ptr = self.__client.GetGroupInfoFromLink(self.uuid, code.encode())
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetGroupInfoFromLink(self.uuid, code.encode())
         model = GetGroupInfoReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetGroupInfoError(model.Error)
@@ -2033,7 +2425,7 @@ class NewClient:
         """
         jidbyte = jid.SerializeToString()
         inviterbyte = inviter.SerializeToString()
-        bytes_ptr = self.__client.GetGroupInfoFromInvite(
+        protobytes = self.__client.GetGroupInfoFromInvite(
             self.uuid,
             jidbyte,
             len(jidbyte),
@@ -2042,29 +2434,30 @@ class NewClient:
             code.encode(),
             expiration,
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = GetGroupInfoReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetGroupInfoError(model.Error)
         return model.GroupInfo
 
-    def set_group_name(self, jid: JID, name: str) -> str:
-        """Sets the name of a group.
+    def set_group_name(self, jid: JID, name: str) -> None:
+        """Rename a group.
 
         :param jid: The JID (Jabber Identifier) of the group.
         :type jid: JID
-        :param name: The new name to be set for the group.
+        :param name: The new name for the group.
         :type name: str
-        :return: A string indicating the result or an error status. Empty string if successful.
-        :rtype: str
+        :raises SetGroupNameError: If renaming the group fails.
         """
+        from .exc import SetGroupNameError
+
         jidbuf = jid.SerializeToString()
-        return self.__client.SetGroupName(
+        err = self.__client.SetGroupName(
             self.uuid, jidbuf, len(jidbuf), ctypes.create_string_buffer(name.encode())
         ).decode()
+        if err:
+            raise SetGroupNameError(err)
 
-    def set_group_photo(self, jid: JID, file_or_bytes: typing.Union[str, bytes]) -> str:
+    def set_group_photo(self, jid: JID, file_or_bytes: str | bytes) -> str:
         """Sets the photo of a group.
 
         :param jid: The JID (Jabber Identifier) of the group.
@@ -2077,15 +2470,13 @@ class NewClient:
         """
         data = get_bytes_from_name_or_url(file_or_bytes)
         jid_buf = jid.SerializeToString()
-        bytes_ptr = self.__client.SetGroupPhoto(self.uuid, jid_buf, len(jid_buf), data, len(data))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.SetGroupPhoto(self.uuid, jid_buf, len(jid_buf), data, len(data))
         model = SetGroupPhotoReturnFunction.FromString(protobytes)
         if model.Error:
             raise SetGroupPhotoError(model.Error)
         return model.PictureID
 
-    def set_profile_photo(self, file_or_bytes: typing.Union[str, bytes]) -> str:
+    def set_profile_photo(self, file_or_bytes: str | bytes) -> str:
         """Sets profile photo.
 
         :param file_or_bytes: Either a file path (str) or binary data (bytes) representing the group photo.
@@ -2095,9 +2486,7 @@ class NewClient:
         :rtype: str
         """
         data = get_bytes_from_name_or_url(file_or_bytes)
-        bytes_ptr = self.__client.SetProfilePhoto(self.uuid, data, len(data))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.SetProfilePhoto(self.uuid, data, len(data))
         model = SetGroupPhotoReturnFunction.FromString(protobytes)
         if model.Error:
             raise SetGroupPhotoError(model.Error)
@@ -2124,9 +2513,7 @@ class NewClient:
         :rtype: JID
         """
         jid_buf = jid.SerializeToString()
-        bytes_ptr = self.__client.GetLIDFromPN(self.uuid, jid_buf, len(jid_buf))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetLIDFromPN(self.uuid, jid_buf, len(jid_buf))
         model = GetJIDFromStoreReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetJIDFromStoreError(model.Error)
@@ -2142,9 +2529,7 @@ class NewClient:
         :rtype: JID
         """
         jid_buf = jid.SerializeToString()
-        bytes_ptr = self.__client.GetPNFromLID(self.uuid, jid_buf, len(jid_buf))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetPNFromLID(self.uuid, jid_buf, len(jid_buf))
         model = GetJIDFromStoreReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetJIDFromStoreError(model.Error)
@@ -2156,7 +2541,7 @@ class NewClient:
         """
         chat_buf = chat_jid.SerializeToString()
         sender_buf = sender_jid.SerializeToString()
-        bytes_ptr = self.__client.PinMessage(
+        protobytes = self.__client.PinMessage(
             self.uuid,
             chat_buf,
             len(chat_buf),
@@ -2165,23 +2550,24 @@ class NewClient:
             message_id.encode(),
             seconds,
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = SendMessageReturnFunction.FromString(protobytes)
         if model.Error:
             raise SendMessageError(model.Error)
         return model.SendResponse
 
-    def leave_group(self, jid: JID) -> str:
-        """Leaves a group.
+    def leave_group(self, jid: JID) -> None:
+        """Leave a group.
 
         :param jid: The JID (Jabber Identifier) of the target group.
         :type jid: JID
-        :return: A string indicating the result or an error status. Empty string if successful.
-        :rtype: str
+        :raises LeaveGroupError: If leaving the group fails.
         """
+        from .exc import LeaveGroupError
+
         jid_buf = jid.SerializeToString()
-        return self.__client.LeaveGroup(self.uuid, jid_buf, len(jid_buf)).decode()
+        err = self.__client.LeaveGroup(self.uuid, jid_buf, len(jid_buf)).decode()
+        if err:
+            raise LeaveGroupError(err)
 
     def get_group_invite_link(self, jid: JID, revoke: bool = False) -> str:
         """Gets or revokes the invite link for a group.
@@ -2195,9 +2581,7 @@ class NewClient:
         :rtype: str
         """
         jid_buf = jid.SerializeToString()
-        bytes_ptr = self.__client.GetGroupInviteLink(self.uuid, jid_buf, len(jid_buf), revoke)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetGroupInviteLink(self.uuid, jid_buf, len(jid_buf), revoke)
         model = GetGroupInviteLinkReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetGroupInviteLinkError(model.Error)
@@ -2212,9 +2596,7 @@ class NewClient:
         :return: The JID (Jabber Identifier) of the joined group.
         :rtype: JID
         """
-        bytes_ptr = self.__client.JoinGroupWithLink(self.uuid, code.encode())
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.JoinGroupWithLink(self.uuid, code.encode())
         model = JoinGroupWithLinkReturnFunction.FromString(protobytes)
         if model.Error:
             raise InviteLinkError(model.Error)
@@ -2268,6 +2650,13 @@ class NewClient:
             raise LinkGroupError(err)
 
     def logout(self):
+        """Logs the connected account out and invalidates its session credentials.
+
+        After a successful logout the stored session can no longer be reused;
+        a new pairing (QR or pair code) is required on next connect.
+
+        :raises LogoutError: If the logout request fails.
+        """
         err = self.__client.Logout(self.uuid).decode()
         if err:
             raise LogoutError(err)
@@ -2278,7 +2667,7 @@ class NewClient:
         chat: JID,
         sender: JID,
         receipt: ReceiptType,
-        timestamp: Optional[int] = None,
+        timestamp: int | None = None,
     ):
         """Marks the specified messages as read.
 
@@ -2310,7 +2699,7 @@ class NewClient:
         if err:
             raise MarkReadError(err.decode())
 
-    def newsletter_mark_viewed(self, jid: JID, message_server_ids: List[MessageServerID]):
+    def newsletter_mark_viewed(self, jid: JID, message_server_ids: list[MessageServerID]):
         """
         Marks the specified newsletters as viewed by the user with the given JID.
 
@@ -2359,7 +2748,6 @@ class NewClient:
         )
         if err:
             raise NewsletterSendReactionError(err)
-        return
 
     def newsletter_subscribe_live_updates(self, jid: JID) -> int:
         """Subscribes a user to live updates of a newsletter.
@@ -2371,11 +2759,9 @@ class NewClient:
         :rtype: int
         """
         jid_proto = jid.SerializeToString()
-        bytes_ptr = self.__client.NewsletterSubscribeLiveUpdates(
+        protobytes = self.__client.NewsletterSubscribeLiveUpdates(
             self.uuid, jid_proto, len(jid_proto)
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = neonize_proto.NewsletterSubscribeLiveUpdatesReturnFunction.FromString(protobytes)
         if model.Error:
             raise NewsletterSubscribeLiveUpdatesError(model.Error)
@@ -2406,9 +2792,7 @@ class NewClient:
         :return: The target of the business message link.
         :rtype: neonize_proto.BusinessMessageLinkTarget
         """
-        bytes_ptr = self.__client.ResolveBusinessMessageLink(self.uuid, code.encode())
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.ResolveBusinessMessageLink(self.uuid, code.encode())
         model = neonize_proto.ResolveBusinessMessageLinkReturnFunction.FromString(protobytes)
         if model.Error:
             raise ResolveContactQRLinkError(model.Error)
@@ -2423,9 +2807,7 @@ class NewClient:
         :return: The target contact of the QR link.
         :rtype: neonize_proto.ContactQRLinkTarget
         """
-        bytes_ptr = self.__client.ResolveContactQRLink(self.uuid, code.encode())
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.ResolveContactQRLink(self.uuid, code.encode())
         model = neonize_proto.ResolveContactQRLinkReturnFunction.FromString(protobytes)
         if model.Error:
             raise ResolveContactQRLinkError(model.Error)
@@ -2445,7 +2827,39 @@ class NewClient:
         if err:
             raise SendAppStateError(err)
 
-    def set_default_disappearing_timer(self, timer: typing.Union[timedelta, int]):
+    def fetch_app_state(self, name: str, full_sync: bool = False):
+        """Fetches an app state collection (``regular_high``, ``regular_low``,
+        ``regular``, ``critical_block`` or ``critical_unblock_low``) from the
+        server, applying the pending patches. With ``full_sync`` the local copy
+        is discarded and downloaded again.
+
+        :param name: Name of the collection.
+        :type name: str
+        :param full_sync: Download the whole collection again, defaults to False.
+        :type full_sync: bool, optional
+        :raises SendAppStateError: If the sync fails, for example with
+            ``mismatching LTHash``.
+        """
+        err = self.__client.FetchAppState(self.uuid, name.encode(), 1 if full_sync else 0).decode()
+        if err:
+            raise SendAppStateError(err)
+
+    def request_app_state_recovery(self, name: str):
+        """Asks the primary device for a recovery snapshot of an app state
+        collection that keeps failing with ``mismatching LTHash`` even after a
+        full sync (see tulir/whatsmeow#858). The answer arrives later as a peer
+        message and replaces the local copy; the phone may only answer while
+        WhatsApp is open.
+
+        :param name: Name of the collection.
+        :type name: str
+        :raises SendAppStateError: If the request cannot be sent.
+        """
+        err = self.__client.RequestAppStateRecovery(self.uuid, name.encode()).decode()
+        if err:
+            raise SendAppStateError(err)
+
+    def set_default_disappearing_timer(self, timer: timedelta | int):
         """
         Sets a default disappearing timer for messages. The timer can be specified as a timedelta or an integer.
         If a timedelta is provided, it is converted to nanoseconds. If an integer is provided, it is used directly as the timer.
@@ -2466,8 +2880,8 @@ class NewClient:
     def set_disappearing_timer(
         self,
         jid: JID,
-        timer: typing.Union[timedelta, int],
-        setting_ts: Optional[timedelta] = None,
+        timer: timedelta | int,
+        setting_ts: timedelta | None = None,
     ):
         """
         Set a disappearing timer for a specific JID. The timer can be set as either a timedelta object or an integer.
@@ -2535,6 +2949,73 @@ class NewClient:
         if err:
             raise SetGroupLockedError(err)
 
+    def set_group_join_approval_mode(self, jid: JID, mode: bool) -> None:
+        """Set whether admins must approve new members before they can join the group.
+
+        :param jid: The JID (Jabber ID) of the group to update.
+        :type jid: JID
+        :param mode: True to require admin approval, False to allow anyone with an invite to join.
+        :type mode: bool
+        :raises SetGroupJoinApprovalModeError: If the operation fails, an error with the reason is raised.
+        """
+        jid_proto = jid.SerializeToString()
+        err = self.__client.SetGroupJoinApprovalMode(
+            self.uuid, jid_proto, len(jid_proto), mode
+        ).decode()
+        if err:
+            raise SetGroupJoinApprovalModeError(err)
+
+    def set_group_member_add_mode(self, jid: JID, mode: GroupMemberAddMode | str) -> None:
+        """Set who can add members to the group.
+
+        :param jid: The JID (Jabber ID) of the group to update.
+        :type jid: JID
+        :param mode: GroupMemberAddMode.ADMIN_ADD or GroupMemberAddMode.ALL_MEMBER_ADD.
+        :type mode: GroupMemberAddMode | str
+        :raises SetGroupMemberAddModeError: If the operation fails.
+        """
+        jid_proto = jid.SerializeToString()
+        mode_val = mode.value if isinstance(mode, GroupMemberAddMode) else str(mode)
+        err = self.__client.SetGroupMemberAddMode(
+            self.uuid, jid_proto, len(jid_proto), mode_val.encode()
+        ).decode()
+        if err:
+            raise SetGroupMemberAddModeError(err)
+
+    def update_group_request_participants(
+        self,
+        jid: JID,
+        participants: list[JID],
+        action: ParticipantRequestChange | str,
+    ) -> RepeatedCompositeFieldContainer[GroupParticipant]:
+        """Update pending participant join requests for a group (approve or reject).
+
+        :param jid: The JID of the group to update.
+        :type jid: JID
+        :param participants: List of participant JIDs to approve or reject.
+        :type participants: list[JID]
+        :param action: ParticipantRequestChange.APPROVE or ParticipantRequestChange.REJECT.
+        :type action: ParticipantRequestChange | str
+        :return: Updated group participants.
+        :rtype: RepeatedCompositeFieldContainer[GroupParticipant]
+        :raises UpdateGroupRequestParticipantsError: If the operation fails.
+        """
+        jid_proto = jid.SerializeToString()
+        jids_proto = neonize_proto.JIDArray(JIDS=participants).SerializeToString()
+        act_val = action.value if isinstance(action, ParticipantRequestChange) else str(action)
+        protobytes = self.__client.UpdateGroupRequestParticipants(
+            self.uuid,
+            jid_proto,
+            len(jid_proto),
+            jids_proto,
+            len(jids_proto),
+            act_val.encode(),
+        )
+        model = neonize_proto.UpdateGroupParticipantsReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise UpdateGroupRequestParticipantsError(model.Error)
+        return model.participants
+
     def set_group_topic(self, jid: JID, previous_id: str, new_id: str, topic: str):
         """
         Set the topic of a group in a chat application.
@@ -2589,15 +3070,21 @@ class NewClient:
         if err:
             raise SetPassiveError(err)
 
-    def set_status_message(self, msg: str):
+    def set_status_message(self, msg: str, emoji: str = "", seconds: int = 0):
         """
         Sets a status message for a client using the client's UUID.
 
         :param msg: The status message to be set.
         :type msg: str
+        :param emoji: Optional status emoji, defaults to none.
+        :type emoji: str
+        :param seconds: Optional duration in seconds after which the status expires, defaults to 0 (no expiry).
+        :type seconds: int
         :raises SetStatusMessageError: If there is an error while setting the status message.
         """
-        err = self.__client.SetStatusMessage(self.uuid, msg.encode()).decode()
+        err = self.__client.SetStatusMessage(
+            self.uuid, msg.encode(), emoji.encode(), seconds
+        ).decode()
         if err:
             raise SetStatusMessageError(err)
 
@@ -2645,7 +3132,7 @@ class NewClient:
         if err:
             raise UnlinkGroupError(err)
 
-    def update_blocklist(self, jid: JID, action: BlocklistAction) -> Blocklist:
+    def update_blocklist(self, jid: JID, action: BlocklistAction, dhash: str = "") -> Blocklist:
         """
         Function to update the blocklist with a given action on a specific JID.
 
@@ -2653,23 +3140,23 @@ class NewClient:
         :type jid: JID
         :param action: The action to be performed (block or unblock) on the JID.
         :type action: BlocklistAction
+        :param dhash: Optional dhash from a previous blocklist response.
+        :type dhash: str
         :raises UpdateBlocklistError: If there is an error while updating the blocklist.
         :return: The updated blocklist.
         :rtype: Blocklist
         """
         jid_proto = jid.SerializeToString()
-        bytes_ptr = self.__client.UpdateBlocklist(
-            self.uuid, jid_proto, len(jid_proto), action.value.encode()
+        protobytes = self.__client.UpdateBlocklist(
+            self.uuid, jid_proto, len(jid_proto), action.value.encode(), dhash.encode()
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = neonize_proto.GetBlocklistReturnFunction.FromString(protobytes)
         if model.Error:
             raise UpdateBlocklistError(model.Error)
         return model.Blocklist
 
     def update_group_participants(
-        self, jid: JID, participants_changes: List[JID], action: ParticipantChange
+        self, jid: JID, participants_changes: list[JID], action: ParticipantChange
     ) -> RepeatedCompositeFieldContainer[GroupParticipant]:
         """
         This method is used to update the list of participants in a group.
@@ -2687,7 +3174,7 @@ class NewClient:
         """
         jid_proto = jid.SerializeToString()
         jids_proto = neonize_proto.JIDArray(JIDS=participants_changes).SerializeToString()
-        bytes_ptr = self.__client.UpdateGroupParticipants(
+        protobytes = self.__client.UpdateGroupParticipants(
             self.uuid,
             jid_proto,
             len(jid_proto),
@@ -2695,8 +3182,6 @@ class NewClient:
             len(jids_proto),
             action.value.encode(),
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = neonize_proto.UpdateGroupParticipantsReturnFunction.FromString(protobytes)
         if model.Error:
             raise UpdateGroupParticipantsError(model.Error)
@@ -2713,9 +3198,7 @@ class NewClient:
         :return: The response from the server after the upload.
         :rtype: UploadResponse
         """
-        bytes_ptr = self.__client.UploadNewsletter(self.uuid, data, len(data), media_type.value)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.UploadNewsletter(self.uuid, data, len(data), media_type.value)
         model = UploadReturnFunction.FromString(protobytes)
         if model.Error:
             raise UploadError(model.Error)
@@ -2724,9 +3207,9 @@ class NewClient:
     def create_group(
         self,
         name: str,
-        participants: List[JID] = [],
-        linked_parent: Optional[GroupLinkedParent] = None,
-        group_parent: Optional[GroupParent] = None,
+        participants: list[JID] = [],
+        linked_parent: GroupLinkedParent | None = None,
+        group_parent: GroupParent | None = None,
     ) -> GroupInfo:
         """Create a new group.
 
@@ -2749,9 +3232,7 @@ class NewClient:
         if group_parent:
             group_info.GroupParent.MergeFrom(group_parent)
         group_info_buf = group_info.SerializeToString()
-        bytes_ptr = self.__client.CreateGroup(self.uuid, group_info_buf, len(group_info_buf))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.CreateGroup(self.uuid, group_info_buf, len(group_info_buf))
         model = GetGroupInfoReturnFunction.FromString(protobytes)
         if model.Error:
             raise CreateGroupError(model.Error)
@@ -2768,9 +3249,7 @@ class NewClient:
         :rtype: RepeatedCompositeFieldContainer[JID]
         """
         jidbyte = jid.SerializeToString()
-        bytes_ptr = self.__client.GetGroupRequestParticipants(self.uuid, jidbyte, len(jidbyte))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetGroupRequestParticipants(self.uuid, jidbyte, len(jidbyte))
         model = neonize_proto.GetGroupRequestParticipantsReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetGroupRequestParticipantsError(model.Error)
@@ -2784,16 +3263,14 @@ class NewClient:
 
         :raises GetJoinedGroupsError: If there was an error retrieving the joined groups.
         """
-        bytes_ptr = self.__client.GetJoinedGroups(self.uuid)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetJoinedGroups(self.uuid)
         model = neonize_proto.GetJoinedGroupsReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetJoinedGroupsError(model.Error)
         return model.Group
 
     def create_newsletter(
-        self, name: str, description: str, picture: typing.Union[str, bytes]
+        self, name: str, description: str, picture: str | bytes
     ) -> NewsletterMetadata:
         """Create a newsletter with the given name, description, and picture.
 
@@ -2812,9 +3289,7 @@ class NewClient:
             Description=description,
             Picture=get_bytes_from_name_or_url(picture),
         ).SerializeToString()
-        bytes_ptr = self.__client.CreateNewsletter(self.uuid, protobuf, len(protobuf))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.CreateNewsletter(self.uuid, protobuf, len(protobuf))
         model = neonize_proto.CreateNewsLetterReturnFunction.FromString(protobytes)
         if model.Error:
             raise CreateNewsletterError(model.Error)
@@ -2844,9 +3319,7 @@ class NewClient:
         :rtype: NewsletterMetadata
         :raises GetNewsletterInfoWithInviteError: If there is an error retrieving the newsletter information.
         """
-        bytes_ptr = self.__client.GetNewsletterInfoWithInvite(self.uuid, key.encode())
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetNewsletterInfoWithInvite(self.uuid, key.encode())
         model = neonize_proto.CreateNewsLetterReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetNewsletterInfoWithInviteError(model.Error)
@@ -2872,11 +3345,9 @@ class NewClient:
         :raises GetNewsletterMessageUpdateError: If there was an error retrieving the newsletter messages.
         """
         jidbyte = jid.SerializeToString()
-        bytes_ptr = self.__client.GetNewsletterMessageUpdate(
+        protobytes = self.__client.GetNewsletterMessageUpdate(
             self.uuid, jidbyte, len(jidbyte), count, since, after
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = neonize_proto.GetNewsletterMessageUpdateReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetNewsletterMessageUpdateError(model.Error)
@@ -2897,11 +3368,9 @@ class NewClient:
         :rtype: RepeatedCompositeFieldContaine[NewsletterMessage]
         """
         jidbyte = jid.SerializeToString()
-        bytes_ptr = self.__client.GetNewsletterMessages(
+        protobytes = self.__client.GetNewsletterMessages(
             self.uuid, jidbyte, len(jidbyte), count, before
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = neonize_proto.GetNewsletterMessageUpdateReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetNewsletterMessagesError(model.Error)
@@ -2914,9 +3383,7 @@ class NewClient:
         :return: privacy settings
         :rtype: PrivacySettings
         """
-        bytes_ptr = self.__client.GetPrivacySettings(self.uuid)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetPrivacySettings(self.uuid)
         result = neonize_proto.PrivacySettings.FromString(protobytes)
         return result
 
@@ -2938,19 +3405,40 @@ class NewClient:
         """
         jid_bytes = jid.SerializeToString()
         extra_bytes = extra.SerializeToString()
-        bytes_ptr = self.__client.GetProfilePicture(
+        protobytes = self.__client.GetProfilePicture(
             self.uuid,
             jid_bytes,
             len(jid_bytes),
             extra_bytes,
             len(extra_bytes),
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = neonize_proto.GetProfilePictureReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetProfilePictureError(model)
         return model.Picture
+
+    def get_business_profile(self, jid: JID) -> neonize_proto.BusinessProfile:
+        """Get the business profile of a WhatsApp Business account.
+
+        Returns the public business information the account chose to publish:
+        address, email, categories, business hours and timezone.
+
+        :param jid: The JID of the business account.
+        :type jid: JID
+        :raises GetBusinessProfileError: If the profile cannot be retrieved.
+        :return: The business profile.
+        :rtype: neonize_proto.BusinessProfile
+        """
+        jid_bytes = jid.SerializeToString()
+        protobytes = self.__client.GetBusinessProfile(
+            self.uuid,
+            jid_bytes,
+            len(jid_bytes),
+        )
+        model = neonize_proto.GetBusinessProfileReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise GetBusinessProfileError(model.Error)
+        return model.Profile
 
     def get_status_privacy(
         self,
@@ -2961,9 +3449,7 @@ class NewClient:
         :return: The status privacy settings of the user.
         :rtype: RepeatedCompositeFieldContainer[StatusPrivacy]
         """
-        bytes_ptr = self.__client.GetStatusPrivacy(self.uuid)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetStatusPrivacy(self.uuid)
         model = neonize_proto.GetStatusPrivacyReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetStatusPrivacyError(model.Error)
@@ -2980,9 +3466,7 @@ class NewClient:
         :rtype: RepeatedCompositeFieldContainer[GroupLinkTarget]
         """
         jid = community.SerializeToString()
-        bytes_ptr = self.__client.GetSubGroups(self.uuid, jid, len(jid))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetSubGroups(self.uuid, jid, len(jid))
         model = neonize_proto.GetSubGroupsReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetSubGroupsError(model.Error)
@@ -2998,9 +3482,7 @@ class NewClient:
         :return: A container with the metadata of each subscribed newsletter
         :rtype: RepeatedCompositeFieldContainer[NewsletterMetadata]
         """
-        bytes_ptr = self.__client.GetSubscribedNewsletters(self.uuid)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetSubscribedNewsletters(self.uuid)
         model = neonize_proto.GetSubscribedNewslettersReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetSubscribedNewslettersError(model.Error)
@@ -3017,27 +3499,334 @@ class NewClient:
         :rtype: RepeatedCompositeFieldContainer[JID]
         """
         jids_ = neonize_proto.JIDArray(JIDS=jids).SerializeToString()
-        bytes_ptr = self.__client.GetUserDevices(self.uuid, jids_, len(jids_))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetUserDevices(self.uuid, jids_, len(jids_))
         model = neonize_proto.GetUserDevicesreturnFunction.FromString(protobytes)
         if model.Error:
             raise GetUserDevicesError(model.Error)
         return model.JID
 
-    def get_blocklist(self) -> Blocklist:
+    def get_blocklist(self, dhash: str = "") -> Blocklist:
         """Retrieves the blocklist from the client.
 
+        :param dhash: Optional dhash from a previous blocklist response.
+        :type dhash: str
         :return: Blocklist: The retrieved blocklist.
         :raises GetBlocklistError: If there was an error retrieving the blocklist.
         """
-        bytes_ptr = self.__client.GetBlocklist(self.uuid)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetBlocklist(self.uuid, dhash.encode())
         model = neonize_proto.GetBlocklistReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetBlocklistError(model.Error)
         return model.Blocklist
+
+    def delete_media(
+        self,
+        media_type: MediaType,
+        direct_path: str,
+        enc_file_hash: bytes,
+        enc_handle: str = "",
+    ) -> None:
+        """Delete media at the given direct path from WhatsApp servers.
+
+        :param media_type: The media type.
+        :type media_type: MediaType
+        :param direct_path: The direct path returned by upload.
+        :type direct_path: str
+        :param enc_file_hash: The encrypted file hash.
+        :type enc_file_hash: bytes
+        :param enc_handle: Optional encrypted handle.
+        :type enc_handle: str
+        :raises DeleteMediaError: If deleting the media fails.
+        """
+        err = self.__client.DeleteMedia(
+            self.uuid,
+            media_type.value.encode(),
+            direct_path.encode(),
+            enc_file_hash,
+            len(enc_file_hash),
+            enc_handle.encode(),
+        ).decode()
+        if err:
+            raise DeleteMediaError(err)
+
+    def fetch_sticker_pack(self, pack_id: str) -> StickerPack:
+        """Fetch a sticker pack by its ID.
+
+        :param pack_id: The sticker pack identifier.
+        :type pack_id: str
+        :return: The fetched sticker pack.
+        :rtype: StickerPack
+        :raises FetchStickerPackError: If fetching the sticker pack fails.
+        """
+        protobytes = self.__client.FetchStickerPack(self.uuid, pack_id.encode())
+        model = neonize_proto.FetchStickerPackReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise FetchStickerPackError(model.Error)
+        return model.StickerPack
+
+    def get_bot_list_v2(self) -> RepeatedCompositeFieldContainer[BotListInfo]:
+        """Retrieve the list of available WhatsApp bots.
+
+        :return: List of bot entries.
+        :rtype: RepeatedCompositeFieldContainer[BotListInfo]
+        :raises GetBotListV2Error: If retrieving the bot list fails.
+        """
+        protobytes = self.__client.GetBotListV2(self.uuid)
+        model = neonize_proto.GetBotListV2ReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise GetBotListV2Error(model.Error)
+        return model.Bots
+
+    def get_bot_profiles(
+        self, bot_info: list[BotListInfo]
+    ) -> RepeatedCompositeFieldContainer[BotProfileInfo]:
+        """Retrieve detailed profiles for the given bots.
+
+        :param bot_info: List of BotListInfo entries.
+        :type bot_info: list[BotListInfo]
+        :return: List of bot profile information.
+        :rtype: RepeatedCompositeFieldContainer[BotProfileInfo]
+        :raises GetBotProfilesError: If retrieving bot profiles fails.
+        """
+        arr_proto = neonize_proto.BotListInfoArray(Bots=bot_info).SerializeToString()
+        protobytes = self.__client.GetBotProfiles(self.uuid, arr_proto, len(arr_proto))
+        model = neonize_proto.GetBotProfilesReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise GetBotProfilesError(model.Error)
+        return model.Profiles
+
+    def get_order_details(self, order_id: str, token_base64: str) -> OrderDetails:
+        """Fetch details of a WhatsApp Business order.
+
+        :param order_id: Order ID from OrderMessage.
+        :type order_id: str
+        :param token_base64: Base64 token from OrderMessage.
+        :type token_base64: str
+        :return: Order details.
+        :rtype: OrderDetails
+        :raises GetOrderDetailsError: If fetching order details fails.
+        """
+        protobytes = self.__client.GetOrderDetails(
+            self.uuid, order_id.encode(), token_base64.encode()
+        )
+        model = neonize_proto.GetOrderDetailsReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise GetOrderDetailsError(model.Error)
+        return model.OrderDetails
+
+    def decrypt_comment(self, message: neonize_proto.Message) -> Message:
+        """Decrypt a comment message in a community announcement group.
+
+        :param message: The incoming Message event protobuf.
+        :type message: neonize_proto.Message
+        :return: The decrypted E2E Message.
+        :rtype: Message
+        :raises DecryptCommentError: If decryption fails.
+        """
+        msg_proto = message.SerializeToString()
+        protobytes = self.__client.DecryptComment(self.uuid, msg_proto, len(msg_proto))
+        model = BuildMessageReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise DecryptCommentError(model.Error)
+        return model.Message
+
+    def decrypt_reaction(self, message: neonize_proto.Message) -> ReactionMessage:
+        """Decrypt a reaction message in a community announcement group.
+
+        :param message: The incoming Message event protobuf.
+        :type message: neonize_proto.Message
+        :return: The decrypted ReactionMessage.
+        :rtype: ReactionMessage
+        :raises DecryptReactionError: If decryption fails.
+        """
+        msg_proto = message.SerializeToString()
+        protobytes = self.__client.DecryptReaction(self.uuid, msg_proto, len(msg_proto))
+        model = neonize_proto.DecryptReactionReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise DecryptReactionError(model.Error)
+        return model.Reaction
+
+    def encrypt_comment(self, root_msg_info: MessageInfo, comment: Message) -> Message:
+        """Encrypt a comment message for a community announcement group.
+
+        :param root_msg_info: MessageInfo of the root message.
+        :type root_msg_info: MessageInfo
+        :param comment: The comment E2E Message to encrypt.
+        :type comment: Message
+        :return: The encrypted E2E Message.
+        :rtype: Message
+        :raises EncryptCommentError: If encryption fails.
+        """
+        info_proto = root_msg_info.SerializeToString()
+        comment_proto = comment.SerializeToString()
+        protobytes = self.__client.EncryptComment(
+            self.uuid, info_proto, len(info_proto), comment_proto, len(comment_proto)
+        )
+        model = BuildMessageReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise EncryptCommentError(model.Error)
+        return model.Message
+
+    def encrypt_reaction(
+        self, root_msg_info: MessageInfo, reaction: ReactionMessage
+    ) -> EncReactionMessage:
+        """Encrypt a reaction message for a community announcement group.
+
+        :param root_msg_info: MessageInfo of the root message.
+        :type root_msg_info: MessageInfo
+        :param reaction: The ReactionMessage to encrypt.
+        :type reaction: ReactionMessage
+        :return: The encrypted EncReactionMessage.
+        :rtype: EncReactionMessage
+        :raises EncryptReactionError: If encryption fails.
+        """
+        info_proto = root_msg_info.SerializeToString()
+        reaction_proto = reaction.SerializeToString()
+        protobytes = self.__client.EncryptReaction(
+            self.uuid, info_proto, len(info_proto), reaction_proto, len(reaction_proto)
+        )
+        model = neonize_proto.EncryptReactionReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise EncryptReactionError(model.Error)
+        return model.EncReaction
+
+    def encrypt_poll_vote(self, poll_info: MessageInfo, vote: PollVoteMessage) -> PollUpdateMessage:
+        """Encrypt a poll vote message.
+
+        :param poll_info: MessageInfo of the poll creation message.
+        :type poll_info: MessageInfo
+        :param vote: The PollVoteMessage to encrypt.
+        :type vote: PollVoteMessage
+        :return: The encrypted PollUpdateMessage.
+        :rtype: PollUpdateMessage
+        :raises EncryptPollVoteError: If encryption fails.
+        """
+        info_proto = poll_info.SerializeToString()
+        vote_proto = vote.SerializeToString()
+        protobytes = self.__client.EncryptPollVote(
+            self.uuid, info_proto, len(info_proto), vote_proto, len(vote_proto)
+        )
+        model = neonize_proto.EncryptPollVoteReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise EncryptPollVoteError(model.Error)
+        return model.PollUpdate
+
+    def store_lid_pn_mapping(self, first: JID, second: JID) -> None:
+        """Store a LID-PN JID mapping in the client store.
+
+        :param first: First JID (LID or PN).
+        :type first: JID
+        :param second: Second JID (PN or LID).
+        :type second: JID
+        :raises StoreLIDPNMappingError: If storing the mapping fails.
+        """
+        first_proto = first.SerializeToString()
+        second_proto = second.SerializeToString()
+        err = self.__client.StoreLIDPNMapping(
+            self.uuid, first_proto, len(first_proto), second_proto, len(second_proto)
+        ).decode()
+        if err:
+            raise StoreLIDPNMappingError(err)
+
+    def try_fetch_privacy_settings(self, ignore_cache: bool = False) -> PrivacySettings:
+        """Fetch the user's privacy settings from cache or server.
+
+        :param ignore_cache: If True, force fetching from server.
+        :type ignore_cache: bool
+        :return: The user's privacy settings.
+        :rtype: PrivacySettings
+        :raises TryFetchPrivacySettingsError: If fetching fails.
+        """
+        protobytes = self.__client.TryFetchPrivacySettings(self.uuid, ignore_cache)
+        model = neonize_proto.TryFetchPrivacySettingsReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise TryFetchPrivacySettingsError(model.Error)
+        return model.Settings
+
+    def mark_not_dirty(self, clean_type: str, timestamp: int) -> None:
+        """Mark a dirty sync state type as clean.
+
+        :param clean_type: Dirty type name (e.g. "account_sync", "groups").
+        :type clean_type: str
+        :param timestamp: Unix timestamp in seconds.
+        :type timestamp: int
+        :raises MarkNotDirtyError: If the operation fails.
+        """
+        err = self.__client.MarkNotDirty(self.uuid, clean_type.encode(), timestamp).decode()
+        if err:
+            raise MarkNotDirtyError(err)
+
+    def send_media_retry_receipt(self, message_info: MessageInfo, media_key: bytes) -> None:
+        """Request the primary device to re-upload media for a message.
+
+        :param message_info: MessageInfo of the message with expired media.
+        :type message_info: MessageInfo
+        :param media_key: The media key bytes from the media message.
+        :type media_key: bytes
+        :raises SendMediaRetryReceiptError: If sending the receipt fails.
+        """
+        info_proto = message_info.SerializeToString()
+        err = self.__client.SendMediaRetryReceipt(
+            self.uuid, info_proto, len(info_proto), media_key, len(media_key)
+        ).decode()
+        if err:
+            raise SendMediaRetryReceiptError(err)
+
+    def build_unavailable_message_request(self, chat: JID, sender: JID, message_id: str) -> Message:
+        """Build a peer message requesting a copy of an undecryptable message.
+
+        :param chat: Chat JID.
+        :type chat: JID
+        :param sender: Sender JID.
+        :type sender: JID
+        :param message_id: ID of the unavailable message.
+        :type message_id: str
+        :return: Built E2E Message ready for send_peer_message.
+        :rtype: Message
+        :raises BuildUnavailableMessageRequestError: If building fails.
+        """
+        chat_proto = chat.SerializeToString()
+        sender_proto = sender.SerializeToString()
+        protobytes = self.__client.BuildUnavailableMessageRequest(
+            self.uuid,
+            chat_proto,
+            len(chat_proto),
+            sender_proto,
+            len(sender_proto),
+            message_id.encode(),
+        )
+        model = BuildMessageReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise BuildUnavailableMessageRequestError(model.Error)
+        return model.Message
+
+    def build_edit(self, chat: JID, message_id: str, new_content: Message) -> Message:
+        """Build an edited message wrapper.
+
+        :param chat: Chat JID.
+        :type chat: JID
+        :param message_id: ID of the message to edit.
+        :type message_id: str
+        :param new_content: New E2E message content.
+        :type new_content: Message
+        :return: Built E2E Message ready for send_message.
+        :rtype: Message
+        :raises BuildEditError: If building fails.
+        """
+        chat_proto = chat.SerializeToString()
+        content_proto = new_content.SerializeToString()
+        protobytes = self.__client.BuildEdit(
+            self.uuid,
+            chat_proto,
+            len(chat_proto),
+            message_id.encode(),
+            content_proto,
+            len(content_proto),
+        )
+        model = BuildMessageReturnFunction.FromString(protobytes)
+        if model.Error:
+            raise BuildEditError(model.Error)
+        return model.Message
 
     def get_me(self) -> Device:
         """
@@ -3046,9 +3835,7 @@ class NewClient:
         :return: It returns a Device object created from the byte string response from the client's GetMe method.
         :rtype: Device
         """
-        bytes_ptr = self.__client.GetMe(self.uuid)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetMe(self.uuid)
         result = Device.FromString(protobytes)
         return result
 
@@ -3063,9 +3850,7 @@ class NewClient:
         :return: The QR link for the contact.
         :rtype: str
         """
-        bytes_ptr = self.__client.GetContactQRLink(self.uuid, revoke)
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetContactQRLink(self.uuid, revoke)
         model = neonize_proto.GetContactQRLinkReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetContactQrLinkError(model.Error)
@@ -3083,9 +3868,7 @@ class NewClient:
         :rtype: RepeatedCompositeFieldContainer[JID]
         """
         jidbyte = community.SerializeToString()
-        bytes_ptr = self.__client.GetLinkedGroupsParticipants(self.uuid, jidbyte, len(jidbyte))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetLinkedGroupsParticipants(self.uuid, jidbyte, len(jidbyte))
         model = neonize_proto.GetGroupRequestParticipantsReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetLinkedGroupParticipantsError(model.Error)
@@ -3102,9 +3885,7 @@ class NewClient:
         :rtype: neonize_proto.NewsletterMetadata
         """
         jidbyte = jid.SerializeToString()
-        bytes_ptr = self.__client.GetNewsletterInfo(self.uuid, jidbyte, len(jidbyte))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.GetNewsletterInfo(self.uuid, jidbyte, len(jidbyte))
         model = neonize_proto.CreateNewsLetterReturnFunction.FromString(protobytes)
         if model.Error:
             raise GetNewsletterInfoError(model.Error)
@@ -3115,7 +3896,7 @@ class NewClient:
         phone: str,
         show_push_notification: bool,
         client_name: ClientName = ClientName.LINUX,
-        client_type: Optional[ClientType] = None,
+        client_type: ClientType | None = None,
     ) -> str:
         """Pair a phone with the client and return the pairing code.
 
@@ -3149,9 +3930,7 @@ class NewClient:
         )
         payload = pl.SerializeToString()
 
-        bytes_ptr = self.__client.PairPhone(self.uuid, payload, len(payload))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.PairPhone(self.uuid, payload, len(payload))
         model = neonize_proto.PairPhoneReturnFunction.FromString(protobytes)
         if model.Error:
             raise PairPhoneError(model.Error)
@@ -3164,9 +3943,7 @@ class NewClient:
         _log_.debug("Stopping client and disconnecting from WhatsApp servers.")
         self.__client.Stop(self.uuid)
 
-    def get_message_for_retry(
-        self, requester: JID, to: JID, message_id: str
-    ) -> typing.Union[None, Message]:
+    def get_message_for_retry(self, requester: JID, to: JID, message_id: str) -> None | Message:
         """
         This function retrieves a specific message for retrying transmission.
         It communicates with a client to get the message using provided requester, recipient, and message ID.
@@ -3182,7 +3959,7 @@ class NewClient:
         """
         requester_buf = requester.SerializeToString()
         to_buf = to.SerializeToString()
-        bytes_ptr = self.__client.GetMessageForRetry(
+        protobytes = self.__client.GetMessageForRetry(
             self.uuid,
             requester_buf,
             len(requester_buf),
@@ -3190,8 +3967,6 @@ class NewClient:
             len(to_buf),
             message_id.encode(),
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         model = neonize_proto.GetMessageForRetryReturnFunction.FromString(protobytes)
         if model.Error:
             raise Exception(model.Error)
@@ -3205,11 +3980,27 @@ class NewClient:
         metadata: MessageApplication.Metadata,
         extra: SendRequestExtra,
     ):
+        """Sends a native consumer-application message with custom metadata.
+
+        This is a low-level API intended for advanced use cases such as
+        interactive business messages; most bots should prefer
+        :meth:`send_message` instead.
+
+        :param to: The JID (Jabber Identifier) of the recipient.
+        :type to: JID
+        :param message: The consumer-application protobuf message to send.
+        :type message: ConsumerApplication
+        :param metadata: Application metadata describing how the message is handled.
+        :type metadata: MessageApplication.Metadata
+        :param extra: Extra send-request options such as peer-message flag or timeout.
+        :type extra: SendRequestExtra
+        :raises SendMessageError: If the message could not be delivered.
+        """
         to_buff = to.SerializeToString()
         message_buff = message.SerializeToString()
         metadata_buff = metadata.SerializeToString()
         extra_buff = extra.SerializeToString()
-        bytes_ptr = self.__client.SendFBMessage(
+        protobytes = self.__client.SendFBMessage(
             self.uuid,
             to_buff,
             len(to_buff),
@@ -3220,13 +4011,17 @@ class NewClient:
             extra_buff,
             len(extra_buff),
         )
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
         result = SendMessageReturnFunction.FromString(protobytes)
         if result.Error:
             raise SendMessageError(result.Error)
 
     def send_presence(self, presence: Presence):
+        """Broadcasts the presence status of the connected account.
+
+        :param presence: Presence to broadcast, e.g. ``Presence.AVAILABLE``.
+        :type presence: Presence
+        :raises SendPresenceError: If the presence update fails.
+        """
         response = self.__client.SendPresence(self.uuid, presence.value)
         if response:
             raise SendPresenceError(response)
@@ -3266,9 +4061,7 @@ class NewClient:
     def decrypt_poll_vote(self, message: neonize_proto.Message) -> PollVoteMessage:
         """Decrypt PollMessage"""
         msg_buff = message.SerializeToString()
-        bytes_ptr = self.__client.DecryptPollVote(self.uuid, msg_buff, len(msg_buff))
-        protobytes = bytes_ptr.contents.get_bytes()
-        free_bytes(bytes_ptr)
+        protobytes = self.__client.DecryptPollVote(self.uuid, msg_buff, len(msg_buff))
         model = ReturnFunctionWithError.FromString(protobytes)
         if model.Error:
             raise DecryptPollVoteError(model.Error)
@@ -3290,6 +4083,9 @@ class NewClient:
         :type proxy_settings: ProxySettings | None
         :raises NeonizeError: If connection setup fails.
         """
+        from .utils.ffmpeg import check_ffmpeg_available
+
+        check_ffmpeg_available()
         # Convert the list of functions to a bytearray
         d = bytearray(list(self.event.list_func))
         _log_.debug("🔒 Attempting to connect to the WhatsApp servers.")
@@ -3334,7 +4130,7 @@ class NewClient:
         # ignored. Instead we run it on a worker thread and wait interruptibly on
         # the caller thread; on Ctrl+C (or the global stop event) we cancel Go so
         # ``Neonize`` returns and the worker exits cleanly.
-        holder: typing.Dict[str, typing.Any] = {}
+        holder: dict[str, typing.Any] = {}
         # Set the instant Neonize() returns. This -- not worker.is_alive() -- is
         # the source of truth for "the Go call finished": when a KeyboardInterrupt
         # interrupts Thread.join(), CPython can leave is_alive() wrongly reporting
@@ -3349,6 +4145,7 @@ class NewClient:
                     self.uuid,
                     jidbuf,
                     jidbuf_size,
+                    int(self.new_device),
                     LogLevel.from_logging(log.level).level,
                     qr_cb,
                     login_cb,
@@ -3414,14 +4211,15 @@ class ClientFactory:
         self.event = EventsManager(self)
 
     @staticmethod
-    def get_all_devices_from_db(db: str) -> List[Device]:
+    def get_all_devices_from_db(db: str) -> list[Device]:
         """
         Retrieves all devices associated with the current account.
         :param db: The name of the database to retrieve the devices from.
         :return: A list of Device-like objects representing all associated devices.
         :rtype: List[neonize_proto.Device]
         """
-        c_string = gocode.GetAllDevices(db.encode(), func_callback_bytes2(log_whatsmeow)).decode()
+        cb_ref = func_callback_bytes2(log_whatsmeow)
+        c_string = gocode.GetAllDevices(db.encode(), cb_ref).decode()
         if not c_string:
             return []
 
@@ -3442,15 +4240,16 @@ class ClientFactory:
 
         return devices
 
-    def get_all_devices(self) -> List["Device"]:
+    def get_all_devices(self) -> list[Device]:
         """Retrieves all devices associated with the current account from the database."""
         return self.get_all_devices_from_db(self.database_name)
 
     def new_client(
         self,
-        jid: Optional[JID] = None,
-        uuid: Optional[str] = None,
-        props: Optional[DeviceProps] = None,
+        jid: JID | None = None,
+        uuid: str | None = None,
+        props: DeviceProps | None = None,
+        new_device: bool = False,
     ) -> NewClient:
         """
         This function creates a new instance of the client. If the jid parameter is not provided, a new client will be created.
@@ -3469,7 +4268,7 @@ class ClientFactory:
             # unique
             raise Exception("JID and UUID cannot be none")
 
-        client = NewClient(self.database_name, jid, props, uuid)
+        client = NewClient(self.database_name, jid, props, uuid, new_device)
         client.event.list_func = self.event.list_func
         self.clients.append(client)
         return client

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import typing
 from enum import Enum
 
 import magic
@@ -76,7 +75,7 @@ class MediaType(Enum):
         }[self]
 
     @classmethod
-    def from_magic(cls, fn_or_bytes: typing.Union[str, bytes]) -> MediaType:
+    def from_magic(cls, fn_or_bytes: str | bytes) -> MediaType:
         """Returns the MediaType based on file magic bytes or file extension.
 
         :param fn_or_bytes: Either a file path (str) or binary data (bytes) for determining the MediaType.
@@ -382,6 +381,19 @@ class ParticipantRequestChange(Enum):
 
     APPROVE = "approve"
     REJECT = "reject"
+
+
+class GroupMemberAddMode(Enum):
+    """
+    Enumeration of group member add modes (who can add members).
+
+    Attributes:
+        ADMIN_ADD (str): Only admins can add members.
+        ALL_MEMBER_ADD (str): All members can add members.
+    """
+
+    ADMIN_ADD = "admin_add"
+    ALL_MEMBER_ADD = "all_member_add"
 
 
 class Presence(Enum):
