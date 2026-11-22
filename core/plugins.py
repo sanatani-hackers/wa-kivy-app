@@ -39,6 +39,7 @@ class PluginManager:
     def __init__(self, folder, core):
         self.folder, self.core = folder, core
         self.loaded: dict[str, dict] = {}
+        self.disabled: set[str] = set()
         self._tasks: set = set()
 
     async def reload(self) -> dict:
@@ -135,13 +136,37 @@ class PluginManager:
         sys.modules.pop(f"wa_plugin_{name}", None)
 
     def dispatch(self, msg):
-        """Fan-out to every plugin concurrently; one slow plugin can't hold up the others."""
+        """Fan-out to every active plugin concurrently; one slow plugin can't hold up the others."""
         for name, p in self.loaded.items():
+            if name in self.disabled:
+                continue
             fn = getattr(p["mod"], "on_message", None)
             if fn and not self.core.supervisor.is_quarantined(name):
                 t = asyncio.create_task(self.core.supervisor.run(name, fn, p["ctx"], msg))
                 self._tasks.add(t)
                 t.add_done_callback(self._tasks.discard)
+
+    def toggle(self, name: str) -> bool:
+        """Toggle enable/disable state of a plugin. Returns True if now enabled, False if disabled."""
+        clean = str(name).strip().removesuffix(".py").removesuffix(".pyc")
+        if clean in self.disabled:
+            self.disabled.remove(clean)
+            return True
+        else:
+            self.disabled.add(clean)
+            return False
+
+    def is_enabled(self, name: str) -> bool:
+        clean = str(name).strip().removesuffix(".py").removesuffix(".pyc")
+        return clean not in self.disabled
+
+    def formatted_list(self) -> str:
+        """Return formatted string like 'ping:1,antidelete:0'."""
+        items = []
+        for name in sorted(self.loaded):
+            val = "0" if name in self.disabled else "1"
+            items.append(f"{name}:{val}")
+        return ",".join(items)
 
     def names(self):
         return sorted(self.loaded)

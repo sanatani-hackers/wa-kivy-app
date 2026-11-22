@@ -46,3 +46,46 @@ def plugin_dir():
 def qr_cache_path():
     """Shared path for rendering the latest QR code image."""
     return os.path.join(private_dir(), "wa_qr.png")
+
+
+def send_android_notification(title: str, text: str, notif_id: int = 1001):
+    """Post or update an Android system notification using native Java APIs."""
+    ctx = _android_ctx()
+    if not ctx:
+        return
+    try:
+        from jnius import autoclass
+        NotificationBuilder = autoclass("android.app.Notification$Builder")
+        NotificationManager = autoclass("android.app.NotificationManager")
+        Context = autoclass("android.content.Context")
+
+        nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE)
+        channel_id = "org.sanatani.waapp.alerts"
+        try:
+            NotificationChannel = autoclass("android.app.NotificationChannel")
+            channel = NotificationChannel(channel_id, "WA Core Alerts", NotificationManager.IMPORTANCE_HIGH)
+            channel.setDescription("Real-time WhatsApp automation alerts")
+            channel.enableVibration(True)
+            nm.createNotificationChannel(channel)
+            builder = NotificationBuilder(ctx, channel_id)
+        except Exception:
+            builder = NotificationBuilder(ctx)
+
+        builder.setContentTitle(str(title))
+        builder.setContentText(str(text))
+        try:
+            builder.setSmallIcon(ctx.getApplicationInfo().icon)
+        except Exception:
+            pass
+        builder.setAutoCancel(True)
+        try:
+            BigTextStyle = autoclass("android.app.Notification$BigTextStyle")
+            big_text = BigTextStyle()
+            big_text.bigText(str(text))
+            big_text.setBigContentTitle(str(title))
+            builder.setStyle(big_text)
+        except Exception:
+            pass
+        nm.notify(notif_id, builder.build())
+    except Exception as e:
+        print(f"send_android_notification failed: {e}")

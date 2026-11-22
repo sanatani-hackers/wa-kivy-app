@@ -14,7 +14,7 @@ import core._shims
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 
-from common import HOST, SVC_PORT, UI_PORT, plugin_dir, private_dir
+from common import HOST, SVC_PORT, UI_PORT, plugin_dir, private_dir, send_android_notification
 from core.wa_client import WhatsAppCore
 
 
@@ -32,6 +32,19 @@ def main():
             ui.send_message(addr.encode(), list(vals) or [""])
         except Exception:
             pass                                    # UI not running: fine
+        if addr in {"/status", "/engine_state"} and vals:
+            try:
+                st = str(vals[0]).lower()
+                if "connected" in st:
+                    send_android_notification("WA Core", "🟢 Connected & Active (24/7 Monitoring)", notif_id=1001)
+                elif "stopped" in st:
+                    send_android_notification("WA Core", "⏸️ Bot Paused (Offline)", notif_id=1001)
+                elif "connecting" in st:
+                    send_android_notification("WA Core", "🔄 Connecting to WhatsApp...", notif_id=1001)
+                elif "ready_to_pair" in st:
+                    send_android_notification("WA Core", "📱 Ready to Pair - Scan QR or Enter Code", notif_id=1001)
+            except Exception:
+                pass
 
     class UiLogHandler(logging.Handler):
         def emit(self, record):
@@ -65,10 +78,22 @@ def main():
             emit("/log", f"Deleted plugin {base}")
         await core.reload_plugins()
 
+    async def _toggle_plugin(name):
+        if isinstance(name, bytes):
+            name = name.decode()
+        base = str(name).strip().removesuffix(".py").removesuffix(".pyc")
+        active = core.plugins.toggle(base)
+        st = "enabled" if active else "disabled"
+        emit("/log", f"Plugin {base} {st}")
+        emit("/plugins", core.plugins.formatted_list())
+
     server.bind(b"/hello", lambda *a: run(_snapshot()))
+    server.bind(b"/start_bot", lambda *a: run(core.resume()))
+    server.bind(b"/stop_bot", lambda *a: run(core.stop()))
     server.bind(b"/pair", lambda phone: run(core.pair(phone)))
     server.bind(b"/send", lambda recipient, text: run(core.send_direct(recipient, text)))
     server.bind(b"/reload", lambda *a: run(core.reload_plugins()))
+    server.bind(b"/toggle_plugin", lambda name: run(_toggle_plugin(name)))
     server.bind(b"/delete_plugin", lambda name: run(_delete_plugin(name)))
     server.bind(b"/clear_session", lambda *a: run(core.clear_session()))
 

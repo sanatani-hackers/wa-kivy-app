@@ -116,12 +116,14 @@ class WhatsAppCore:
             self.queue.start()
             self.supervisor.start_monitor()
             rep = await self.plugins.reload()
-            self.emit("/plugins", ",".join(self.plugins.names()))
+            self.emit("/plugins", self.plugins.formatted_list())
             self.emit("/log", f"plugins: {rep}")
+            self.emit("/engine_state", "running")
             self._run_task = asyncio.create_task(self._run())
         except Exception as e:
             log.exception("Engine start failed")
             self.emit("/status", "init_error")
+            self.emit("/engine_state", "stopped")
             self.emit("/log", f"Engine init error: {e!r}")
 
     async def _run(self):
@@ -242,15 +244,47 @@ class WhatsAppCore:
         except Exception as e:
             self.emit("/log", f"Clear session failed: {e}")
 
+    async def stop(self):
+        """Disconnect and put the bot in paused/offline state."""
+        try:
+            if self._run_task and not self._run_task.done():
+                self._run_task.cancel()
+            if self.client:
+                try:
+                    await self.client.disconnect()
+                except Exception:
+                    pass
+            self.emit("/status", "stopped")
+            self.emit("/engine_state", "stopped")
+            self.emit("/log", "Bot stopped. WhatsApp client disconnected (Offline).")
+        except Exception as e:
+            log.exception("Stop failed")
+            self.emit("/log", f"Stop failed: {e}")
+
+    async def resume(self):
+        """Resume bot and reconnect to WhatsApp servers."""
+        try:
+            self.emit("/status", "connecting")
+            self.emit("/engine_state", "connecting")
+            self.emit("/log", "Starting bot engine and connecting...")
+            await self.start()
+        except Exception as e:
+            log.exception("Resume failed")
+            self.emit("/log", f"Start failed: {e}")
+
     async def reload_plugins(self):
         rep = await self.plugins.reload()
-        self.emit("/plugins", ",".join(self.plugins.names()))
+        self.emit("/plugins", self.plugins.formatted_list())
         self.emit("/log", f"Plugins reloaded: {rep}")
 
     async def snapshot(self):
-        self.emit("/plugins", ",".join(self.plugins.names()))
+        self.emit("/plugins", self.plugins.formatted_list())
         self.emit("/stats", str(self.supervisor.report()))
-        if self.client:
+        state = "running" if (self._run_task and not self._run_task.done()) else "stopped"
+        self.emit("/engine_state", state)
+        if state == "stopped":
+            self.emit("/status", "stopped")
+        elif self.client:
             try:
                 logged = await self.client.is_logged_in
                 conn = await self.client.is_connected
@@ -258,6 +292,8 @@ class WhatsAppCore:
                     self.emit("/status", "connected")
                 elif conn:
                     self.emit("/status", "ready_to_pair")
+                else:
+                    self.emit("/status", "connecting")
             except Exception:
                 pass
 

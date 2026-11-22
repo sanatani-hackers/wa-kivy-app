@@ -60,6 +60,15 @@ async def on_message(ctx, msg):
                     f"💬 *Deleted Message:*\n{cached['text']}"
                 )
                 log.info("Revoke intercepted for msg %s: %s", deleted_id, cached["text"][:40])
+                try:
+                    from common import send_android_notification
+                    send_android_notification(
+                        title=f"🗑️ Deleted by @{sender_display}",
+                        text=cached["text"],
+                        notif_id=2001,
+                    )
+                except Exception as e:
+                    log.warning("Notification failed: %s", e)
                 await ctx.reply(msg, alert_text)
             return
 
@@ -79,6 +88,15 @@ async def on_message(ctx, msg):
                     f"🔄 *Edited to:* {new_text}"
                 )
                 log.info("Edit intercepted for msg %s", target_id)
+                try:
+                    from common import send_android_notification
+                    send_android_notification(
+                        title=f"✏️ Edited by @{sender_display}",
+                        text=f"Original: {old_text}\nEdited: {new_text}",
+                        notif_id=2002,
+                    )
+                except Exception as e:
+                    log.warning("Notification failed: %s", e)
                 await ctx.reply(msg, alert_text)
             return
 
