@@ -128,9 +128,9 @@ class WhatsAppCore:
     # ---- commands from UI
     async def pair(self, phone: str):
         try:
-            if not self.client:
-                self.emit("/log", "Engine is initializing, please wait 3 seconds...")
-                return
+            if not self.client or (self._run_task and self._run_task.done()):
+                self.emit("/log", "Engine reconnecting, please wait...")
+                await self.start()
             if isinstance(phone, bytes):
                 phone = phone.decode()
             phone = str(phone).strip().lstrip("+")
@@ -200,20 +200,37 @@ class WhatsAppCore:
 
     async def clear_session(self):
         try:
+            if self._run_task and not self._run_task.done():
+                self._run_task.cancel()
             if self.client:
                 try:
                     await self.client.disconnect()
                 except Exception:
                     pass
             if os.path.exists(self.db):
-                os.remove(self.db)
+                try:
+                    os.remove(self.db)
+                except Exception:
+                    pass
             for ext in ("-shm", "-wal"):
                 extra = self.db + ext
                 if os.path.exists(extra):
-                    os.remove(extra)
+                    try:
+                        os.remove(extra)
+                    except Exception:
+                        pass
+            cache_file = qr_cache_path()
+            if os.path.exists(cache_file):
+                try:
+                    os.remove(cache_file)
+                except Exception:
+                    pass
+
             self.emit("/status", "disconnected")
             self.emit("/pair_code", "")
-            self.emit("/log", "Session cleared. Please re-pair your account.")
+            self.emit("/log", "Session cleared. Re-initializing fresh client...")
+            await asyncio.sleep(0.5)
+            await self.start()
         except Exception as e:
             self.emit("/log", f"Clear session failed: {e}")
 
