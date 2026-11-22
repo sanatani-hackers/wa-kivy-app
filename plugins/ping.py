@@ -11,6 +11,7 @@ async def on_message(ctx, msg):
             "• `!ping` - Check bot status & latency\n"
             "• `!echo <text>` - Repeats your text\n"
             "• `!stats` - Shows active plugins & info\n"
+            "• `!antidelete` - Anti-Delete & Anti-Edit status\n"
             "• Send `hi` or `hello` for auto-greeting"
         )
         await ctx.reply(msg, help_text)
