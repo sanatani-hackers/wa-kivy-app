@@ -24,7 +24,7 @@ from kivy.factory import Factory
 # Ensure window displays status bar and dynamically shifts up when software keyboard appears
 Window.fullscreen = False
 Window.borderless = False
-Window.softinput_mode = "below_target"
+Window.softinput_mode = "resize"
 Window.keyboard_anim_args = {'d': 0.2, 't': 'in_out_quart'}
 from kivy.lang import Builder
 from kivy.properties import BooleanProperty
@@ -528,7 +528,7 @@ def ask_ignore_battery_optimizations():
 
 # --------------------------------------------------------------------------- Dialogs
 class PluginEditorDialog(ModalView):
-    """In-app Plugin Studio & Code Editor with real-time telemetry and clean layout."""
+    """In-app Plugin Studio & Code Editor with real-time telemetry, clean layout, and keyboard-aware resizing."""
 
     def __init__(self, on_save, **kw):
         super().__init__(size_hint=(0.96, 0.94), auto_dismiss=True, **kw)
@@ -536,37 +536,48 @@ class PluginEditorDialog(ModalView):
         self.background_color = (0, 0, 0, 0.85)
 
         card = Factory.DialogCard()
-        card.padding = dp(12)
-        card.spacing = dp(8)
+        card.padding = dp(10)
+        card.spacing = dp(6)
 
-        # 1. Studio Header Toolbar: [Filename] [Snippets ▾] [Cancel] [Save]
-        header = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
+        # 1. Studio Header Toolbar Row 1: [Cancel]  [Filename Input (full width)]  [Save]
+        header = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
 
-        # Monospace Filename input pill
-        self.filename_input = Factory.ModernInput(size_hint_x=0.45)
-        self.filename_input.height = dp(38)
-        self.filename_input.font_size = "12sp"
-        self.filename_input.hint_text = "custom_bot.py"
-
-        # Template/Snippets quick switcher
-        self.btn_snippets = Factory.SecondaryButton(text="Snippets ▾", size_hint=(None, None), size=(dp(84), dp(38)))
-        self.btn_snippets.font_size = "11sp"
-        self.btn_snippets.bind(on_release=self.show_snippets_menu)
-
-        btn_cancel = Factory.SecondaryButton(text="Cancel", size_hint=(None, None), size=(dp(64), dp(38)))
+        btn_cancel = Factory.SecondaryButton(text="Cancel", size_hint=(None, None), size=(dp(60), dp(36)))
         btn_cancel.font_size = "11sp"
         btn_cancel.bind(on_release=lambda *_: self.dismiss())
 
-        btn_save = Factory.PrimaryButton(text="Save & Reload", size_hint=(None, None), size=(dp(98), dp(38)))
+        self.filename_input = Factory.ModernInput(size_hint_x=1)
+        self.filename_input.height = dp(36)
+        self.filename_input.font_size = "12sp"
+        self.filename_input.hint_text = "custom_bot.py"
+
+        btn_save = Factory.PrimaryButton(text="Save", size_hint=(None, None), size=(dp(64), dp(36)))
         btn_save.font_size = "11sp"
         btn_save.bind(on_release=self._save)
 
-        header.add_widget(self.filename_input)
-        header.add_widget(self.btn_snippets)
         header.add_widget(btn_cancel)
+        header.add_widget(self.filename_input)
         header.add_widget(btn_save)
 
-        # 2. Code Editor Area (Full Space, Monospace, High-Contrast)
+        # 2. Sub-Toolbar Row 2: [Templates]  ...  [Live Telemetry Status]
+        sub_toolbar = BoxLayout(size_hint_y=None, height=dp(28), spacing=dp(8))
+
+        self.btn_snippets = Factory.SecondaryButton(text="Templates", size_hint=(None, None), size=(dp(84), dp(28)))
+        self.btn_snippets.font_size = "11sp"
+        self.btn_snippets.bind(on_release=self.show_snippets_menu)
+
+        self.lbl_telemetry = Label(
+            text="Ln 1 | 0 B | Ready",
+            font_size="10sp",
+            color=get_color_from_hex("#64748B"),
+            halign="right", valign="middle"
+        )
+        self.lbl_telemetry.bind(size=self.lbl_telemetry.setter('text_size'))
+
+        sub_toolbar.add_widget(self.btn_snippets)
+        sub_toolbar.add_widget(self.lbl_telemetry)
+
+        # 3. Code Editor Area (Full Space, Monospace, High-Contrast)
         self.code_input = TextInput(
             background_color=get_color_from_hex('#06090F'),
             foreground_color=get_color_from_hex('#F8FAFC'),
@@ -581,31 +592,42 @@ class PluginEditorDialog(ModalView):
         )
         self.code_input.bind(text=self._update_telemetry)
 
-        # 3. Editor Telemetry Status Line (Quiet, informative, monospace)
-        footer = BoxLayout(size_hint_y=None, height=dp(22), spacing=dp(8))
-        self.lbl_telemetry = Label(
-            text="Ln 1 | 0 B | Python 3 | Hot-Reload Ready",
-            font_size="10sp",
-            color=get_color_from_hex("#64748B"),
-            halign="left", valign="middle"
-        )
-        self.lbl_telemetry.bind(size=self.lbl_telemetry.setter('text_size'))
-        footer.add_widget(self.lbl_telemetry)
-
         card.add_widget(header)
+        card.add_widget(sub_toolbar)
         card.add_widget(self.code_input)
-        card.add_widget(footer)
         self.add_widget(card)
+
+    def on_open(self):
+        Window.bind(keyboard_height=self._on_keyboard_height)
+
+    def on_dismiss(self):
+        try:
+            Window.unbind(keyboard_height=self._on_keyboard_height)
+        except Exception:
+            pass
+
+    def _on_keyboard_height(self, window, kb_height):
+        win = window or Window
+        if kb_height > 0:
+            top_gap = dp(24)
+            bottom_gap = kb_height + dp(8)
+            avail = max(dp(200), win.height - bottom_gap - top_gap)
+            self.size_hint = (0.96, None)
+            self.height = avail
+            self.pos_hint = {'center_x': 0.5, 'y': bottom_gap / float(max(1, win.height))}
+        else:
+            self.size_hint = (0.96, 0.94)
+            self.pos_hint = {'center_x': 0.5, 'center_y': 0.5}
 
     def _update_telemetry(self, *_):
         txt = self.code_input.text
         lines = len(txt.split("\n"))
         size_bytes = len(txt.encode("utf-8"))
         size_str = f"{size_bytes} B" if size_bytes < 1024 else f"{size_bytes / 1024:.1f} KB"
-        self.lbl_telemetry.text = f"Ln {lines} | {size_str} | Python 3 | Hot-Reload Ready"
+        self.lbl_telemetry.text = f"Ln {lines} | {size_str} | Ready"
 
     def show_snippets_menu(self, *_):
-        dialog = ModalView(size_hint=(0.84, 0.42), auto_dismiss=True)
+        dialog = ModalView(size_hint=(0.86, None), height=dp(210), auto_dismiss=True)
         dcard = Factory.DialogCard()
         dcard.padding = dp(14)
         dcard.spacing = dp(8)
