@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "repository_name": "WA Core Official Plugin Store",
+  "updated_at": "2026-11-23T20:30:00Z",
+  "categories": ["All", "Security & Stealth", "AI & Utilities", "Automation", "Media & Fun"],
+  "plugins": [
+    {
+      "id": "antidelete",
+      "name": "Anti-Delete & Anti-Edit",
+      "version": "1.2.0",
+      "author": "Sanatani Hackers",
+      "category": "Security & Stealth",
+      "description": "Intercepts and reveals 'Delete for Everyone' and edited messages with sender info and timestamps.",
+      "download_url": "https://raw.githubusercontent.com/sanatani-hackers/wa-kivy-app/main/wa_app/plugins/antidelete.py",
+      "requires": [],
+      "verified": true,
+      "changelog": "Added persistent isolated storage."
+    },
+    {
+      "id": "antiviewonce",
+      "name": "Anti-ViewOnce Media Saver",
+      "version": "1.1.0",
+      "author": "Sanatani Hackers",
+      "category": "Security & Stealth",
+      "description": "Automatically recovers view-once photos and videos, saving them permanently to phone media storage.",
+      "download_url": "https://raw.githubusercontent.com/sanatani-hackers/wa-kivy-app/main/wa_app/plugins/antiviewonce.py",
+      "requires": ["filetype"],
+      "verified": true,
+      "changelog": "Saves directly to external media folder."
+    },
+    {
+      "id": "gemini_ai",
+      "name": "Gemini AI Assistant",
+      "version": "1.0.0",
+      "author": "Sanatani Hackers",
+      "category": "AI & Utilities",
+      "description": "Smart conversational bot powered by Google Gemini REST API. Trigger with !ai or custom prompt.",
+      "download_url": "https://raw.githubusercontent.com/sanatani-hackers/wa-kivy-app/main/wa_app/plugins_manual/gemini_ai.py",
+      "requires": ["requests"],
+      "verified": true,
+      "changelog": "Initial release with multi-turn prompt support."
+    },
+    {
+      "id": "autoreply",
+      "name": "Smart Auto-Responder",
+      "version": "1.0.0",
+      "author": "Sanatani Hackers",
+      "category": "Automation",
+      "description": "Automated keyword matching and custom rule replies for incoming personal and group messages.",
+      "download_url": "https://raw.githubusercontent.com/sanatani-hackers/wa-kivy-app/main/wa_app/plugins/autoreply.py",
+      "requires": [],
+      "verified": true,
+      "changelog": "Added isolated JSON config storage."
+    },
+    {
+      "id": "remind",
+      "name": "Scheduled Reminders & Tasks",
+      "version": "1.0.0",
+      "author": "Sanatani Hackers",
+      "category": "Automation",
+      "description": "Set self and group reminders via natural command e.g. '!remind 30m Take medicine'.",
+      "download_url": "https://raw.githubusercontent.com/sanatani-hackers/wa-kivy-app/main/wa_app/plugins/remind.py",
+      "requires": [],
+      "verified": true,
+      "changelog": "Initial release."
+    },
+    {
+      "id": "stats",
+      "name": "Traffic & Message Analytics",
+      "version": "1.0.0",
+      "author": "Sanatani Hackers",
+      "category": "AI & Utilities",
+      "description": "Real-time telemetry and counter for sent, received, and revokes across all chats.",
+      "download_url": "https://raw.githubusercontent.com/sanatani-hackers/wa-kivy-app/main/wa_app/plugins/stats.py",
+      "requires": [],
+      "verified": true,
+      "changelog": "Added hourly breakdown."
+    },
+    {
+      "id": "web_scraper",
+      "name": "Web & Weather Scraper",
+      "version": "1.0.0",
+      "author": "Community",
+      "category": "Automation",
+      "description": "Scrapes weather forecasts, news headlines, and Wikipedia summaries using BeautifulSoup and requests.",
+      "download_url": "https://raw.githubusercontent.com/sanatani-hackers/wa-kivy-app/main/wa_app/plugins_manual/web_scraper.py",
+      "requires": ["beautifulsoup4", "requests"],
+      "verified": true,
+      "changelog": "Initial release."
+    }
+  ]
+}

@@ -33,17 +33,56 @@ def private_dir():
     return base
 
 
-def plugin_dir():
-    """Plugin folder. On Android: <ext storage>/Android/data/<pkg>/files/plugins."""
+def external_dir():
+    """App-external storage: Android/data/<pkg>/files/ (readable by user/gallery)."""
     ctx = _android_ctx()
     if ctx:
         ext = ctx.getExternalFilesDir(None)
         base = ext.getAbsolutePath() if ext else ctx.getFilesDir().getAbsolutePath()
     else:
         base = os.path.expanduser("~/.wa_app")
-    path = os.path.join(base, "plugins")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def plugin_dir():
+    """Plugin folder. On Android: <ext storage>/Android/data/<pkg>/files/plugins."""
+    path = os.path.join(external_dir(), "plugins")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def plugin_data_dir(plugin_name: str = "") -> str:
+    """App-private storage for plugin state and databases: <private_dir>/plugins_data/<name>."""
+    base = os.path.join(private_dir(), "plugins_data")
+    if plugin_name:
+        base = os.path.join(base, plugin_name)
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def plugin_media_dir(plugin_name: str = "") -> str:
+    """App-external storage for plugin media/assets: Android/data/<pkg>/files/media/<name>."""
+    base = os.path.join(external_dir(), "media")
+    if plugin_name:
+        base = os.path.join(base, plugin_name)
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def plugin_packages_dir() -> str:
+    """Dynamic site-packages folder for pure-python wheels & extra libraries."""
+    p = os.path.join(private_dir(), "plugin_packages")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+# Inject dynamic plugin_packages directory into sys.path
+import sys
+_pkg_dir = plugin_packages_dir()
+if _pkg_dir not in sys.path:
+    sys.path.insert(0, _pkg_dir)
+
 
 
 def qr_cache_path():

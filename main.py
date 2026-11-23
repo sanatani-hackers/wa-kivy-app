@@ -8,8 +8,10 @@ Features:
 - Controllable Android Foreground Notification with Live Stats (RAM, Network, Plugins) & Action Buttons
 - DejaVuSans font integration for crisp symbol rendering without tofu glyph boxes
 """
+import ast
 import os
 import shutil
+import threading
 import time
 import traceback
 
@@ -89,11 +91,15 @@ from common import (
     export_session_zip,
     get_ram_usage_mb,
     import_session_zip,
+    plugin_data_dir,
     plugin_dir,
+    plugin_media_dir,
+    plugin_packages_dir,
     private_dir,
     qr_cache_path,
     stop_android_service,
 )
+from core import pip_hub, plugin_store, updater
 
 
 def ask_all_files_permission():
@@ -673,10 +679,10 @@ class PluginEditorDialog(ModalView):
         self.lbl_telemetry.text = f"Ln {lines} | {size_str} | Ready"
 
     def show_snippets_menu(self, *_):
-        dialog = ModalView(size_hint=(0.86, None), height=dp(210), auto_dismiss=True)
+        dialog = ModalView(size_hint=(0.88, None), height=dp(300), auto_dismiss=True)
         dcard = Factory.DialogCard()
         dcard.padding = dp(14)
-        dcard.spacing = dp(8)
+        dcard.spacing = dp(6)
         lbl_stitle = Label(text="Insert Starter Template", font_size="14sp", bold=True,
                            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(26))
         dcard.add_widget(lbl_stitle)
@@ -685,14 +691,23 @@ class PluginEditorDialog(ModalView):
             self.load_template(kind)
             dialog.dismiss()
 
-        btn1 = Factory.SecondaryButton(text="Template: Echo Command (!say)")
+        btn1 = Factory.SecondaryButton(text="Echo Command (!say)")
         btn1.bind(on_release=lambda *_: _pick("echo"))
-        btn2 = Factory.SecondaryButton(text="Template: Keyword Auto-Responder")
+        btn2 = Factory.SecondaryButton(text="Keyword Auto-Responder")
         btn2.bind(on_release=lambda *_: _pick("responder"))
-        btn3 = Factory.SecondaryButton(text="Template: Async Timer & Alert (!pingme)")
-        btn3.bind(on_release=lambda *_: _pick("remind"))
+        btn3 = Factory.SecondaryButton(text="Web Scraper (requests + bs4)")
+        btn3.bind(on_release=lambda *_: _pick("scraper"))
+        btn4 = Factory.SecondaryButton(text="Gemini AI Assistant (REST)")
+        btn4.bind(on_release=lambda *_: _pick("gemini"))
+        btn5 = Factory.SecondaryButton(text="Persistent Anti-Delete (SQLite & ctx.get_db)")
+        btn5.bind(on_release=lambda *_: _pick("antidelete"))
+        btn6 = Factory.SecondaryButton(text="Periodic Task (ctx.every)")
+        btn6.bind(on_release=lambda *_: _pick("remind"))
 
-        for b in (btn1, btn2, btn3):
+        for b in (btn1, btn2, btn3, btn4, btn5, btn6):
+            b.font_size = "11sp"
+            b.size_hint_y = None
+            b.height = dp(32)
             dcard.add_widget(b)
         dialog.add_widget(dcard)
         dialog.open()
@@ -712,24 +727,95 @@ class PluginEditorDialog(ModalView):
             if not self.filename_input.text:
                 self.filename_input.text = "keyword_reply.py"
             self.code_input.text = (
-                "# Keyword automated responder\n"
+                "# Keyword automated responder with isolated JSON storage\n"
                 "NAME = 'keyword_reply'\n\n"
+                "async def setup(ctx):\n"
+                "    # Load config or default keywords\n"
+                "    cfg = ctx.load_json('config.json', {'help': 'Active 24/7!', 'info': 'WA Core Engine'})\n"
+                "    ctx.save_json('config.json', cfg)\n\n"
                 "async def on_message(ctx, msg):\n"
-                "    if msg.text and 'help' in msg.text.lower():\n"
-                "        await ctx.reply(msg, 'Need help? I am active 24/7!')\n"
+                "    text = (msg.text or '').strip().lower()\n"
+                "    cfg = ctx.load_json('config.json', {})\n"
+                "    for kw, reply in cfg.items():\n"
+                "        if kw in text:\n"
+                "            await ctx.reply(msg, reply)\n"
+                "            break\n"
+            )
+        elif kind == "scraper":
+            if not self.filename_input.text:
+                self.filename_input.text = "web_scraper.py"
+            self.code_input.text = (
+                "# Web Scraper plugin using requests and BeautifulSoup\n"
+                "# requires: requests, beautifulsoup4\n"
+                "import requests\n"
+                "from bs4 import BeautifulSoup\n\n"
+                "NAME = 'web_scraper'\n\n"
+                "async def on_message(ctx, msg):\n"
+                "    text = (msg.text or '').strip()\n"
+                "    if text.startswith('!quote'):\n"
+                "        try:\n"
+                "            res = requests.get('https://dummyjson.com/quotes/random', timeout=6).json()\n"
+                "            await ctx.reply(msg, f\"💬 \\\"{res['quote']}\\\"\\n— *{res['author']}*\")\n"
+                "        except Exception as e:\n"
+                "            await ctx.reply(msg, f\"❌ Error: {e}\")\n"
+            )
+        elif kind == "gemini":
+            if not self.filename_input.text:
+                self.filename_input.text = "gemini_bot.py"
+            self.code_input.text = (
+                "# Gemini AI Assistant Bot via REST API\n"
+                "# requires: requests\n"
+                "import requests\n\n"
+                "NAME = 'gemini_bot'\n"
+                "GEMINI_API_KEY = 'YOUR_API_KEY_HERE'\n\n"
+                "async def on_message(ctx, msg):\n"
+                "    text = (msg.text or '').strip()\n"
+                "    if text.startswith('!ai '):\n"
+                "        prompt = text[4:].strip()\n"
+                "        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}'\n"
+                "        body = {'contents': [{'parts': [{'text': prompt}]}]}\n"
+                "        try:\n"
+                "            resp = requests.post(url, json=body, timeout=12).json()\n"
+                "            ans = resp['candidates'][0]['content']['parts'][0]['text']\n"
+                "            await ctx.reply(msg, f\"🤖 *Gemini:*\\n{ans}\")\n"
+                "        except Exception as e:\n"
+                "            await ctx.reply(msg, f\"❌ AI Error: {e}\")\n"
+            )
+        elif kind == "antidelete":
+            if not self.filename_input.text:
+                self.filename_input.text = "sqlite_antidelete.py"
+            self.code_input.text = (
+                "# Persistent Anti-Delete using isolated SQLite storage\n"
+                "import time\n\n"
+                "NAME = 'sqlite_antidelete'\n\n"
+                "async def setup(ctx):\n"
+                "    db = ctx.get_db()\n"
+                "    with db:\n"
+                "        db.execute('''\n"
+                "            CREATE TABLE IF NOT EXISTS messages (\n"
+                "                msg_id TEXT PRIMARY KEY,\n"
+                "                sender TEXT,\n"
+                "                chat_id TEXT,\n"
+                "                content TEXT,\n"
+                "                ts INTEGER\n"
+                "            );\n"
+                "        ''')\n"
+                "    ctx.log.info('SQLite Anti-Delete DB ready.')\n\n"
+                "async def on_message(ctx, msg):\n"
+                "    # Log message to database\n"
+                "    pass\n"
             )
         elif kind == "remind":
             if not self.filename_input.text:
-                self.filename_input.text = "timer_alert.py"
+                self.filename_input.text = "periodic_task.py"
             self.code_input.text = (
-                "import asyncio\n\n"
-                "# Asynchronous timed reminder\n"
-                "NAME = 'timer_alert'\n\n"
-                "async def on_message(ctx, msg):\n"
-                "    if msg.text and msg.text.startswith('!pingme'):\n"
-                "        await ctx.reply(msg, 'Timer scheduled (10s)...')\n"
-                "        await asyncio.sleep(10)\n"
-                "        await ctx.reply(msg, 'Time is up! Here is your alert.')\n"
+                "# Periodic background task using ctx.every\n"
+                "NAME = 'periodic_task'\n\n"
+                "async def run_task(ctx):\n"
+                "    ctx.log.info('Running periodic health check.')\n\n"
+                "async def setup(ctx):\n"
+                "    # Schedule to run every 5 minutes (300 seconds)\n"
+                "    ctx.every(300, run_task)\n"
             )
         self._update_telemetry()
 
@@ -737,9 +823,26 @@ class PluginEditorDialog(ModalView):
         name = self.filename_input.text.strip()
         code = self.code_input.text
         if not name:
+            self.lbl_telemetry.text = "Error: Filename required"
+            self.lbl_telemetry.color = get_color_from_hex("#EF4444")
             return
         if not name.endswith(".py"):
             name += ".py"
+
+        # AST syntax check to prevent saving broken code
+        try:
+            ast.parse(code)
+        except SyntaxError as e:
+            self.lbl_telemetry.text = f"SyntaxError Ln {e.lineno}: {e.msg}"
+            self.lbl_telemetry.color = get_color_from_hex("#EF4444")
+            return
+        except Exception as e:
+            self.lbl_telemetry.text = f"Error: {e}"
+            self.lbl_telemetry.color = get_color_from_hex("#EF4444")
+            return
+
+        self.lbl_telemetry.color = get_color_from_hex("#10B981")
+        self.lbl_telemetry.text = "Saved & Verified!"
         self.on_save(self, name, code)
 
 
@@ -765,6 +868,625 @@ class InfoDialog(ModalView):
         card.add_widget(lbl_m)
         card.add_widget(btn_ok)
         self.add_widget(card)
+
+
+class UpdateDialog(ModalView):
+    """Clean OTA Update Dialog showing changelog, version diff, and 1-tap download & install."""
+    def __init__(self, info: dict, on_install, **kw):
+        super().__init__(size_hint=(0.92, 0.65), auto_dismiss=True, **kw)
+        self.info = info
+        self.on_install = on_install
+        self.background_color = (0, 0, 0, 0.85)
+
+        card = Factory.DialogCard()
+        card.padding = dp(14)
+        card.spacing = dp(8)
+
+        lbl_t = Label(
+            text=f"New Version: {info.get('latest_version')}",
+            font_size="15sp", bold=True, color=get_color_from_hex("#10B981"),
+            size_hint_y=None, height=dp(28), halign="left"
+        )
+        lbl_t.bind(size=lbl_t.setter('text_size'))
+
+        lbl_sub = Label(
+            text=f"Current: v{info.get('current_version')}  •  Size: {info.get('size_mb')} MB",
+            font_size="11sp", color=get_color_from_hex("#94A3B8"),
+            size_hint_y=None, height=dp(20), halign="left"
+        )
+        lbl_sub.bind(size=lbl_sub.setter('text_size'))
+
+        lbl_cl_head = Label(
+            text="Release Notes:", font_size="12sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(20), halign="left"
+        )
+        lbl_cl_head.bind(size=lbl_cl_head.setter('text_size'))
+
+        scroll = ScrollView(size_hint=(1, 1))
+        lbl_changelog = Label(
+            text=str(info.get('changelog') or 'Bug fixes and performance enhancements.'),
+            font_size="11sp", color=get_color_from_hex("#CBD5E1"),
+            size_hint_y=None, halign="left", valign="top"
+        )
+        lbl_changelog.bind(width=lambda *_: setattr(lbl_changelog, 'text_size', (lbl_changelog.width, None)))
+        lbl_changelog.bind(texture_size=lambda *_: setattr(lbl_changelog, 'height', lbl_changelog.texture_size[1]))
+        scroll.add_widget(lbl_changelog)
+
+        self.lbl_progress = Label(
+            text="", font_size="11sp", color=get_color_from_hex("#10B981"),
+            size_hint_y=None, height=dp(22)
+        )
+
+        row_btns = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
+        btn_cancel = Factory.SecondaryButton(text="Later", size_hint=(0.35, 1))
+        btn_cancel.bind(on_release=lambda *_: self.dismiss())
+
+        self.btn_download = Factory.PrimaryButton(text="Download & Install", size_hint=(0.65, 1))
+        self.btn_download.bind(on_release=self._start_download)
+
+        row_btns.add_widget(btn_cancel)
+        row_btns.add_widget(self.btn_download)
+
+        card.add_widget(lbl_t)
+        card.add_widget(lbl_sub)
+        card.add_widget(lbl_cl_head)
+        card.add_widget(scroll)
+        card.add_widget(self.lbl_progress)
+        card.add_widget(row_btns)
+        self.add_widget(card)
+
+    def _start_download(self, *_):
+        self.btn_download.disabled = True
+        self.btn_download.text = "Downloading..."
+        self.on_install(self, self.info.get("download_url"))
+
+
+class PluginStoreDialog(ModalView):
+    """Integrated Plugin Marketplace, 3rd-Party Importer, and Python Library Hub."""
+
+    def __init__(self, app_root, **kw):
+        super().__init__(size_hint=(0.96, 0.94), auto_dismiss=True, **kw)
+        self.root = app_root
+        self.background_color = (0, 0, 0, 0.88)
+        self.catalog = {"plugins": []}
+        self.active_tab = "store"
+
+        card = Factory.DialogCard()
+        card.padding = dp(12)
+        card.spacing = dp(8)
+
+        # Header: Title & Close Button
+        header = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(8))
+        lbl_h = Label(
+            text="Plugin Store & Ecosystem", font_size="15sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle"
+        )
+        lbl_h.bind(size=lbl_h.setter('text_size'))
+        btn_close = Factory.SecondaryButton(text=ICON_CLOSE, size_hint=(None, None), size=(dp(34), dp(34)))
+        btn_close.bind(on_release=lambda *_: self.dismiss())
+        header.add_widget(lbl_h)
+        header.add_widget(btn_close)
+        card.add_widget(header)
+
+        # Tab Navigation Row: [Official Store] [3rd-Party Import] [Libraries (Pip)]
+        tab_row = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(6))
+        self.btn_tab_store = Factory.PrimaryButton(text="Store Catalog", size_hint=(1, 1))
+        self.btn_tab_store.font_size = "11sp"
+        self.btn_tab_store.bind(on_release=lambda *_: self.switch_tab("store"))
+
+        self.btn_tab_import = Factory.SecondaryButton(text="3rd-Party Import", size_hint=(1, 1))
+        self.btn_tab_import.font_size = "11sp"
+        self.btn_tab_import.bind(on_release=lambda *_: self.switch_tab("import"))
+
+        self.btn_tab_libs = Factory.SecondaryButton(text="Libraries (Pip)", size_hint=(1, 1))
+        self.btn_tab_libs.font_size = "11sp"
+        self.btn_tab_libs.bind(on_release=lambda *_: self.switch_tab("libs"))
+
+        tab_row.add_widget(self.btn_tab_store)
+        tab_row.add_widget(self.btn_tab_import)
+        tab_row.add_widget(self.btn_tab_libs)
+        card.add_widget(tab_row)
+
+        # Dynamic Container for active tab
+        self.tab_container = BoxLayout(orientation="vertical", spacing=dp(6), size_hint=(1, 1))
+        card.add_widget(self.tab_container)
+        self.add_widget(card)
+
+        # Load store catalog asynchronously
+        self.switch_tab("store")
+
+    def switch_tab(self, tab_name):
+        self.active_tab = tab_name
+        self.btn_tab_store.background_color = get_color_from_hex("#10B981") if tab_name == "store" else get_color_from_hex("#1E293B")
+        self.btn_tab_import.background_color = get_color_from_hex("#10B981") if tab_name == "import" else get_color_from_hex("#1E293B")
+        self.btn_tab_libs.background_color = get_color_from_hex("#10B981") if tab_name == "libs" else get_color_from_hex("#1E293B")
+
+        self.tab_container.clear_widgets()
+        if tab_name == "store":
+            self._render_store_tab()
+        elif tab_name == "import":
+            self._render_import_tab()
+        elif tab_name == "libs":
+            self._render_libs_tab()
+
+    # ---------------------------------------------------- Store Tab
+    def _render_store_tab(self):
+        # Search & Refresh Row
+        top_row = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(6))
+        self.store_search_input = Factory.ModernInput(size_hint_x=1)
+        self.store_search_input.font_size = "11sp"
+        self.store_search_input.hint_text = "Search store plugins..."
+        self.store_search_input.bind(text=self._filter_store_plugins)
+
+        btn_refresh_catalog = Factory.SecondaryButton(text=ICON_REFRESH, size_hint=(None, None), size=(dp(36), dp(34)))
+        btn_refresh_catalog.bind(on_release=lambda *_: self._fetch_catalog(force=True))
+
+        top_row.add_widget(self.store_search_input)
+        top_row.add_widget(btn_refresh_catalog)
+        self.tab_container.add_widget(top_row)
+
+        # Scrollable Store List
+        scroll = ScrollView(size_hint=(1, 1))
+        self.store_list_box = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None)
+        self.store_list_box.bind(minimum_height=self.store_list_box.setter("height"))
+        scroll.add_widget(self.store_list_box)
+        self.tab_container.add_widget(scroll)
+
+        if not self.catalog.get("plugins"):
+            self._fetch_catalog(force=False)
+        else:
+            self._populate_store_items(self.catalog.get("plugins", []))
+
+    def _fetch_catalog(self, force=False):
+        self.store_list_box.clear_widgets()
+        lbl_load = Label(
+            text="Fetching official plugins from GitHub...",
+            font_size="12sp", color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(40)
+        )
+        self.store_list_box.add_widget(lbl_load)
+
+        def _worker():
+            ok, cat, msg = plugin_store.fetch_catalog()
+            def _apply(dt):
+                self.catalog = cat if ok else {"plugins": []}
+                self._populate_store_items(self.catalog.get("plugins", []))
+                self.root.on_log(f"Catalog: {msg}")
+            Clock.schedule_once(_apply, 0.05)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _filter_store_plugins(self, *_):
+        query = self.store_search_input.text.strip().lower()
+        all_plugins = self.catalog.get("plugins", [])
+        if not query:
+            self._populate_store_items(all_plugins)
+        else:
+            filtered = [
+                p for p in all_plugins
+                if query in p.get("name", "").lower()
+                or query in p.get("id", "").lower()
+                or query in p.get("category", "").lower()
+                or query in p.get("description", "").lower()
+            ]
+            self._populate_store_items(filtered)
+
+    def _populate_store_items(self, plugins):
+        self.store_list_box.clear_widgets()
+        installed_ids = plugin_store.get_installed_plugin_ids()
+
+        if not plugins:
+            empty_card = Factory.Card()
+            empty_card.add_widget(Label(
+                text="No plugins found matching search.",
+                color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(40)
+            ))
+            self.store_list_box.add_widget(empty_card)
+            return
+
+        for p in plugins:
+            p_id = p.get("id", "")
+            is_installed = p_id in installed_ids
+
+            card = Factory.Card()
+            card.padding = [dp(12), dp(10), dp(12), dp(10)]
+            card.spacing = dp(4)
+
+            # Row 1: Title + Version + Category
+            r1 = BoxLayout(size_hint_y=None, height=dp(24), spacing=dp(6))
+            lbl_name = Label(
+                text=f"{p.get('name', p_id)}", font_size="13sp", bold=True,
+                color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle"
+            )
+            lbl_name.bind(size=lbl_name.setter('text_size'))
+
+            lbl_ver = Label(
+                text=f"v{p.get('version', '1.0')}", font_size="10sp",
+                color=get_color_from_hex("#10B981") if is_installed else get_color_from_hex("#64748B"),
+                size_hint=(None, 1), width=dp(45), halign="right", valign="middle"
+            )
+            lbl_ver.bind(size=lbl_ver.setter('text_size'))
+
+            r1.add_widget(lbl_name)
+            r1.add_widget(lbl_ver)
+            card.add_widget(r1)
+
+            # Row 2: Description
+            lbl_desc = Label(
+                text=p.get("description", ""), font_size="11sp",
+                color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(32),
+                halign="left", valign="top"
+            )
+            lbl_desc.bind(size=lbl_desc.setter('text_size'))
+            card.add_widget(lbl_desc)
+
+            # Row 3: Dependencies + Action Button
+            r3 = BoxLayout(size_hint_y=None, height=dp(30), spacing=dp(8))
+            reqs = p.get("requires", [])
+            req_text = f"Libs: {', '.join(reqs)}" if reqs else "Libs: Built-in"
+            lbl_req = Label(
+                text=req_text, font_size="10sp", color=get_color_from_hex("#64748B"),
+                halign="left", valign="middle"
+            )
+            lbl_req.bind(size=lbl_req.setter('text_size'))
+            r3.add_widget(lbl_req)
+
+            if is_installed:
+                btn_stat = Factory.SecondaryButton(text="Installed", size_hint=(None, 1), width=dp(70))
+                btn_stat.font_size = "10sp"
+                btn_stat.disabled = True
+
+                btn_edit = Factory.PrimaryButton(text="Edit", size_hint=(None, 1), width=dp(50))
+                btn_edit.font_size = "10sp"
+                btn_edit.bind(on_release=lambda *_, pid=p_id: self._edit_from_store(pid))
+
+                r3.add_widget(btn_stat)
+                r3.add_widget(btn_edit)
+            else:
+                btn_install = Factory.PrimaryButton(text="Install", size_hint=(None, 1), width=dp(74))
+                btn_install.font_size = "11sp"
+                btn_install.bind(on_release=lambda b, p_entry=p: self._install_plugin(b, p_entry))
+                r3.add_widget(btn_install)
+
+            card.add_widget(r3)
+            self.store_list_box.add_widget(card)
+
+    def _install_plugin(self, btn, plugin_entry):
+        btn.disabled = True
+        btn.text = "Installing..."
+
+        def _worker():
+            def _log(msg):
+                Clock.schedule_once(lambda dt: self.root.on_log(msg), 0)
+
+            ok, res_msg = plugin_store.install_plugin_from_store(plugin_entry, on_log=_log)
+
+            def _done(dt):
+                self.root.on_log(res_msg)
+                if ok:
+                    self.root.send("/reload")
+                    btn.text = "Installed"
+                    self._populate_store_items(self.catalog.get("plugins", []))
+                else:
+                    btn.disabled = False
+                    btn.text = "Retry"
+                    InfoDialog("Installation Failed", res_msg).open()
+            Clock.schedule_once(_done, 0.05)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _edit_from_store(self, plugin_id):
+        self.dismiss()
+        self.root.screen_plugins.edit_plugin(plugin_id)
+
+    # ---------------------------------------------------- 3rd-Party Import Tab
+    def _render_import_tab(self):
+        scroll = ScrollView(size_hint=(1, 1))
+        content = BoxLayout(orientation="vertical", spacing=dp(10), size_hint_y=None)
+        content.bind(minimum_height=content.setter("height"))
+
+        card_url = Factory.Card()
+        card_url.padding = [dp(12), dp(10), dp(12), dp(10)]
+        card_url.spacing = dp(8)
+
+        lbl_u_title = Label(
+            text="Import from GitHub URL", font_size="13sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(22), halign="left"
+        )
+        lbl_u_title.bind(size=lbl_u_title.setter('text_size'))
+
+        lbl_u_sub = Label(
+            text="Paste raw link to any community .py plugin on GitHub or Web:",
+            font_size="11sp", color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(18), halign="left"
+        )
+        lbl_u_sub.bind(size=lbl_u_sub.setter('text_size'))
+
+        self.import_url_input = Factory.ModernInput(size_hint_y=None, height=dp(36))
+        self.import_url_input.font_size = "11sp"
+        self.import_url_input.hint_text = "https://raw.githubusercontent.com/user/repo/main/plugin.py"
+
+        row_inspect = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(8))
+        btn_inspect = Factory.PrimaryButton(text="Inspect URL")
+        btn_inspect.bind(on_release=self._inspect_import_url)
+
+        btn_pick_file = Factory.SecondaryButton(text="Load from /sdcard/Download")
+        btn_pick_file.bind(on_release=self._inspect_local_file)
+
+        row_inspect.add_widget(btn_inspect)
+        row_inspect.add_widget(btn_pick_file)
+
+        card_url.add_widget(lbl_u_title)
+        card_url.add_widget(lbl_u_sub)
+        card_url.add_widget(self.import_url_input)
+        card_url.add_widget(row_inspect)
+        content.add_widget(card_url)
+
+        # Inspection Preview Card
+        self.card_preview = Factory.Card()
+        self.card_preview.padding = [dp(12), dp(10), dp(12), dp(10)]
+        self.card_preview.spacing = dp(6)
+
+        self.lbl_prev_title = Label(
+            text="Plugin Preview: [Not Inspected]", font_size="13sp", bold=True,
+            color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(22), halign="left"
+        )
+        self.lbl_prev_title.bind(size=self.lbl_prev_title.setter('text_size'))
+
+        self.lbl_prev_desc = Label(
+            text="Enter URL and tap 'Inspect URL' to verify AST syntax and dependencies.",
+            font_size="11sp", color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(30), halign="left"
+        )
+        self.lbl_prev_desc.bind(size=self.lbl_prev_desc.setter('text_size'))
+
+        self.lbl_prev_deps = Label(
+            text="Dependencies: None", font_size="10sp", color=get_color_from_hex("#64748B"),
+            size_hint_y=None, height=dp(18), halign="left"
+        )
+        self.lbl_prev_deps.bind(size=self.lbl_prev_deps.setter('text_size'))
+
+        self.btn_confirm_import = Factory.PrimaryButton(text="Install Inspected Plugin", size_hint_y=None, height=dp(36))
+        self.btn_confirm_import.disabled = True
+        self.btn_confirm_import.bind(on_release=self._execute_import)
+
+        self.card_preview.add_widget(self.lbl_prev_title)
+        self.card_preview.add_widget(self.lbl_prev_desc)
+        self.card_preview.add_widget(self.lbl_prev_deps)
+        self.card_preview.add_widget(self.btn_confirm_import)
+        content.add_widget(self.card_preview)
+
+        scroll.add_widget(content)
+        self.tab_container.add_widget(scroll)
+
+        self._inspected_code = ""
+        self._inspected_meta = {}
+
+    def _inspect_import_url(self, *_):
+        url = self.import_url_input.text.strip()
+        if not url:
+            InfoDialog("Input Error", "Please paste a GitHub or raw URL first.").open()
+            return
+
+        self.lbl_prev_title.text = "Fetching and analyzing..."
+        self.lbl_prev_title.color = get_color_from_hex("#F8FAFC")
+
+        def _worker():
+            ok, code_or_err, meta = plugin_store.import_from_url(url)
+            def _apply(dt):
+                if ok:
+                    self._inspected_code = code_or_err
+                    self._inspected_meta = meta
+                    self.lbl_prev_title.text = f"Verified: {meta.get('name', 'Custom Plugin')}"
+                    self.lbl_prev_title.color = get_color_from_hex("#10B981")
+                    self.lbl_prev_desc.text = meta.get("description", "No description.")
+                    self.lbl_prev_desc.color = get_color_from_hex("#CBD5E1")
+                    deps = meta.get("requires", [])
+                    self.lbl_prev_deps.text = f"Dependencies: {', '.join(deps) if deps else 'None'}"
+                    self.btn_confirm_import.disabled = False
+                else:
+                    self.lbl_prev_title.text = "Verification Failed"
+                    self.lbl_prev_title.color = get_color_from_hex("#EF4444")
+                    self.lbl_prev_desc.text = code_or_err
+                    self.btn_confirm_import.disabled = True
+            Clock.schedule_once(_apply, 0.05)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _inspect_local_file(self, *_):
+        candidates = ["/sdcard/Download", backup_folder(), "/sdcard"]
+        py_files = []
+        for d in candidates:
+            if os.path.isdir(d):
+                for f in os.listdir(d):
+                    if f.endswith(".py") and not f.startswith("_"):
+                        py_files.append(os.path.join(d, f))
+
+        if not py_files:
+            InfoDialog("No Files", "No .py plugin files found in /sdcard/Download.").open()
+            return
+
+        target = py_files[0]
+        self.import_url_input.text = target
+        ok, code_or_err, meta = plugin_store.import_from_file(target)
+        if ok:
+            self._inspected_code = code_or_err
+            self._inspected_meta = meta
+            self.lbl_prev_title.text = f"Local File: {meta.get('name', os.path.basename(target))}"
+            self.lbl_prev_title.color = get_color_from_hex("#10B981")
+            self.lbl_prev_desc.text = meta.get("description", "Local file.")
+            self.lbl_prev_desc.color = get_color_from_hex("#CBD5E1")
+            deps = meta.get("requires", [])
+            self.lbl_prev_deps.text = f"Dependencies: {', '.join(deps) if deps else 'None'}"
+            self.btn_confirm_import.disabled = False
+        else:
+            InfoDialog("Error Reading File", code_or_err).open()
+
+    def _execute_import(self, *_):
+        if not self._inspected_code:
+            return
+        p_id = self._inspected_meta.get("id", "custom_plugin")
+        reqs = self._inspected_meta.get("requires", [])
+
+        self.btn_confirm_import.disabled = True
+        self.btn_confirm_import.text = "Installing..."
+
+        def _worker():
+            def _log(msg):
+                Clock.schedule_once(lambda dt: self.root.on_log(msg), 0)
+
+            ok, res_msg = plugin_store.save_plugin(p_id, self._inspected_code, reqs, on_log=_log)
+
+            def _done(dt):
+                self.root.on_log(res_msg)
+                if ok:
+                    self.root.send("/reload")
+                    InfoDialog("Plugin Installed", f"{res_msg}\nPlugin is now active in WA Core.").open()
+                    self.switch_tab("store")
+                else:
+                    self.btn_confirm_import.disabled = False
+                    self.btn_confirm_import.text = "Install Inspected Plugin"
+                    InfoDialog("Import Failed", res_msg).open()
+            Clock.schedule_once(_done, 0.05)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ---------------------------------------------------- Libraries (Pip Hub) Tab
+    def _render_libs_tab(self):
+        scroll = ScrollView(size_hint=(1, 1))
+        content = BoxLayout(orientation="vertical", spacing=dp(10), size_hint_y=None)
+        content.bind(minimum_height=content.setter("height"))
+
+        # Add Library Card
+        card_add = Factory.Card()
+        card_add.padding = [dp(12), dp(10), dp(12), dp(10)]
+        card_add.spacing = dp(8)
+
+        lbl_l_title = Label(
+            text="Install Python Libraries (Pip Hub)", font_size="13sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(22), halign="left"
+        )
+        lbl_l_title.bind(size=lbl_l_title.setter('text_size'))
+
+        lbl_l_sub = Label(
+            text="Download pure-python wheels directly from PyPI into plugin_packages:",
+            font_size="11sp", color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(18), halign="left"
+        )
+        lbl_l_sub.bind(size=lbl_l_sub.setter('text_size'))
+
+        row_install = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        self.input_pkg_name = Factory.ModernInput(size_hint_x=1)
+        self.input_pkg_name.font_size = "11sp"
+        self.input_pkg_name.hint_text = "Package name (e.g. beautifulsoup4, feedparser)"
+
+        btn_do_pip = Factory.PrimaryButton(text="Install", size_hint=(None, 1), width=dp(72))
+        btn_do_pip.bind(on_release=self._install_pypi_pkg)
+
+        row_install.add_widget(self.input_pkg_name)
+        row_install.add_widget(btn_do_pip)
+
+        btn_local_whl = Factory.SecondaryButton(text="Install Local .whl Archive from /sdcard/Download", size_hint_y=None, height=dp(32))
+        btn_local_whl.font_size = "11sp"
+        btn_local_whl.bind(on_release=self._install_local_wheel_pkg)
+
+        self.lbl_pip_status = Label(
+            text="", font_size="10sp", color=get_color_from_hex("#10B981"),
+            size_hint_y=None, height=dp(18), halign="left"
+        )
+        self.lbl_pip_status.bind(size=self.lbl_pip_status.setter('text_size'))
+
+        card_add.add_widget(lbl_l_title)
+        card_add.add_widget(lbl_l_sub)
+        card_add.add_widget(row_install)
+        card_add.add_widget(btn_local_whl)
+        card_add.add_widget(self.lbl_pip_status)
+        content.add_widget(card_add)
+
+        # Installed Packages List Card
+        card_list = Factory.Card()
+        card_list.padding = [dp(12), dp(10), dp(12), dp(10)]
+        card_list.spacing = dp(6)
+
+        lbl_inst_title = Label(
+            text="Dynamic Packages (Loaded in sys.path)", font_size="13sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(22), halign="left"
+        )
+        lbl_inst_title.bind(size=lbl_inst_title.setter('text_size'))
+        card_list.add_widget(lbl_inst_title)
+
+        installed_pkgs = pip_hub.list_installed_packages()
+        if not installed_pkgs:
+            card_list.add_widget(Label(
+                text="No extra dynamic libraries installed yet.\nPre-bundled: requests, protobuf, segno, phonenumbers, filetype.",
+                font_size="11sp", color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(40)
+            ))
+        else:
+            for pkg in installed_pkgs:
+                p_row = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(8))
+                lbl_p_meta = Label(
+                    text=f"{pkg['name']} v{pkg['version']} ({pkg['size_kb']} KB)",
+                    font_size="11sp", color=get_color_from_hex("#E2E8F0"),
+                    halign="left", valign="middle"
+                )
+                lbl_p_meta.bind(size=lbl_p_meta.setter('text_size'))
+
+                btn_uninst = Factory.DangerButton(text="Remove", size_hint=(None, 1), width=dp(64))
+                btn_uninst.font_size = "10sp"
+                btn_uninst.bind(on_release=lambda *_, p=pkg['name']: self._uninstall_pkg(p))
+
+                p_row.add_widget(lbl_p_meta)
+                p_row.add_widget(btn_uninst)
+                card_list.add_widget(p_row)
+
+        content.add_widget(card_list)
+        scroll.add_widget(content)
+        self.tab_container.add_widget(scroll)
+
+    def _install_pypi_pkg(self, *_):
+        pkg = self.input_pkg_name.text.strip()
+        if not pkg:
+            InfoDialog("Input Error", "Please enter a valid package name.").open()
+            return
+
+        self.lbl_pip_status.text = f"Contacting PyPI and downloading '{pkg}'..."
+        self.lbl_pip_status.color = get_color_from_hex("#38BDF8")
+
+        def _worker():
+            ok, msg = pip_hub.install_pypi_package(pkg)
+            def _done(dt):
+                self.lbl_pip_status.text = msg
+                self.lbl_pip_status.color = get_color_from_hex("#10B981") if ok else get_color_from_hex("#EF4444")
+                self.root.on_log(msg)
+                if ok:
+                    self.input_pkg_name.text = ""
+                    Clock.schedule_once(lambda dt: self.switch_tab("libs"), 0.8)
+                else:
+                    InfoDialog("Installation Notice", msg).open()
+            Clock.schedule_once(_done, 0.05)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _install_local_wheel_pkg(self, *_):
+        candidates = ["/sdcard/Download", backup_folder(), "/sdcard"]
+        wheels = []
+        for d in candidates:
+            if os.path.isdir(d):
+                for f in os.listdir(d):
+                    if f.endswith((".whl", ".zip")):
+                        wheels.append(os.path.join(d, f))
+
+        if not wheels:
+            InfoDialog("No Archives", "No .whl or .zip archives found in /sdcard/Download.").open()
+            return
+
+        target = wheels[0]
+        ok, msg = pip_hub.install_local_wheel(target)
+        self.root.on_log(msg)
+        InfoDialog("Local Package", msg).open()
+        if ok:
+            self.switch_tab("libs")
+
+    def _uninstall_pkg(self, pkg_name):
+        ok, msg = pip_hub.uninstall_package(pkg_name)
+        self.root.on_log(msg)
+        self.switch_tab("libs")
 
 
 # --------------------------------------------------------------------------- Screens
@@ -884,16 +1606,21 @@ class PluginsScreen(Screen):
         )
         self.lbl_title.bind(size=self.lbl_title.setter('text_size'))
 
-        btn_add = Factory.PrimaryButton(text="+ Add", size_hint=(None, None), size=(dp(68), dp(36)))
+        btn_store = Factory.PrimaryButton(text="Store", size_hint=(None, None), size=(dp(66), dp(36)))
+        btn_store.font_size = "12sp"
+        btn_store.bind(on_release=lambda *_: self.open_store())
+
+        btn_add = Factory.SecondaryButton(text="+ Code", size_hint=(None, None), size=(dp(64), dp(36)))
         btn_add.font_size = "12sp"
         btn_add.bind(on_release=lambda *_: self.open_editor())
 
-        btn_reload = Factory.SecondaryButton(text=ICON_REFRESH, size_hint=(None, None), size=(dp(42), dp(36)))
+        btn_reload = Factory.SecondaryButton(text=ICON_REFRESH, size_hint=(None, None), size=(dp(38), dp(36)))
         btn_reload.font_size = "15sp"
         btn_reload.bold = True
         btn_reload.bind(on_release=lambda *_: self.root.send("/reload"))
 
         row.add_widget(self.lbl_title)
+        row.add_widget(btn_store)
         row.add_widget(btn_add)
         row.add_widget(btn_reload)
         header_card.add_widget(row)
@@ -907,6 +1634,9 @@ class PluginsScreen(Screen):
         layout.add_widget(scroll)
 
         self.add_widget(layout)
+
+    def open_store(self):
+        PluginStoreDialog(self.root).open()
 
     def open_editor(self, filename="", initial_code=""):
         dlg = PluginEditorDialog(self.root.save_plugin)
@@ -1408,14 +2138,24 @@ class SettingsScreen(Screen):
         )
         lbl_meta3.bind(size=lbl_meta3.setter('text_size'))
 
-        btn_about_logs = Factory.SecondaryButton(text="Export Activity Log (.log)")
+        row_about_btns = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+
+        btn_about_logs = Factory.SecondaryButton(text="Export Logs (.log)", size_hint=(0.48, 1))
+        btn_about_logs.font_size = "11sp"
         btn_about_logs.bind(on_release=self.export_logs_from_about)
+
+        self.btn_check_update = Factory.PrimaryButton(text="Check Updates", size_hint=(0.52, 1))
+        self.btn_check_update.font_size = "11sp"
+        self.btn_check_update.bind(on_release=self.on_check_update_press)
+
+        row_about_btns.add_widget(btn_about_logs)
+        row_about_btns.add_widget(self.btn_check_update)
 
         card_about.add_widget(lbl_a_title)
         card_about.add_widget(lbl_meta1)
         card_about.add_widget(lbl_meta2)
         card_about.add_widget(lbl_meta3)
-        card_about.add_widget(btn_about_logs)
+        card_about.add_widget(row_about_btns)
 
         content.add_widget(card_privacy)
         content.add_widget(card_session)
@@ -1651,6 +2391,49 @@ class SettingsScreen(Screen):
         self.root.is_connected = False
         self.root.update_tab_bar()
         self.root.switch_tab("connect")
+
+    def on_check_update_press(self, *_):
+        self.btn_check_update.text = "Checking..."
+        self.btn_check_update.disabled = True
+
+        def _worker():
+            ok, info, msg = updater.check_for_updates(APP_VERSION)
+            def _done(dt):
+                self.btn_check_update.text = "Check Updates"
+                self.btn_check_update.disabled = False
+                self.root.on_log(msg)
+                if ok and info.get("has_update") and info.get("download_url"):
+                    UpdateDialog(info, on_install=self.download_and_install_update).open()
+                else:
+                    InfoDialog("App Update Status", msg).open()
+            Clock.schedule_once(_done, 0.05)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def download_and_install_update(self, dialog, download_url):
+        def _worker():
+            def _prog(pct, cur_mb, tot_mb):
+                def _update_ui(dt):
+                    dialog.lbl_progress.text = f"Downloading: {pct}% ({cur_mb:.1f} MB / {tot_mb:.1f} MB)"
+                Clock.schedule_once(_update_ui, 0)
+
+            ok, res_or_path = updater.download_update_apk(download_url, on_progress=_prog)
+            def _finished(dt):
+                if ok:
+                    dialog.lbl_progress.text = "Download complete! Opening installer..."
+                    self.root.on_log(f"Update APK downloaded to {res_or_path}")
+                    inst_ok, inst_msg = updater.launch_apk_installer(res_or_path)
+                    if not inst_ok:
+                        InfoDialog("Install Notice", f"APK downloaded to:\n{res_or_path}\n\n{inst_msg}").open()
+                    dialog.dismiss()
+                else:
+                    dialog.lbl_progress.text = "Download failed."
+                    dialog.btn_download.disabled = False
+                    dialog.btn_download.text = "Retry Download"
+                    InfoDialog("Update Download Failed", res_or_path).open()
+            Clock.schedule_once(_finished, 0.05)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
 
 # --------------------------------------------------------------------------- Root Layout

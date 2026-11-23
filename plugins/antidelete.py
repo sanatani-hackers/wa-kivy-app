@@ -10,6 +10,28 @@ MAX_CACHE = 1000
 MESSAGE_CACHE: OrderedDict[str, dict] = OrderedDict()
 
 
+async def setup(ctx):
+    """Initialize persistent SQLite storage for intercepted messages and revokes."""
+    try:
+        db = ctx.get_db()
+        with db:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS revoke_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    msg_id TEXT,
+                    sender TEXT,
+                    chat_id TEXT,
+                    time_str TEXT,
+                    content TEXT,
+                    action_type TEXT
+                );
+            """)
+        ctx.log.info("Anti-delete persistent database initialized successfully.")
+    except Exception as e:
+        ctx.log.warning("Could not initialize SQLite DB: %s", e)
+
+
+
 def _get_content_summary(msg_proto) -> str:
     """Extract readable text or media description from raw protobuf."""
     if not msg_proto:
@@ -69,6 +91,17 @@ async def on_message(ctx, msg):
                     )
                 except Exception as e:
                     log.warning("Notification failed: %s", e)
+                # Save to isolated SQLite DB
+                try:
+                    db = ctx.get_db()
+                    with db:
+                        db.execute(
+                            "INSERT INTO revoke_log (msg_id, sender, chat_id, time_str, content, action_type) VALUES (?, ?, ?, ?, ?, ?)",
+                            (deleted_id, cached["sender"], cached["chat_id"], cached["time"], cached["text"], "DELETE")
+                        )
+                except Exception:
+                    pass
+
                 await ctx.reply(msg, alert_text)
             return
 
@@ -97,6 +130,17 @@ async def on_message(ctx, msg):
                     )
                 except Exception as e:
                     log.warning("Notification failed: %s", e)
+                # Save to isolated SQLite DB
+                try:
+                    db = ctx.get_db()
+                    with db:
+                        db.execute(
+                            "INSERT INTO revoke_log (msg_id, sender, chat_id, time_str, content, action_type) VALUES (?, ?, ?, ?, ?, ?)",
+                            (deleted_id, cached["sender"], cached["chat_id"], cached["time"], cached["text"], "DELETE")
+                        )
+                except Exception:
+                    pass
+
                 await ctx.reply(msg, alert_text)
             return
 

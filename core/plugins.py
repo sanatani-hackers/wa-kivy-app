@@ -8,21 +8,68 @@ Plugin contract (all optional except on_message or setup):
 """
 import asyncio
 import importlib.util
+import json
 import logging
 import os
+import sqlite3
 import sys
 
+from common import plugin_data_dir, plugin_media_dir
 from .throttle import Job
 
 log = logging.getLogger("wa.plugins")
 
 
 class PluginContext:
-    """The ONLY handle a plugin gets. No raw neonize client => cannot bypass the throttle."""
+    """The handle a plugin gets. Provides throttled messaging, scheduling, logger, isolated storage and DB handles."""
 
-    def __init__(self, name, core):
-        self.name, self._core = name, core
-        self.log = logging.getLogger(f"plugin.{name}")
+    def __init__(self, name: str, core):
+        self.name = str(name).strip()
+        self._core = core
+        self.log = logging.getLogger(f"plugin.{self.name}")
+        self.data_dir = plugin_data_dir(self.name)
+        self.media_dir = plugin_media_dir(self.name)
+
+    def get_path(self, filename: str, public: bool = False) -> str:
+        """Return absolute path for a file inside this plugin's isolated directory."""
+        folder = self.media_dir if public else self.data_dir
+        return os.path.join(folder, filename)
+
+    def load_json(self, filename: str, default=None):
+        """Safely load JSON configuration or state from plugin private storage."""
+        p = self.get_path(filename, public=False)
+        if not os.path.exists(p):
+            return default if default is not None else {}
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            self.log.warning("load_json %s error: %s", filename, e)
+            return default
+
+    def save_json(self, filename: str, data) -> bool:
+        """Atomically persist JSON data to plugin private storage."""
+        p = self.get_path(filename, public=False)
+        tmp = f"{p}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, p)
+            return True
+        except Exception as e:
+            self.log.error("save_json %s error: %s", filename, e)
+            return False
+
+    def get_db(self, db_name: str = None) -> sqlite3.Connection:
+        """Get or create an isolated SQLite database connection with WAL mode enabled."""
+        name = db_name or f"{self.name}.sqlite3"
+        path = self.get_path(name, public=False)
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+        except Exception:
+            pass
+        return conn
 
     async def reply(self, msg, text: str) -> bool:
         return self._core.queue.put(Job(msg.chat, msg.chat_id, text, self.name, quoted=msg.raw))
