@@ -6,6 +6,7 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,json,so,ttf
 version = 0.1.0
 orientation = portrait
+fullscreen = 0
 android.softinput_mode = resize
 
 requirements = python3,kivy==2.3.0,oscpy,pyjnius,android,protobuf,requests,phonenumbers,segno,tqdm,filetype

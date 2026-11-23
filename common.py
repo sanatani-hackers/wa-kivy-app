@@ -284,7 +284,7 @@ def export_session_zip() -> tuple[bool, str]:
 
 
 def import_session_zip(path: str) -> tuple[bool, str]:
-    """Restore session.sqlite3 from a backup zip or sqlite3 file with intelligent path search."""
+    """Restore session.sqlite3 from a backup zip or sqlite3 file with intelligent path search & header detection."""
     path = path.strip()
     if not path:
         return False, "Please enter a backup file path or filename."
@@ -300,30 +300,70 @@ def import_session_zip(path: str) -> tuple[bool, str]:
 
     actual_path = None
     for cp in candidates:
-        if os.path.exists(cp):
+        if os.path.exists(cp) and os.path.isfile(cp):
             actual_path = cp
             break
 
     if not actual_path:
-        avail = [f for f in os.listdir(backup_folder()) if f.endswith((".zip", ".sqlite3"))]
+        avail = [f for f in os.listdir(backup_folder()) if f.endswith((".zip", ".sqlite3"))] if os.path.isdir(backup_folder()) else []
         avail_str = ", ".join(avail) if avail else "No backups found"
         return False, f"File not found: {path}\nAvailable in backups: {avail_str}"
+
+    file_size = os.path.getsize(actual_path)
+    if file_size == 0:
+        return False, f"Selected backup file is empty (0 bytes):\n{actual_path}"
 
     base = private_dir()
     db_dest = os.path.join(base, "session.sqlite3")
     try:
-        if actual_path.endswith(".zip"):
+        # Read magic header bytes to accurately identify file format
+        with open(actual_path, "rb") as f:
+            header = f.read(32)
+
+        is_zip = header.startswith(b"PK\x03\x04") or header.startswith(b"PK\x05\x06") or zipfile.is_zipfile(actual_path)
+        is_sqlite = header.startswith(b"SQLite format 3")
+
+        if is_zip:
             with zipfile.ZipFile(actual_path, "r") as zf:
-                if "session.sqlite3" not in zf.namelist():
-                    return False, "Invalid archive: 'session.sqlite3' not found in zip."
-                zf.extract("session.sqlite3", base)
-        else:
+                # Find any sqlite3 database entry inside the zip (supporting subdirectories)
+                target_entry = None
+                for entry in zf.namelist():
+                    if os.path.basename(entry) == "session.sqlite3":
+                        target_entry = entry
+                        break
+                    elif entry.endswith(".sqlite3") or entry.endswith(".db"):
+                        target_entry = entry
+
+                if not target_entry:
+                    return False, f"Invalid archive: no .sqlite3 database found in zip.\nContents: {zf.namelist()}"
+
+                with zf.open(target_entry) as zf_in, open(db_dest, "wb") as dst_out:
+                    shutil.copyfileobj(zf_in, dst_out)
+
+            try:
+                os.chmod(db_dest, 0o600)
+            except Exception:
+                pass
+            return True, f"Session restored successfully from ZIP:\n{os.path.basename(actual_path)} ({file_size // 1024} KB)"
+
+        elif is_sqlite:
             shutil.copy2(actual_path, db_dest)
-        return True, f"Session restored successfully from:\n{actual_path}"
+            try:
+                os.chmod(db_dest, 0o600)
+            except Exception:
+                pass
+            return True, f"Session database restored successfully from:\n{os.path.basename(actual_path)} ({file_size // 1024} KB)"
+
+        else:
+            return False, (
+                f"Unrecognized file format: {os.path.basename(actual_path)} ({file_size} bytes)\n"
+                f"Header: {header[:16]!r}\n\n"
+                f"Please ensure you select a valid WA_Session.zip or session.sqlite3 backup."
+            )
     except PermissionError:
         return False, f"Permission Denied accessing:\n{actual_path}\n\nPlease copy your backup file to:\n{backup_folder()}\nor grant All Files Access."
     except Exception as e:
-        return False, str(e)
+        return False, f"Restore failed: {e}"
 
 
 def export_activity_log() -> tuple[bool, str]:

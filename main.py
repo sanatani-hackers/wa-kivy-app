@@ -21,7 +21,9 @@ from kivy.core.text import DEFAULT_FONT, LabelBase
 from kivy.core.window import Window
 from kivy.factory import Factory
 
-# Ensure window dynamically shifts up when software keyboard appears
+# Ensure window displays status bar and dynamically shifts up when software keyboard appears
+Window.fullscreen = False
+Window.borderless = False
 Window.softinput_mode = "below_target"
 Window.keyboard_anim_args = {'d': 0.2, 't': 'in_out_quart'}
 from kivy.lang import Builder
@@ -1284,58 +1286,86 @@ class SettingsScreen(Screen):
             self.open_kivy_file_chooser()
 
     def copy_content_uri_to_private(self, activity, uri) -> str:
-        """Stream bytes from content:// URI into private storage."""
+        """Stream bytes from content:// URI into private storage using native file descriptor."""
         from jnius import autoclass
         cr = activity.getContentResolver()
-        input_stream = cr.openInputStream(uri)
 
-        filename = "selected_session.zip"
+        # 1. Resolve filename safely
+        filename = "imported_session_backup"
         try:
             OpenableColumns = autoclass("android.provider.OpenableColumns")
             cursor = cr.query(uri, None, None, None, None)
             if cursor and cursor.moveToFirst():
                 name_idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if name_idx >= 0:
-                    filename = cursor.getString(name_idx)
+                    val = cursor.getString(name_idx)
+                    if val:
+                        filename = str(val)
                 cursor.close()
         except Exception:
             pass
 
-        dest = os.path.join(private_dir(), filename)
-        FileOutputStream = autoclass("java.io.FileOutputStream")
-        ByteArray = autoclass("java.lang.reflect.Array")
-        ByteType = autoclass("java.lang.Byte").TYPE
-        buffer = ByteArray.newInstance(ByteType, 16384)
+        if "." not in filename:
+            try:
+                last_seg = uri.getLastPathSegment()
+                if last_seg and "." in last_seg:
+                    filename = last_seg.split("/")[-1]
+            except Exception:
+                pass
 
-        out_stream = FileOutputStream(dest)
+        dest = os.path.join(private_dir(), filename)
+
+        # 2. Kernel-level direct copy via ParcelFileDescriptor (fastest & 100% reliable)
+        copied = False
         try:
-            while True:
-                n = input_stream.read(buffer)
-                if n == -1:
-                    break
-                out_stream.write(buffer, 0, n)
-            out_stream.flush()
-        finally:
+            pfd = cr.openFileDescriptor(uri, "r")
+            if pfd:
+                fd = pfd.getFd()
+                with open(fd, "rb", closefd=False) as src_f, open(dest, "wb") as dst_f:
+                    shutil.copyfileobj(src_f, dst_f, length=65536)
+                pfd.close()
+                if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                    copied = True
+        except Exception as e:
+            self.root.on_log(f"pfd copy note: {e}")
+            copied = False
+
+        # 3. Native Android OS stream copy via android.os.FileUtils (Android 10+ / API 29+)
+        if not copied:
             try:
-                input_stream.close()
-            except Exception:
-                pass
-            try:
-                out_stream.close()
-            except Exception:
-                pass
+                FileUtils = autoclass("android.os.FileUtils")
+                FileOutputStream = autoclass("java.io.FileOutputStream")
+                in_stream = cr.openInputStream(uri)
+                out_stream = FileOutputStream(dest)
+                FileUtils.copy(in_stream, out_stream)
+                try:
+                    in_stream.close()
+                except Exception:
+                    pass
+                try:
+                    out_stream.close()
+                except Exception:
+                    pass
+                if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                    copied = True
+            except Exception as e:
+                self.root.on_log(f"FileUtils copy note: {e}")
+                copied = False
+
+        if not os.path.exists(dest) or os.path.getsize(dest) == 0:
+            raise RuntimeError("Selected file could not be read or is empty (0 bytes).")
 
         return dest
 
     def apply_restored_file(self, local_path):
         """Perform restore with chosen local file."""
-        self.input_import.text = local_path
+        self.input_import.text = os.path.basename(local_path)
         ok, res = import_session_zip(local_path)
         title = "Session Restored" if ok else "Restore Failed"
         msg = res if ok else f"Error: {res}"
         InfoDialog(title, msg).open()
         if ok:
-            self.root.on_log(f"Session restored from {local_path}. Reconnecting...")
+            self.root.on_log(f"Session restored from {os.path.basename(local_path)}. Reconnecting...")
             self.root.send("/start_bot")
 
     def open_kivy_file_chooser(self):
@@ -1645,6 +1675,51 @@ class Root(BoxLayout):
             self.on_log(f"Failed to save {name}: {e}")
 
 
+def configure_status_bar():
+    """Ensure Android status bar and navigation bar are permanently visible and themed."""
+    if platform != "android":
+        return
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+        if not activity:
+            return
+
+        def _apply():
+            try:
+                window = activity.getWindow()
+                WindowManager = autoclass("android.view.WindowManager")
+                FLAG_FULLSCREEN = WindowManager.LayoutParams.FLAG_FULLSCREEN
+                FLAG_FORCE_NOT_FULLSCREEN = WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN
+
+                # Clear fullscreen flag so system status bar stays visible
+                window.clearFlags(FLAG_FULLSCREEN)
+                window.addFlags(FLAG_FORCE_NOT_FULLSCREEN)
+
+                # Set dark background (#080C14) for seamless look
+                Color = autoclass("android.graphics.Color")
+                dark_color = Color.parseColor("#080C14")
+                window.setStatusBarColor(dark_color)
+                window.setNavigationBarColor(dark_color)
+
+                # Ensure system UI doesn't hide status bar
+                decor = window.getDecorView()
+                sys_ui = decor.getSystemUiVisibility()
+                # 4 = SYSTEM_UI_FLAG_FULLSCREEN, 2048 = SYSTEM_UI_FLAG_IMMERSIVE, 4096 = SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                decor.setSystemUiVisibility(sys_ui & ~(4 | 2048 | 4096))
+            except Exception as ex:
+                print(f"Status bar setup error: {ex}")
+
+        try:
+            from android.run_on_ui_thread import run_on_ui_thread
+            run_on_ui_thread(_apply)()
+        except Exception:
+            _apply()
+    except Exception as e:
+        print(f"configure_status_bar error: {e}")
+
+
 class WaApp(App):
     def build(self):
         try:
@@ -1655,7 +1730,14 @@ class WaApp(App):
             start_service()
         except Exception as e:
             log_exception(f"start_service failed: {e}")
+        configure_status_bar()
         return Root()
+
+    def on_start(self):
+        configure_status_bar()
+
+    def on_resume(self):
+        configure_status_bar()
 
     def on_pause(self):
         return True
