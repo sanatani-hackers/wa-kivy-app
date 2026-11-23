@@ -262,8 +262,7 @@ KV_STYLES = """
             rounded_rectangle: [self.x, self.y, self.width, self.height, dp(14)]
             width: dp(1)
 
-<MasterHeaderBtn@Button>:
-    is_running: True
+<MasterHeaderBtn>:
     background_color: (0, 0, 0, 0)
     background_normal: ''
     background_down: ''
@@ -344,8 +343,7 @@ KV_STYLES = """
             rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
             width: dp(1)
 
-<SwitchBtn@Button>:
-    is_active: True
+<SwitchBtn>:
     background_color: (0, 0, 0, 0)
     background_normal: ''
     background_down: ''
@@ -366,12 +364,6 @@ KV_STYLES = """
         Line:
             rounded_rectangle: [self.x, self.y, self.width, self.height, dp(6)]
             width: dp(1)
-
-<ToggleActiveBtn@SwitchBtn>:
-    is_active: True
-
-<ToggleInactiveBtn@SwitchBtn>:
-    is_active: False
 
 <SymbolEditBtn@Button>:
     background_color: (0, 0, 0, 0)
@@ -466,6 +458,14 @@ KV_STYLES = """
 
 class TabButton(Button):
     active = BooleanProperty(False)
+
+
+class SwitchBtn(Button):
+    is_active = BooleanProperty(True)
+
+
+class MasterHeaderBtn(Button):
+    is_running = BooleanProperty(True)
 
 
 Builder.load_string(KV_STYLES)
@@ -900,7 +900,7 @@ class PluginsScreen(Screen):
             row.add_widget(lbl_name)
 
             # Interactive ON / OFF toggle button
-            btn_toggle = Factory.ToggleActiveBtn(text="ON") if is_on else Factory.ToggleInactiveBtn(text="OFF")
+            btn_toggle = SwitchBtn(text="ON" if is_on else "OFF", is_active=is_on)
             btn_toggle.bind(on_release=lambda _, n=name: self.root.send("/toggle_plugin", n))
             row.add_widget(btn_toggle)
 
@@ -1175,7 +1175,7 @@ class SettingsScreen(Screen):
         lbl_stealth = Label(text="Stealth Mode (Suppress read receipts)", font_size="13sp",
                             color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle")
         lbl_stealth.bind(size=lbl_stealth.setter('text_size'))
-        self.btn_stealth = Factory.SwitchBtn(text="ON", is_active=True)
+        self.btn_stealth = SwitchBtn(text="ON", is_active=True)
         self.btn_stealth.bind(on_release=self.toggle_stealth)
         row_stealth.add_widget(lbl_stealth)
         row_stealth.add_widget(self.btn_stealth)
@@ -1185,7 +1185,7 @@ class SettingsScreen(Screen):
         lbl_wipe = Label(text="Auto-Wipe RAM Cache (24h retention)", font_size="13sp",
                          color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle")
         lbl_wipe.bind(size=lbl_wipe.setter('text_size'))
-        self.btn_auto_wipe = Factory.SwitchBtn(text="ON", is_active=True)
+        self.btn_auto_wipe = SwitchBtn(text="ON", is_active=True)
         self.btn_auto_wipe.bind(on_release=self.toggle_auto_wipe)
         row_wipe.add_widget(lbl_wipe)
         row_wipe.add_widget(self.btn_auto_wipe)
@@ -1195,7 +1195,7 @@ class SettingsScreen(Screen):
         lbl_forward = Label(text="Anti-Delete Relay to Saved Messages", font_size="13sp",
                             color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle")
         lbl_forward.bind(size=lbl_forward.setter('text_size'))
-        self.btn_forward = Factory.SwitchBtn(text="ON", is_active=True)
+        self.btn_forward = SwitchBtn(text="ON", is_active=True)
         self.btn_forward.bind(on_release=self.toggle_forward)
         row_forward.add_widget(lbl_forward)
         row_forward.add_widget(self.btn_forward)
@@ -1610,7 +1610,7 @@ class Root(BoxLayout):
             self.status_pill.add_widget(self.lbl_pill)
 
             # Master Header Quick Start/Stop Toggle Button with crisp symbols
-            self.btn_master = Factory.MasterHeaderBtn(text=ICON_STOP)
+            self.btn_master = MasterHeaderBtn(text=ICON_STOP)
             self.btn_master.bind(on_release=self.on_master_toggle)
 
             top_bar.add_widget(self.title_lbl)
@@ -1911,14 +1911,23 @@ class WaApp(App):
             start_service()
         except Exception as e:
             log_exception(f"start_service failed: {e}")
-        configure_status_bar()
+        try:
+            configure_status_bar()
+        except Exception as e:
+            log_exception(f"configure_status_bar failed: {e}")
         return Root()
 
     def on_start(self):
-        configure_status_bar()
+        try:
+            configure_status_bar()
+        except Exception:
+            pass
 
     def on_resume(self):
-        configure_status_bar()
+        try:
+            configure_status_bar()
+        except Exception:
+            pass
 
     def on_pause(self):
         return True
