@@ -40,6 +40,8 @@ from kivy.utils import get_color_from_hex, platform
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 
+APP_VERSION = "0.2.0"
+
 # UbuntuMono Nerd Font Icons (verified in custom user font.ttf)
 ICON_STOP = "\uf04d"       # nf-fa-stop
 ICON_PLAY = "\uf04b"       # nf-fa-play
@@ -60,6 +62,20 @@ ICON_WARNING = "\uf071"    # nf-fa-warning
 ICON_BROOM = "\uf12d"      # nf-fa-eraser
 ICON_PREV = "\uf053"       # nf-fa-chevron_left
 ICON_NEXT = "\uf054"       # nf-fa-chevron_right
+
+BUILTIN_PLUGINS = {
+    "antidelete", "antiviewonce", "autoreply", "echo", "ping", "remind", "stats"
+}
+
+PLUGIN_DESCRIPTIONS = {
+    "antidelete": "Intercepts and recovers deleted messages & media",
+    "antiviewonce": "Bypasses view-once restriction on photos & media",
+    "autoreply": "Automated keyword replies and responder triggers",
+    "echo": "Echo & broadcast testing tool (!say command)",
+    "ping": "Heartbeat and bot response latency checker",
+    "remind": "Task scheduler and timed reminder alerts",
+    "stats": "Message traffic monitor and session telemetry",
+}
 
 from common import (
     HOST,
@@ -147,7 +163,7 @@ def log_exception(exc_text):
         pass
 
 
-# Modern Minimalistic Design Styles
+# Unslopped Tactical Design Styles (Strict 4px grid & Obsidian Palette)
 KV_STYLES = """
 #:import get_color_from_hex kivy.utils.get_color_from_hex
 
@@ -155,26 +171,26 @@ KV_STYLES = """
     orientation: 'vertical'
     canvas.before:
         Color:
-            rgba: get_color_from_hex('#0B0F19')
+            rgba: get_color_from_hex('#080C14')
         Rectangle:
             pos: self.pos
             size: self.size
 
 <Card@BoxLayout>:
     orientation: 'vertical'
-    padding: dp(14)
-    spacing: dp(10)
+    padding: dp(16)
+    spacing: dp(12)
     size_hint_y: None
     height: self.minimum_height
     canvas.before:
         Color:
-            rgba: get_color_from_hex('#151D2A')
+            rgba: get_color_from_hex('#0F172A')
         RoundedRectangle:
             pos: self.pos
             size: self.size
             radius: [dp(12)]
         Color:
-            rgba: get_color_from_hex('#233044')
+            rgba: get_color_from_hex('#1E293B')
         Line:
             rounded_rectangle: [self.x, self.y, self.width, self.height, dp(12)]
             width: dp(1)
@@ -182,28 +198,28 @@ KV_STYLES = """
 <DialogCard@BoxLayout>:
     orientation: 'vertical'
     padding: dp(16)
-    spacing: dp(10)
+    spacing: dp(12)
     canvas.before:
         Color:
-            rgba: get_color_from_hex('#151D2A')
+            rgba: get_color_from_hex('#0F172A')
         RoundedRectangle:
             pos: self.pos
             size: self.size
             radius: [dp(14)]
         Color:
-            rgba: get_color_from_hex('#233044')
+            rgba: get_color_from_hex('#1E293B')
         Line:
             rounded_rectangle: [self.x, self.y, self.width, self.height, dp(14)]
             width: dp(1)
 
 <CodeBox@BoxLayout>:
     size_hint_y: None
-    height: dp(54)
-    padding: dp(8)
+    height: dp(52)
+    padding: [dp(12), dp(8), dp(12), dp(8)]
     spacing: dp(8)
     canvas.before:
         Color:
-            rgba: get_color_from_hex('#0D131F')
+            rgba: get_color_from_hex('#06090F')
         RoundedRectangle:
             pos: self.pos
             size: self.size
@@ -216,30 +232,35 @@ KV_STYLES = """
 
 <TerminalCard@BoxLayout>:
     orientation: 'vertical'
-    padding: dp(10)
+    padding: dp(12)
     canvas.before:
         Color:
-            rgba: get_color_from_hex('#0A0E17')
+            rgba: get_color_from_hex('#06090F')
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(10)]
+            radius: [dp(8)]
         Color:
             rgba: get_color_from_hex('#1E293B')
         Line:
-            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(10)]
+            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
             width: dp(1)
 
 <StatusPill@BoxLayout>:
     size_hint: (1, 1)
-    padding: [dp(10), dp(4), dp(10), dp(4)]
+    padding: [dp(12), dp(4), dp(12), dp(4)]
     canvas.before:
         Color:
-            rgba: get_color_from_hex('#151D2A')
+            rgba: get_color_from_hex('#0F172A')
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(16)]
+            radius: [dp(14)]
+        Color:
+            rgba: get_color_from_hex('#1E293B')
+        Line:
+            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(14)]
+            width: dp(1)
 
 <MasterHeaderBtn@Button>:
     is_running: True
@@ -247,32 +268,32 @@ KV_STYLES = """
     background_normal: ''
     background_down: ''
     bold: True
-    font_size: '14sp'
+    font_size: '13sp'
     size_hint: (None, None)
-    size: (dp(54), dp(34))
-    color: get_color_from_hex('#EF4444') if self.is_running else get_color_from_hex('#0B0F19')
+    size: (dp(48), dp(32))
+    color: get_color_from_hex('#EF4444') if self.is_running else get_color_from_hex('#080C14')
     canvas.before:
         Color:
-            rgba: (get_color_from_hex('#2A1818') if self.is_running else get_color_from_hex('#10B981')) if self.state != 'down' else get_color_from_hex('#374151')
+            rgba: (get_color_from_hex('#2A1215') if self.is_running else get_color_from_hex('#10B981')) if self.state != 'down' else get_color_from_hex('#334155')
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(17)]
+            radius: [dp(8)]
         Color:
-            rgba: get_color_from_hex('#EF4444') if self.is_running else get_color_from_hex('#059669')
+            rgba: get_color_from_hex('#7F1D1D') if self.is_running else get_color_from_hex('#059669')
         Line:
-            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(17)]
+            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
             width: dp(1)
 
 <PrimaryButton@Button>:
     background_color: (0, 0, 0, 0)
     background_normal: ''
     background_down: ''
-    color: get_color_from_hex('#0B0F19')
+    color: get_color_from_hex('#080C14')
     bold: True
-    font_size: '14sp'
+    font_size: '13sp'
     size_hint_y: None
-    height: dp(46)
+    height: dp(42)
     canvas.before:
         Color:
             rgba: get_color_from_hex('#059669') if self.state == 'down' else get_color_from_hex('#10B981')
@@ -285,13 +306,13 @@ KV_STYLES = """
     background_color: (0, 0, 0, 0)
     background_normal: ''
     background_down: ''
-    color: get_color_from_hex('#F3F4F6')
-    font_size: '13sp'
+    color: get_color_from_hex('#F8FAFC')
+    font_size: '12sp'
     size_hint_y: None
-    height: dp(42)
+    height: dp(38)
     canvas.before:
         Color:
-            rgba: get_color_from_hex('#2A384C') if self.state == 'down' else get_color_from_hex('#1F293A')
+            rgba: get_color_from_hex('#283548') if self.state == 'down' else get_color_from_hex('#1E293B')
         RoundedRectangle:
             pos: self.pos
             size: self.size
@@ -306,91 +327,13 @@ KV_STYLES = """
     background_color: (0, 0, 0, 0)
     background_normal: ''
     background_down: ''
-    color: get_color_from_hex('#FFFFFF')
-    font_size: '13sp'
-    size_hint_y: None
-    height: dp(42)
-    canvas.before:
-        Color:
-            rgba: get_color_from_hex('#DC2626') if self.state == 'down' else get_color_from_hex('#EF4444')
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(8)]
-
-<ToggleActiveBtn@Button>:
-    background_color: (0, 0, 0, 0)
-    background_normal: ''
-    background_down: ''
-    color: get_color_from_hex('#0B0F19')
-    bold: True
-    font_size: '11sp'
-    size_hint: (None, None)
-    size: (dp(48), dp(34))
-    canvas.before:
-        Color:
-            rgba: get_color_from_hex('#059669') if self.state == 'down' else get_color_from_hex('#10B981')
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(8)]
-
-<ToggleInactiveBtn@Button>:
-    background_color: (0, 0, 0, 0)
-    background_normal: ''
-    background_down: ''
-    color: get_color_from_hex('#94A3B8')
-    bold: True
-    font_size: '11sp'
-    size_hint: (None, None)
-    size: (dp(48), dp(34))
-    canvas.before:
-        Color:
-            rgba: get_color_from_hex('#2A384C') if self.state == 'down' else get_color_from_hex('#1F293A')
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(8)]
-        Color:
-            rgba: get_color_from_hex('#334155')
-        Line:
-            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
-            width: dp(1)
-
-<SymbolEditBtn@Button>:
-    background_color: (0, 0, 0, 0)
-    background_normal: ''
-    background_down: ''
-    color: get_color_from_hex('#F3F4F6')
-    font_size: '14sp'
-    bold: True
-    size_hint: (None, None)
-    size: (dp(40), dp(34))
-    canvas.before:
-        Color:
-            rgba: get_color_from_hex('#2A384C') if self.state == 'down' else get_color_from_hex('#1F293A')
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(8)]
-        Color:
-            rgba: get_color_from_hex('#334155')
-        Line:
-            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
-            width: dp(1)
-
-<SymbolDeleteBtn@Button>:
-    background_color: (0, 0, 0, 0)
-    background_normal: ''
-    background_down: ''
     color: get_color_from_hex('#EF4444')
-    font_size: '14sp'
-    bold: True
-    size_hint: (None, None)
-    size: (dp(40), dp(34))
+    font_size: '12sp'
+    size_hint_y: None
+    height: dp(38)
     canvas.before:
         Color:
-            rgba: get_color_from_hex('#451A1A') if self.state == 'down' else get_color_from_hex('#2A1818')
+            rgba: get_color_from_hex('#451A1A') if self.state == 'down' else get_color_from_hex('#2A1215')
         RoundedRectangle:
             pos: self.pos
             size: self.size
@@ -401,27 +344,100 @@ KV_STYLES = """
             rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
             width: dp(1)
 
+<SwitchBtn@Button>:
+    is_active: True
+    background_color: (0, 0, 0, 0)
+    background_normal: ''
+    background_down: ''
+    color: get_color_from_hex('#080C14') if self.is_active else get_color_from_hex('#94A3B8')
+    bold: True
+    font_size: '11sp'
+    size_hint: (None, None)
+    size: (dp(44), dp(30))
+    canvas.before:
+        Color:
+            rgba: (get_color_from_hex('#059669') if self.state == 'down' else get_color_from_hex('#10B981')) if self.is_active else (get_color_from_hex('#283548') if self.state == 'down' else get_color_from_hex('#1E293B'))
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(6)]
+        Color:
+            rgba: (0, 0, 0, 0) if self.is_active else get_color_from_hex('#334155')
+        Line:
+            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(6)]
+            width: dp(1)
+
+<ToggleActiveBtn@SwitchBtn>:
+    is_active: True
+
+<ToggleInactiveBtn@SwitchBtn>:
+    is_active: False
+
+<SymbolEditBtn@Button>:
+    background_color: (0, 0, 0, 0)
+    background_normal: ''
+    background_down: ''
+    color: get_color_from_hex('#F8FAFC')
+    font_size: '13sp'
+    bold: True
+    size_hint: (None, None)
+    size: (dp(36), dp(30))
+    canvas.before:
+        Color:
+            rgba: get_color_from_hex('#283548') if self.state == 'down' else get_color_from_hex('#1E293B')
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(6)]
+        Color:
+            rgba: get_color_from_hex('#334155')
+        Line:
+            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(6)]
+            width: dp(1)
+
+<SymbolDeleteBtn@Button>:
+    background_color: (0, 0, 0, 0)
+    background_normal: ''
+    background_down: ''
+    color: get_color_from_hex('#EF4444')
+    font_size: '13sp'
+    bold: True
+    size_hint: (None, None)
+    size: (dp(36), dp(30))
+    canvas.before:
+        Color:
+            rgba: get_color_from_hex('#451A1A') if self.state == 'down' else get_color_from_hex('#2A1215')
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(6)]
+        Color:
+            rgba: get_color_from_hex('#7F1D1D')
+        Line:
+            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(6)]
+            width: dp(1)
+
 <ModernInput@TextInput>:
     background_color: (0, 0, 0, 0)
     background_normal: ''
     background_active: ''
     cursor_color: get_color_from_hex('#10B981')
-    foreground_color: get_color_from_hex('#F3F4F6')
+    foreground_color: get_color_from_hex('#F8FAFC')
     hint_text_color: get_color_from_hex('#64748B')
-    font_size: '14sp'
-    padding: [dp(12), dp(12), dp(12), dp(12)]
+    font_size: '13sp'
+    padding: [dp(12), dp(10), dp(12), dp(10)]
     size_hint_y: None
-    height: dp(46)
+    height: dp(42)
     multiline: False
     canvas.before:
         Color:
-            rgba: get_color_from_hex('#0D131F')
+            rgba: get_color_from_hex('#06090F')
         RoundedRectangle:
             pos: self.pos
             size: self.size
             radius: [dp(8)]
         Color:
-            rgba: get_color_from_hex('#233044')
+            rgba: get_color_from_hex('#1E293B')
         Line:
             rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
             width: dp(1)
@@ -435,15 +451,15 @@ KV_STYLES = """
     color: get_color_from_hex('#10B981') if self.active else get_color_from_hex('#94A3B8')
     canvas.before:
         Color:
-            rgba: get_color_from_hex('#1A2433') if self.active else (0, 0, 0, 0)
+            rgba: get_color_from_hex('#151E2E') if self.active else (0, 0, 0, 0)
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(8)]
+            radius: [dp(6)]
         Color:
             rgba: get_color_from_hex('#10B981') if self.active else (0, 0, 0, 0)
         Line:
-            points: [self.x + dp(6), self.y + dp(2), self.right - dp(6), self.y + dp(2)] if self.active else []
+            points: [self.x + dp(8), self.y + dp(2), self.right - dp(8), self.y + dp(2)] if self.active else []
             width: dp(2)
 """
 
@@ -512,108 +528,142 @@ def ask_ignore_battery_optimizations():
 
 # --------------------------------------------------------------------------- Dialogs
 class PluginEditorDialog(ModalView):
-    """In-app Code Editor for installing/updating WhatsApp automation plugins."""
+    """In-app Plugin Studio & Code Editor with real-time telemetry and clean layout."""
 
     def __init__(self, on_save, **kw):
-        super().__init__(size_hint=(0.94, 0.90), auto_dismiss=True, **kw)
+        super().__init__(size_hint=(0.96, 0.94), auto_dismiss=True, **kw)
         self.on_save = on_save
-        self.background_color = (0, 0, 0, 0.75)
+        self.background_color = (0, 0, 0, 0.85)
 
         card = Factory.DialogCard()
+        card.padding = dp(12)
+        card.spacing = dp(8)
 
-        header = BoxLayout(size_hint_y=None, height=36)
-        title = Label(text="Plugin Studio & Editor", font_size="17sp", bold=True,
-                      color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle")
-        title.bind(size=title.setter('text_size'))
-        header.add_widget(title)
+        # 1. Studio Header Toolbar: [Filename] [Snippets ▾] [Cancel] [Save]
+        header = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
 
-        notice = Label(
-            text="[color=10B981]Tip:[/color] Save installs and immediately activates the plugin via hot-reload.",
-            markup=True, size_hint_y=None, height=24, font_size="11sp",
-            color=get_color_from_hex("#94A3B8"), halign="left", valign="middle"
-        )
-        notice.bind(size=notice.setter('text_size'))
+        # Monospace Filename input pill
+        self.filename_input = Factory.ModernInput(size_hint_x=0.45)
+        self.filename_input.height = dp(38)
+        self.filename_input.font_size = "12sp"
+        self.filename_input.hint_text = "custom_bot.py"
 
-        # Filename input
-        self.filename_input = Factory.ModernInput()
-        self.filename_input.hint_text = "Filename (e.g. custom_bot.py)"
+        # Template/Snippets quick switcher
+        self.btn_snippets = Factory.SecondaryButton(text="Snippets ▾", size_hint=(None, None), size=(dp(84), dp(38)))
+        self.btn_snippets.font_size = "11sp"
+        self.btn_snippets.bind(on_release=self.show_snippets_menu)
 
-        # Template buttons row
-        tmpl_row = BoxLayout(size_hint_y=None, height=34, spacing=6)
-        btn_tmpl1 = Factory.SecondaryButton(text="Template: Echo")
-        btn_tmpl1.height = 34
-        btn_tmpl1.font_size = "11sp"
-        btn_tmpl1.bind(on_release=lambda *_: self.load_template("echo"))
+        btn_cancel = Factory.SecondaryButton(text="Cancel", size_hint=(None, None), size=(dp(64), dp(38)))
+        btn_cancel.font_size = "11sp"
+        btn_cancel.bind(on_release=lambda *_: self.dismiss())
 
-        btn_tmpl2 = Factory.SecondaryButton(text="Template: Responder")
-        btn_tmpl2.height = 34
-        btn_tmpl2.font_size = "11sp"
-        btn_tmpl2.bind(on_release=lambda *_: self.load_template("responder"))
+        btn_save = Factory.PrimaryButton(text="Save & Reload", size_hint=(None, None), size=(dp(98), dp(38)))
+        btn_save.font_size = "11sp"
+        btn_save.bind(on_release=self._save)
 
-        btn_tmpl3 = Factory.SecondaryButton(text="Template: Remind")
-        btn_tmpl3.height = 34
-        btn_tmpl3.font_size = "11sp"
-        btn_tmpl3.bind(on_release=lambda *_: self.load_template("remind"))
+        header.add_widget(self.filename_input)
+        header.add_widget(self.btn_snippets)
+        header.add_widget(btn_cancel)
+        header.add_widget(btn_save)
 
-        tmpl_row.add_widget(btn_tmpl1)
-        tmpl_row.add_widget(btn_tmpl2)
-        tmpl_row.add_widget(btn_tmpl3)
-
-        # Code editor area
+        # 2. Code Editor Area (Full Space, Monospace, High-Contrast)
         self.code_input = TextInput(
-            background_color=get_color_from_hex('#0D131F'),
-            foreground_color=get_color_from_hex('#F3F4F6'),
+            background_color=get_color_from_hex('#06090F'),
+            foreground_color=get_color_from_hex('#F8FAFC'),
             cursor_color=get_color_from_hex('#10B981'),
             hint_text_color=get_color_from_hex('#475569'),
             font_size="12sp",
-            hint_text="# Write Python code here\nNAME = 'my_plugin'\n\nasync def on_message(ctx, msg):\n    if msg.text == '!test':\n        await ctx.reply(msg, 'Working!')",
-            multiline=True
+            font_name=DEFAULT_FONT,
+            hint_text="# Write Python automation code here\nNAME = 'my_plugin'\n\nasync def on_message(ctx, msg):\n    pass",
+            multiline=True,
+            size_hint=(1, 1),
+            padding=[dp(10), dp(10), dp(10), dp(10)]
         )
+        self.code_input.bind(text=self._update_telemetry)
 
-        # Action Buttons
-        btn_bar = BoxLayout(size_hint_y=None, height=44, spacing=10)
-        btn_save = Factory.PrimaryButton(text="Save & Install")
-        btn_save.bind(on_release=self._save)
+        # 3. Editor Telemetry Status Line (Quiet, informative, monospace)
+        footer = BoxLayout(size_hint_y=None, height=dp(22), spacing=dp(8))
+        self.lbl_telemetry = Label(
+            text="Ln 1 | 0 B | Python 3 | Hot-Reload Ready",
+            font_size="10sp",
+            color=get_color_from_hex("#64748B"),
+            halign="left", valign="middle"
+        )
+        self.lbl_telemetry.bind(size=self.lbl_telemetry.setter('text_size'))
+        footer.add_widget(self.lbl_telemetry)
 
-        btn_cancel = Factory.SecondaryButton(text="Cancel")
-        btn_cancel.bind(on_release=lambda *_: self.dismiss())
-
-        btn_bar.add_widget(btn_save)
-        btn_bar.add_widget(btn_cancel)
-
-        for w in (header, notice, self.filename_input, tmpl_row, self.code_input, btn_bar):
-            card.add_widget(w)
-
+        card.add_widget(header)
+        card.add_widget(self.code_input)
+        card.add_widget(footer)
         self.add_widget(card)
+
+    def _update_telemetry(self, *_):
+        txt = self.code_input.text
+        lines = len(txt.split("\n"))
+        size_bytes = len(txt.encode("utf-8"))
+        size_str = f"{size_bytes} B" if size_bytes < 1024 else f"{size_bytes / 1024:.1f} KB"
+        self.lbl_telemetry.text = f"Ln {lines} | {size_str} | Python 3 | Hot-Reload Ready"
+
+    def show_snippets_menu(self, *_):
+        dialog = ModalView(size_hint=(0.84, 0.42), auto_dismiss=True)
+        dcard = Factory.DialogCard()
+        dcard.padding = dp(14)
+        dcard.spacing = dp(8)
+        lbl_stitle = Label(text="Insert Starter Template", font_size="14sp", bold=True,
+                           color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(26))
+        dcard.add_widget(lbl_stitle)
+
+        def _pick(kind):
+            self.load_template(kind)
+            dialog.dismiss()
+
+        btn1 = Factory.SecondaryButton(text="Template: Echo Command (!say)")
+        btn1.bind(on_release=lambda *_: _pick("echo"))
+        btn2 = Factory.SecondaryButton(text="Template: Keyword Auto-Responder")
+        btn2.bind(on_release=lambda *_: _pick("responder"))
+        btn3 = Factory.SecondaryButton(text="Template: Async Timer & Alert (!pingme)")
+        btn3.bind(on_release=lambda *_: _pick("remind"))
+
+        for b in (btn1, btn2, btn3):
+            dcard.add_widget(b)
+        dialog.add_widget(dcard)
+        dialog.open()
 
     def load_template(self, kind):
         if kind == "echo":
-            self.filename_input.text = "custom_echo.py"
+            if not self.filename_input.text:
+                self.filename_input.text = "custom_echo.py"
             self.code_input.text = (
+                "# Echo command plugin\n"
                 "NAME = 'custom_echo'\n\n"
                 "async def on_message(ctx, msg):\n"
                 "    if msg.text and msg.text.startswith('!say '):\n"
                 "        await ctx.reply(msg, msg.text[5:])\n"
             )
         elif kind == "responder":
-            self.filename_input.text = "keyword_reply.py"
+            if not self.filename_input.text:
+                self.filename_input.text = "keyword_reply.py"
             self.code_input.text = (
+                "# Keyword automated responder\n"
                 "NAME = 'keyword_reply'\n\n"
                 "async def on_message(ctx, msg):\n"
                 "    if msg.text and 'help' in msg.text.lower():\n"
                 "        await ctx.reply(msg, 'Need help? I am active 24/7!')\n"
             )
         elif kind == "remind":
-            self.filename_input.text = "timer_alert.py"
+            if not self.filename_input.text:
+                self.filename_input.text = "timer_alert.py"
             self.code_input.text = (
-                "import asyncio\n"
+                "import asyncio\n\n"
+                "# Asynchronous timed reminder\n"
                 "NAME = 'timer_alert'\n\n"
                 "async def on_message(ctx, msg):\n"
                 "    if msg.text and msg.text.startswith('!pingme'):\n"
-                "        await ctx.reply(msg, 'Timer started (10s)...')\n"
+                "        await ctx.reply(msg, 'Timer scheduled (10s)...')\n"
                 "        await asyncio.sleep(10)\n"
-                "        await ctx.reply(msg, 'Time is up!')\n"
+                "        await ctx.reply(msg, 'Time is up! Here is your alert.')\n"
             )
+        self._update_telemetry()
 
     def _save(self, *_):
         name = self.filename_input.text.strip()
@@ -628,12 +678,14 @@ class PluginEditorDialog(ModalView):
 class InfoDialog(ModalView):
     """Clean popup alert for notifications, export paths, and feedback."""
     def __init__(self, title_text, msg_text, **kw):
-        super().__init__(size_hint=(0.88, 0.40), auto_dismiss=True, **kw)
-        self.background_color = (0, 0, 0, 0.75)
+        super().__init__(size_hint=(0.88, 0.36), auto_dismiss=True, **kw)
+        self.background_color = (0, 0, 0, 0.80)
         card = Factory.DialogCard()
+        card.padding = dp(16)
+        card.spacing = dp(10)
 
-        lbl_t = Label(text=title_text, font_size="16sp", bold=True,
-                      color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(30))
+        lbl_t = Label(text=title_text, font_size="15sp", bold=True,
+                      color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(28))
         lbl_m = Label(text=msg_text, font_size="12sp", color=get_color_from_hex("#94A3B8"),
                       halign="center", valign="middle")
         lbl_m.bind(size=lbl_m.setter('text_size'))
@@ -656,21 +708,21 @@ class ConnectScreen(Screen):
         self.root = app_root
 
         scroll = ScrollView(size_hint=(1, 1))
-        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(14), size_hint_y=None)
+        content = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(12), size_hint_y=None)
         content.bind(minimum_height=content.setter("height"))
 
         # Card 1: Pairing with Phone Code
         self.card_pair = Factory.Card()
         lbl_pair_title = Label(
             text="Pair with Phone Number", font_size="15sp", bold=True,
-            color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(28), halign="left", valign="middle"
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(26), halign="left", valign="middle"
         )
         lbl_pair_title.bind(size=lbl_pair_title.setter('text_size'))
 
         self.lbl_pair_sub = Label(
-            text="Enter full phone with country code (e.g. 919876543210):",
+            text="Enter number with country code without spaces (e.g. 919876543210):",
             font_size="11sp", color=get_color_from_hex("#94A3B8"),
-            size_hint_y=None, height=dp(28), halign="left", valign="middle"
+            size_hint_y=None, height=dp(22), halign="left", valign="middle"
         )
         self.lbl_pair_sub.bind(size=self.lbl_pair_sub.setter('text_size'))
 
@@ -683,10 +735,10 @@ class ConnectScreen(Screen):
 
         # Code display box
         self.code_box = Factory.CodeBox()
-        self.lbl_code = Label(text="------", font_size="22sp", bold=True,
+        self.lbl_code = Label(text="------", font_size="20sp", bold=True,
                               color=get_color_from_hex("#10B981"))
-        self.btn_copy = Factory.SecondaryButton(text="Copy", size_hint=(None, None), size=(dp(80), dp(38)))
-        self.btn_copy.font_size = "12sp"
+        self.btn_copy = Factory.SecondaryButton(text="Copy", size_hint=(None, None), size=(dp(72), dp(36)))
+        self.btn_copy.font_size = "11sp"
         self.btn_copy.bind(on_release=self.copy_code)
         self.code_box.add_widget(self.lbl_code)
         self.code_box.add_widget(self.btn_copy)
@@ -701,13 +753,13 @@ class ConnectScreen(Screen):
         self.card_qr = Factory.Card()
         lbl_qr_title = Label(
             text="Scan QR Code", font_size="15sp", bold=True,
-            color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left", valign="middle"
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(26), halign="left", valign="middle"
         )
         lbl_qr_title.bind(size=lbl_qr_title.setter('text_size'))
         self.lbl_qr_sub = Label(
-            text="QR code will appear here when ready for link.",
+            text="Scan with WhatsApp > Linked Devices to authenticate.",
             font_size="11sp", color=get_color_from_hex("#94A3B8"),
-            size_hint_y=None, height=dp(28), halign="left", valign="middle"
+            size_hint_y=None, height=dp(22), halign="left", valign="middle"
         )
         self.lbl_qr_sub.bind(size=self.lbl_qr_sub.setter('text_size'))
         self.qr_image = Image(size_hint_y=None, height=dp(220), fit_mode="contain")
@@ -734,14 +786,14 @@ class ConnectScreen(Screen):
         c = self.lbl_code.text.strip()
         if c and c != "------" and c != "Requesting...":
             Clipboard.put(c)
-            self.btn_copy.text = "Copied!"
+            self.btn_copy.text = "Copied"
             Clock.schedule_once(lambda dt: setattr(self.btn_copy, "text", "Copy"), 2)
 
     def set_qr(self, path_or_str):
         if os.path.exists(path_or_str):
             self.qr_image.source = path_or_str
             self.qr_image.reload()
-            self.lbl_qr_sub.text = "Scan this code with WhatsApp > Linked Devices:"
+            self.lbl_qr_sub.text = "Scan with WhatsApp > Linked Devices to authenticate:"
         else:
             self.lbl_qr_sub.text = f"QR Payload: {path_or_str[:30]}..."
 
@@ -753,22 +805,23 @@ class PluginsScreen(Screen):
         super().__init__(name="plugins", **kw)
         self.root = app_root
 
-        layout = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
+        layout = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(10))
 
         # Header with actions
         header_card = Factory.Card()
-        row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
+        row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
         self.lbl_title = Label(
-            text="Automations & Plugins", font_size="16sp", bold=True,
-            color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle"
+            text="Plugins (7 active)", font_size="15sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle"
         )
         self.lbl_title.bind(size=self.lbl_title.setter('text_size'))
 
-        btn_add = Factory.PrimaryButton(text="+ Add", size_hint=(None, None), size=(dp(70), dp(38)))
+        btn_add = Factory.PrimaryButton(text="+ Add", size_hint=(None, None), size=(dp(68), dp(36)))
+        btn_add.font_size = "12sp"
         btn_add.bind(on_release=lambda *_: self.open_editor())
 
-        btn_reload = Factory.SecondaryButton(text=ICON_REFRESH, size_hint=(None, None), size=(dp(46), dp(38)))
-        btn_reload.font_size = "17sp"
+        btn_reload = Factory.SecondaryButton(text=ICON_REFRESH, size_hint=(None, None), size=(dp(42), dp(36)))
+        btn_reload.font_size = "15sp"
         btn_reload.bold = True
         btn_reload.bind(on_release=lambda *_: self.root.send("/reload"))
 
@@ -780,7 +833,7 @@ class PluginsScreen(Screen):
 
         # Plugins list scroll
         scroll = ScrollView(size_hint=(1, 1))
-        self.list_box = BoxLayout(orientation="vertical", spacing=dp(10), size_hint_y=None)
+        self.list_box = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None)
         self.list_box.bind(minimum_height=self.list_box.setter("height"))
         scroll.add_widget(self.list_box)
         layout.add_widget(scroll)
@@ -797,7 +850,7 @@ class PluginsScreen(Screen):
 
     def edit_plugin(self, name):
         code = self.root.get_plugin_source(name)
-        fname = f"{name}.py"
+        fname = f"{name}.py" if not name.endswith(".py") else name
         self.open_editor(filename=fname, initial_code=code)
 
     def update_plugins(self, plugin_data_str):
@@ -817,7 +870,7 @@ class PluginsScreen(Screen):
                 plugins.append((p_name, p_active))
 
         active_count = sum(1 for _, is_on in plugins if is_on)
-        self.lbl_title.text = f"Plugins ({active_count}/{len(plugins)} Active)"
+        self.lbl_title.text = f"Plugins ({active_count}/{len(plugins)} active)"
 
         if not plugins:
             empty_card = Factory.Card()
@@ -830,23 +883,24 @@ class PluginsScreen(Screen):
 
         for name, is_on in plugins:
             p_card = Factory.Card()
-            row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+            p_card.padding = [dp(14), dp(10), dp(14), dp(10)]
+            p_card.spacing = dp(4)
 
+            row = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(8))
+
+            display_name = f"{name}.py" if not name.endswith(".py") else name
             lbl_name = Label(
-                text=f"[b]{name}[/b]",
+                text=f"[b]{display_name}[/b]",
                 markup=True,
-                font_size="15sp",
-                color=get_color_from_hex("#F3F4F6"),
+                font_size="14sp",
+                color=get_color_from_hex("#F8FAFC"),
                 halign="left", valign="middle"
             )
             lbl_name.bind(size=lbl_name.setter('text_size'))
             row.add_widget(lbl_name)
 
             # Interactive ON / OFF toggle button
-            if is_on:
-                btn_toggle = Factory.ToggleActiveBtn(text="ON")
-            else:
-                btn_toggle = Factory.ToggleInactiveBtn(text="OFF")
+            btn_toggle = Factory.ToggleActiveBtn(text="ON") if is_on else Factory.ToggleInactiveBtn(text="OFF")
             btn_toggle.bind(on_release=lambda _, n=name: self.root.send("/toggle_plugin", n))
             row.add_widget(btn_toggle)
 
@@ -855,18 +909,23 @@ class PluginsScreen(Screen):
             btn_edit.bind(on_release=lambda _, n=name: self.edit_plugin(n))
             row.add_widget(btn_edit)
 
-            # Delete symbol button (trash icon)
-            btn_del = Factory.SymbolDeleteBtn(text=ICON_DELETE)
-            btn_del.bind(on_release=lambda _, n=name: self.root.send("/delete_plugin", n))
-            row.add_widget(btn_del)
+            # Delete symbol button (only for custom user plugins; built-in plugins show tag)
+            if name not in BUILTIN_PLUGINS:
+                btn_del = Factory.SymbolDeleteBtn(text=ICON_DELETE)
+                btn_del.bind(on_release=lambda _, n=name: self.root.send("/delete_plugin", n))
+                row.add_widget(btn_del)
+            else:
+                lbl_tag = Label(text="Core", font_size="10sp", bold=True,
+                                color=get_color_from_hex("#64748B"), size_hint=(None, None), size=(dp(36), dp(30)))
+                row.add_widget(lbl_tag)
 
-            # Subtitle description
-            sub_text = f"[color=10B981]{ICON_DOT_ON} Active & Handling Messages[/color]" if is_on else f"[color=64748B]{ICON_DOT_OFF} Disabled (Muted)[/color]"
+            # Quiet purposeful description
+            desc = PLUGIN_DESCRIPTIONS.get(name, "Custom automation handler")
             lbl_sub = Label(
-                text=sub_text,
-                markup=True,
+                text=desc,
                 font_size="11sp",
-                size_hint_y=None, height=dp(18),
+                color=get_color_from_hex("#94A3B8"),
+                size_hint_y=None, height=dp(16),
                 halign="left", valign="middle"
             )
             lbl_sub.bind(size=lbl_sub.setter('text_size'))
@@ -884,40 +943,40 @@ class QuickSendScreen(Screen):
         self.root = app_root
 
         scroll = ScrollView(size_hint=(1, 1))
-        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(14), size_hint_y=None)
+        content = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(12), size_hint_y=None)
         content.bind(minimum_height=content.setter("height"))
 
         card = Factory.Card()
         lbl_title = Label(
-            text="Quick Message Dispatch", font_size="16sp", bold=True,
-            color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(28), halign="left", valign="middle"
+            text="Direct Dispatch", font_size="15sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(26), halign="left", valign="middle"
         )
         lbl_title.bind(size=lbl_title.setter('text_size'))
 
         lbl_desc = Label(
             text="Send a message directly through the bot's anti-spam queue to test connectivity.",
             font_size="11sp", color=get_color_from_hex("#94A3B8"),
-            size_hint_y=None, height=dp(28), halign="left", valign="middle"
+            size_hint_y=None, height=dp(24), halign="left", valign="middle"
         )
         lbl_desc.bind(size=lbl_desc.setter('text_size'))
 
         self.input_target = Factory.ModernInput()
-        self.input_target.hint_text = "Target Number or JID (e.g. 9198xxxxxxxx or 'self')"
+        self.input_target.hint_text = "Target number (e.g. 9198xxxxxxxx or self)"
 
         self.input_msg = Factory.ModernInput()
         self.input_msg.hint_text = "Message text..."
-        self.input_msg.height = dp(72)
+        self.input_msg.height = dp(76)
         self.input_msg.multiline = True
 
         btn_send = Factory.PrimaryButton(text="Queue Outbound Message")
         btn_send.bind(on_release=self.on_send)
 
-        btn_ping_self = Factory.SecondaryButton(text=f"{ICON_PLAY} Ping Myself (Test Bot)")
+        btn_ping_self = Factory.SecondaryButton(text="Ping Myself (Test Response)")
         btn_ping_self.bind(on_release=lambda *_: self.root.send("/send", "self", "!ping"))
 
         self.lbl_feedback = Label(
-            text="", font_size="12sp", color=get_color_from_hex("#10B981"),
-            size_hint_y=None, height=24
+            text="", font_size="11sp", color=get_color_from_hex("#10B981"),
+            size_hint_y=None, height=dp(20)
         )
 
         card.add_widget(lbl_title)
@@ -938,12 +997,12 @@ class QuickSendScreen(Screen):
         if target and msg:
             self.lbl_feedback.color = get_color_from_hex("#10B981")
             self.root.send("/send", target, msg)
-            self.lbl_feedback.text = f"{ICON_CHECK} Dispatched to queue for {target}"
+            self.lbl_feedback.text = f"Dispatched to outbound queue for {target}"
             self.input_msg.text = ""
             Clock.schedule_once(lambda dt: setattr(self.lbl_feedback, "text", ""), 4)
         else:
             self.lbl_feedback.color = get_color_from_hex("#EF4444")
-            self.lbl_feedback.text = f"{ICON_WARNING} Please enter both target number and message."
+            self.lbl_feedback.text = "Please enter both target number and message."
             Clock.schedule_once(lambda dt: setattr(self.lbl_feedback, "text", ""), 3)
 
 
@@ -968,18 +1027,18 @@ class ConsoleScreen(Screen):
         # Row 1: Title & Pagination Controls
         row_top = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
         title = Label(
-            text="Console Logs", font_size="15sp", bold=True,
-            color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle"
+            text="Console Logs", font_size="14sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle"
         )
         title.bind(size=title.setter('text_size'))
 
-        btn_prev = Factory.SecondaryButton(text=ICON_PREV, size_hint=(None, None), size=(dp(36), dp(32)))
+        btn_prev = Factory.SecondaryButton(text="<", size_hint=(None, None), size=(dp(36), dp(32)))
         btn_prev.bind(on_release=self.prev_page)
 
         self.lbl_page = Label(text="1/1", font_size="11sp", bold=True,
-                              color=get_color_from_hex("#94A3B8"), size_hint_x=None, width=dp(44), halign="center")
+                              color=get_color_from_hex("#64748B"), size_hint_x=None, width=dp(44), halign="center")
 
-        btn_next = Factory.SecondaryButton(text=ICON_NEXT, size_hint=(None, None), size=(dp(36), dp(32)))
+        btn_next = Factory.SecondaryButton(text=">", size_hint=(None, None), size=(dp(36), dp(32)))
         btn_next.bind(on_release=self.next_page)
 
         row_top.add_widget(title)
@@ -987,13 +1046,13 @@ class ConsoleScreen(Screen):
         row_top.add_widget(self.lbl_page)
         row_top.add_widget(btn_next)
 
-        # Row 2: Action Buttons (Equal width distribution, perfectly fits within screen)
+        # Row 2: Action Buttons
         row_actions = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
         self.btn_scroll = Factory.SecondaryButton(text="Auto: ON", size_hint=(0.34, None), height=dp(32))
         self.btn_scroll.font_size = "11sp"
         self.btn_scroll.bind(on_release=self.toggle_scroll)
 
-        btn_export = Factory.SecondaryButton(text=f"{ICON_DOWNLOAD} Export", size_hint=(0.33, None), height=dp(32))
+        btn_export = Factory.SecondaryButton(text="Export Logs", size_hint=(0.33, None), height=dp(32))
         btn_export.font_size = "11sp"
         btn_export.bind(on_release=self.export_logs)
 
@@ -1088,123 +1147,245 @@ class SettingsScreen(Screen):
         self.root = app_root
         self.auto_wipe_active = True
         self.stealth_read_active = True
+        self.auto_forward_active = True
 
         scroll = ScrollView(size_hint=(1, 1))
-        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(14), size_hint_y=None)
+        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(12), size_hint_y=None)
         content.bind(minimum_height=content.setter("height"))
 
-        # Card 1: Ghost & Privacy Mode
+        # ---------------------------------------------------- Card 1: Privacy & Stealth
         card_privacy = Factory.Card()
-        lbl_p_title = Label(text="Ghost & Privacy Controls", font_size="15sp", bold=True,
-                            color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left")
+        card_privacy.padding = [dp(14), dp(12), dp(14), dp(12)]
+        card_privacy.spacing = dp(8)
+
+        lbl_p_title = Label(
+            text="Privacy & Stealth", font_size="14sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(24), halign="left"
+        )
         lbl_p_title.bind(size=lbl_p_title.setter('text_size'))
 
-        # Row 1: Auto-Wipe Toggle
-        row_wipe = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
-        lbl_wipe = Label(text="Auto-Wipe RAM Cache (24h)", font_size="13sp", color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle")
-        lbl_wipe.bind(size=lbl_wipe.setter('text_size'))
-        self.btn_auto_wipe = Factory.ToggleActiveBtn(text="ON")
-        self.btn_auto_wipe.bind(on_release=self.toggle_auto_wipe)
-        row_wipe.add_widget(lbl_wipe)
-        row_wipe.add_widget(self.btn_auto_wipe)
+        lbl_p_sub = Label(
+            text="Local message interception, stealth receipts, and memory cache hygiene.",
+            font_size="11sp", color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(20), halign="left"
+        )
+        lbl_p_sub.bind(size=lbl_p_sub.setter('text_size'))
 
-        # Row 2: Manual Flush button
-        btn_flush = Factory.SecondaryButton(text=f"{ICON_BROOM} Wipe Intercepted Cache Now")
-        btn_flush.bind(on_release=lambda *_: self.root.send("/wipe_cache"))
-
-        # Row 3: Stealth Read Toggle
-        row_stealth = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
-        lbl_stealth = Label(text="Stealth Mode (No Blue Ticks)", font_size="13sp", color=get_color_from_hex("#F3F4F6"), halign="left", valign="middle")
+        # Row 1: Stealth Read Mode
+        row_stealth = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        lbl_stealth = Label(text="Stealth Mode (Suppress read receipts)", font_size="13sp",
+                            color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle")
         lbl_stealth.bind(size=lbl_stealth.setter('text_size'))
-        self.btn_stealth = Factory.ToggleActiveBtn(text="ON")
+        self.btn_stealth = Factory.SwitchBtn(text="ON", is_active=True)
         self.btn_stealth.bind(on_release=self.toggle_stealth)
         row_stealth.add_widget(lbl_stealth)
         row_stealth.add_widget(self.btn_stealth)
 
+        # Row 2: Auto-Wipe RAM Cache
+        row_wipe = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        lbl_wipe = Label(text="Auto-Wipe RAM Cache (24h retention)", font_size="13sp",
+                         color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle")
+        lbl_wipe.bind(size=lbl_wipe.setter('text_size'))
+        self.btn_auto_wipe = Factory.SwitchBtn(text="ON", is_active=True)
+        self.btn_auto_wipe.bind(on_release=self.toggle_auto_wipe)
+        row_wipe.add_widget(lbl_wipe)
+        row_wipe.add_widget(self.btn_auto_wipe)
+
+        # Row 3: Auto-Forward Deleted Messages to Self
+        row_forward = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        lbl_forward = Label(text="Anti-Delete Relay to Saved Messages", font_size="13sp",
+                            color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle")
+        lbl_forward.bind(size=lbl_forward.setter('text_size'))
+        self.btn_forward = Factory.SwitchBtn(text="ON", is_active=True)
+        self.btn_forward.bind(on_release=self.toggle_forward)
+        row_forward.add_widget(lbl_forward)
+        row_forward.add_widget(self.btn_forward)
+
+        # Action: Flush cache
+        btn_flush = Factory.SecondaryButton(text="Flush Intercepted Message Cache Now")
+        btn_flush.bind(on_release=self.on_flush_cache)
+
         card_privacy.add_widget(lbl_p_title)
-        card_privacy.add_widget(row_wipe)
-        card_privacy.add_widget(btn_flush)
+        card_privacy.add_widget(lbl_p_sub)
         card_privacy.add_widget(row_stealth)
+        card_privacy.add_widget(row_wipe)
+        card_privacy.add_widget(row_forward)
+        card_privacy.add_widget(btn_flush)
 
-        # Card 2: Engine & Service Lifecycle
-        card_engine = Factory.Card()
-        lbl_e_title = Label(text="Service & Power Management", font_size="15sp", bold=True,
-                            color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left")
-        lbl_e_title.bind(size=lbl_e_title.setter('text_size'))
-
-        btn_battery = Factory.SecondaryButton(text=f"{ICON_BOLT} Battery Exemption Setting")
-        btn_battery.bind(on_release=lambda *_: ask_ignore_battery_optimizations())
-
-        btn_kill_svc = Factory.DangerButton(text=f"{ICON_POWER} Terminate Background Service (Complete Offline)")
-        btn_kill_svc.bind(on_release=self.terminate_service)
-
-        card_engine.add_widget(lbl_e_title)
-        card_engine.add_widget(btn_battery)
-        card_engine.add_widget(btn_kill_svc)
-
-        # Card 3: Session Backup & Restore
+        # ---------------------------------------------------- Card 2: Session Backup & Transfer
         card_session = Factory.Card()
-        lbl_s_title = Label(text="Session Backup & Transfer", font_size="15sp", bold=True,
-                            color=get_color_from_hex("#F3F4F6"), size_hint_y=None, height=dp(26), halign="left")
+        card_session.padding = [dp(14), dp(12), dp(14), dp(12)]
+        card_session.spacing = dp(8)
+
+        lbl_s_title = Label(
+            text="Session Backup & Transfer", font_size="14sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(24), halign="left"
+        )
         lbl_s_title.bind(size=lbl_s_title.setter('text_size'))
 
-        btn_export = Factory.SecondaryButton(text=f"{ICON_DOWNLOAD} Export Session (.zip)")
-        btn_export.bind(on_release=self.export_session)
+        lbl_s_sub = Label(
+            text="Export or restore authenticated WhatsApp session credentials.",
+            font_size="11sp", color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(20), halign="left"
+        )
+        lbl_s_sub.bind(size=lbl_s_sub.setter('text_size'))
 
-        # Direct file selection button (opens native Android file chooser)
-        btn_pick = Factory.PrimaryButton(text=f"{ICON_DOWNLOAD} Select Backup File (.zip / .sqlite3)")
+        btn_pick = Factory.PrimaryButton(text="Select Backup File (.zip / .sqlite3)")
         btn_pick.bind(on_release=self.pick_backup_file)
 
-        lbl_import_hint = Label(text="Or restore manually by file path / name:", font_size="11sp",
-                                color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(22), halign="left")
-        lbl_import_hint.bind(size=lbl_import_hint.setter('text_size'))
+        btn_export = Factory.SecondaryButton(text="Export Session Archive (.zip)")
+        btn_export.bind(on_release=self.export_session)
 
-        self.input_import = Factory.ModernInput()
+        lbl_manual = Label(
+            text="Or restore manually from file path / name:", font_size="11sp",
+            color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(20), halign="left"
+        )
+        lbl_manual.bind(size=lbl_manual.setter('text_size'))
+
+        row_manual = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
+        self.input_import = Factory.ModernInput(size_hint_x=0.65)
         self.input_import.hint_text = "WA_Session_...zip or full path"
-
-        btn_import = Factory.SecondaryButton(text=f"{ICON_UPLOAD} Restore & Connect")
+        btn_import = Factory.SecondaryButton(text="Restore", size_hint=(0.35, 1))
         btn_import.bind(on_release=self.import_session)
+        row_manual.add_widget(self.input_import)
+        row_manual.add_widget(btn_import)
 
-        btn_perm = Factory.SecondaryButton(text=f"{ICON_BOLT} Grant All Files Access (System Settings)")
+        btn_perm = Factory.SecondaryButton(text="Manage Storage Permissions")
         btn_perm.bind(on_release=lambda *_: ask_all_files_permission())
 
         card_session.add_widget(lbl_s_title)
-        card_session.add_widget(btn_export)
+        card_session.add_widget(lbl_s_sub)
         card_session.add_widget(btn_pick)
-        card_session.add_widget(lbl_import_hint)
-        card_session.add_widget(self.input_import)
-        card_session.add_widget(btn_import)
+        card_session.add_widget(btn_export)
+        card_session.add_widget(lbl_manual)
+        card_session.add_widget(row_manual)
         card_session.add_widget(btn_perm)
 
-        # Card 4: Danger Zone (Logout)
+        # ---------------------------------------------------- Card 3: Service & Power
+        card_engine = Factory.Card()
+        card_engine.padding = [dp(14), dp(12), dp(14), dp(12)]
+        card_engine.spacing = dp(8)
+
+        lbl_e_title = Label(
+            text="Service & Battery Policy", font_size="14sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(24), halign="left"
+        )
+        lbl_e_title.bind(size=lbl_e_title.setter('text_size'))
+
+        lbl_e_sub = Label(
+            text="Keep the background worker alive when device is idle or sleeping.",
+            font_size="11sp", color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(20), halign="left"
+        )
+        lbl_e_sub.bind(size=lbl_e_sub.setter('text_size'))
+
+        btn_battery = Factory.SecondaryButton(text="Request Battery Optimization Exemption")
+        btn_battery.bind(on_release=lambda *_: ask_ignore_battery_optimizations())
+
+        btn_kill_svc = Factory.DangerButton(text="Terminate Background Service")
+        btn_kill_svc.bind(on_release=self.terminate_service)
+
+        card_engine.add_widget(lbl_e_title)
+        card_engine.add_widget(lbl_e_sub)
+        card_engine.add_widget(btn_battery)
+        card_engine.add_widget(btn_kill_svc)
+
+        # ---------------------------------------------------- Card 4: Danger Zone
         card_danger = Factory.Card()
-        lbl_d_title = Label(text="Account Disconnect", font_size="15sp", bold=True,
-                            color=get_color_from_hex("#EF4444"), size_hint_y=None, height=dp(26), halign="left")
+        card_danger.padding = [dp(14), dp(12), dp(14), dp(12)]
+        card_danger.spacing = dp(8)
+
+        lbl_d_title = Label(
+            text="Danger Zone", font_size="14sp", bold=True,
+            color=get_color_from_hex("#EF4444"), size_hint_y=None, height=dp(24), halign="left"
+        )
         lbl_d_title.bind(size=lbl_d_title.setter('text_size'))
 
-        btn_logout = Factory.DangerButton(text=f"{ICON_WARNING} Logout & Reset WhatsApp Session")
+        lbl_d_sub = Label(
+            text="Permanently clear session keys and disconnect from WhatsApp network.",
+            font_size="11sp", color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(20), halign="left"
+        )
+        lbl_d_sub.bind(size=lbl_d_sub.setter('text_size'))
+
+        btn_logout = Factory.DangerButton(text="Logout & Disconnect Session")
         btn_logout.bind(on_release=self.on_logout)
 
         card_danger.add_widget(lbl_d_title)
+        card_danger.add_widget(lbl_d_sub)
         card_danger.add_widget(btn_logout)
 
+        # ---------------------------------------------------- Card 5: About & Telemetry
+        card_about = Factory.Card()
+        card_about.padding = [dp(14), dp(12), dp(14), dp(12)]
+        card_about.spacing = dp(6)
+
+        lbl_a_title = Label(
+            text="About WA Core", font_size="14sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(24), halign="left"
+        )
+        lbl_a_title.bind(size=lbl_a_title.setter('text_size'))
+
+        lbl_meta1 = Label(
+            text="Engine: Neonize Go / WhatsApp Web MD", font_size="11sp",
+            color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(18), halign="left"
+        )
+        lbl_meta1.bind(size=lbl_meta1.setter('text_size'))
+
+        lbl_meta2 = Label(
+            text=f"Engine Version: {APP_VERSION}  •  Arch: arm64-v8a", font_size="11sp",
+            color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(18), halign="left"
+        )
+        lbl_meta2.bind(size=lbl_meta2.setter('text_size'))
+
+        lbl_meta3 = Label(
+            text="Runtime: Python 3.11  •  Kivy 2.3.0", font_size="11sp",
+            color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(18), halign="left"
+        )
+        lbl_meta3.bind(size=lbl_meta3.setter('text_size'))
+
+        btn_about_logs = Factory.SecondaryButton(text="Export Activity Log (.log)")
+        btn_about_logs.bind(on_release=self.export_logs_from_about)
+
+        card_about.add_widget(lbl_a_title)
+        card_about.add_widget(lbl_meta1)
+        card_about.add_widget(lbl_meta2)
+        card_about.add_widget(lbl_meta3)
+        card_about.add_widget(btn_about_logs)
+
         content.add_widget(card_privacy)
-        content.add_widget(card_engine)
         content.add_widget(card_session)
+        content.add_widget(card_engine)
         content.add_widget(card_danger)
+        content.add_widget(card_about)
 
         scroll.add_widget(content)
         self.add_widget(scroll)
 
     def toggle_auto_wipe(self, *_):
         self.auto_wipe_active = not self.auto_wipe_active
+        self.btn_auto_wipe.is_active = self.auto_wipe_active
         self.btn_auto_wipe.text = "ON" if self.auto_wipe_active else "OFF"
         self.root.on_log(f"Auto-wipe {'enabled' if self.auto_wipe_active else 'disabled'}.")
 
     def toggle_stealth(self, *_):
         self.stealth_read_active = not self.stealth_read_active
+        self.btn_stealth.is_active = self.stealth_read_active
         self.btn_stealth.text = "ON" if self.stealth_read_active else "OFF"
         self.root.on_log(f"Stealth Read Mode {'enabled' if self.stealth_read_active else 'disabled'}.")
+
+    def toggle_forward(self, *_):
+        self.auto_forward_active = not self.auto_forward_active
+        self.btn_forward.is_active = self.auto_forward_active
+        self.btn_forward.text = "ON" if self.auto_forward_active else "OFF"
+        self.root.on_log(f"Anti-Delete relay {'enabled' if self.auto_forward_active else 'disabled'}.")
+
+    def on_flush_cache(self, *_):
+        self.root.send("/wipe_cache")
+        self.root.on_log("Flushing intercepted message cache...")
+        InfoDialog("Cache Cleared", "Intercepted message cache has been flushed.").open()
+
+    def export_logs_from_about(self, *_):
+        ok, res = export_activity_log()
+        title = "Logs Exported" if ok else "Export Failed"
+        msg = f"Saved to:\n{res}" if ok else f"Error: {res}"
+        InfoDialog(title, msg).open()
 
     def terminate_service(self, *_):
         self.root.engine_state = "stopped"
@@ -1495,18 +1676,18 @@ class Root(BoxLayout):
         if self.is_connected:
             tab_defs = [
                 ("plugins", "Plugins"),
-                ("send", "Quick Send"),
+                ("send", "Send"),
                 ("console", "Console"),
-                ("settings", f"{ICON_GEAR} Settings"),
+                ("settings", "Settings"),
             ]
             default_tab = "plugins"
         else:
             tab_defs = [
                 ("connect", "Connect"),
                 ("plugins", "Plugins"),
-                ("send", "Quick Send"),
+                ("send", "Send"),
                 ("console", "Console"),
-                ("settings", f"{ICON_GEAR} Settings"),
+                ("settings", "Settings"),
             ]
             default_tab = "connect"
 
