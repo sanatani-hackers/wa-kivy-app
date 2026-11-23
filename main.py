@@ -24,7 +24,7 @@ from kivy.factory import Factory
 # Ensure window displays status bar and dynamically shifts up when software keyboard appears
 Window.fullscreen = False
 Window.borderless = False
-Window.softinput_mode = "resize"
+Window.softinput_mode = ""
 Window.keyboard_anim_args = {'d': 0.2, 't': 'in_out_quart'}
 from kivy.lang import Builder
 from kivy.properties import BooleanProperty
@@ -527,6 +527,35 @@ def ask_ignore_battery_optimizations():
 
 
 # --------------------------------------------------------------------------- Dialogs
+_android_decor_view = None
+_android_rect = None
+
+def get_keyboard_height_px():
+    """Detect soft keyboard height on Android using window visible display frame."""
+    global _android_decor_view, _android_rect
+    if platform != "android":
+        return 0
+    try:
+        if _android_decor_view is None:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            act = PythonActivity.mActivity
+            if not act:
+                return 0
+            _android_decor_view = act.getWindow().getDecorView()
+            Rect = autoclass("android.graphics.Rect")
+            _android_rect = Rect()
+
+        _android_decor_view.getWindowVisibleDisplayFrame(_android_rect)
+        total_h = _android_decor_view.getRootView().getHeight()
+        diff = total_h - _android_rect.bottom
+        if diff > total_h * 0.15:
+            return diff
+        return 0
+    except Exception:
+        return 0
+
+
 class PluginEditorDialog(ModalView):
     """In-app Plugin Studio & Code Editor with real-time telemetry, clean layout, and keyboard-aware resizing."""
 
@@ -534,6 +563,8 @@ class PluginEditorDialog(ModalView):
         super().__init__(size_hint=(0.96, 0.94), auto_dismiss=True, **kw)
         self.on_save = on_save
         self.background_color = (0, 0, 0, 0.85)
+        self._last_kh = 0
+        self._kb_timer = None
 
         card = Factory.DialogCard()
         card.padding = dp(10)
@@ -591,30 +622,45 @@ class PluginEditorDialog(ModalView):
             padding=[dp(10), dp(10), dp(10), dp(10)]
         )
         self.code_input.bind(text=self._update_telemetry)
+        self.code_input.bind(focus=lambda *_: Clock.schedule_once(lambda dt: self._poll_keyboard_height(), 0.05))
 
         card.add_widget(header)
         card.add_widget(sub_toolbar)
         card.add_widget(self.code_input)
         self.add_widget(card)
 
+    def on_pre_open(self):
+        super().on_pre_open()
+        if self._kb_timer is None:
+            self._kb_timer = Clock.schedule_interval(self._poll_keyboard_height, 0.1)
+
     def on_open(self):
-        Window.bind(keyboard_height=self._on_keyboard_height)
+        super().on_open()
+        if self._kb_timer is None:
+            self._kb_timer = Clock.schedule_interval(self._poll_keyboard_height, 0.1)
 
     def on_dismiss(self):
-        try:
-            Window.unbind(keyboard_height=self._on_keyboard_height)
-        except Exception:
-            pass
+        super().on_dismiss()
+        if self._kb_timer is not None:
+            self._kb_timer.cancel()
+            self._kb_timer = None
+        self._apply_keyboard_resize(0)
 
-    def _on_keyboard_height(self, window, kb_height):
-        win = window or Window
+    def _poll_keyboard_height(self, *_):
+        kh = max(get_keyboard_height_px(), Window.keyboard_height)
+        if kh != self._last_kh:
+            self._last_kh = kh
+            self._apply_keyboard_resize(kh)
+
+    def _apply_keyboard_resize(self, kb_height):
+        win_h = float(max(1, Window.height))
         if kb_height > 0:
-            top_gap = dp(24)
+            top_gap = dp(28)
             bottom_gap = kb_height + dp(8)
-            avail = max(dp(200), win.height - bottom_gap - top_gap)
+            avail = max(dp(200), win_h - bottom_gap - top_gap)
             self.size_hint = (0.96, None)
             self.height = avail
-            self.pos_hint = {'center_x': 0.5, 'y': bottom_gap / float(max(1, win.height))}
+            self.pos_hint = {'center_x': 0.5, 'y': bottom_gap / win_h}
         else:
             self.size_hint = (0.96, 0.94)
             self.pos_hint = {'center_x': 0.5, 'center_y': 0.5}
