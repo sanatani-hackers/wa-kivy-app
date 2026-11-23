@@ -29,6 +29,18 @@
       "changelog": "Saves directly to external media folder."
     },
     {
+      "id": "groqchat",
+      "name": "Groq LPU AI Assistant",
+      "version": "1.0.0",
+      "author": "Sanatani Hackers",
+      "category": "AI & Utilities",
+      "description": "High-speed AI assistant powered by Groq LPUs (Llama 3.3 70B, Llama 3.1 8B, DeepSeek R1).",
+      "download_url": "https://raw.githubusercontent.com/sanatani-hackers/wa-kivy-app/main/wa_app/plugins/groqchat.py",
+      "requires": ["requests"],
+      "verified": true,
+      "changelog": "Initial release with 30m chat memory and multi-model support."
+    },
+    {
       "id": "gemini_ai",
       "name": "Gemini AI Assistant",
       "version": "1.0.0",
