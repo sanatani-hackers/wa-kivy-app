@@ -200,6 +200,29 @@ def update_service_notification(title: str, text: str, is_running: bool = True, 
         except Exception:
             pass
 
+        # Android 16 Live Updates & OEM Notch Capsule (Rich Ongoing Status Bar Chip)
+        try:
+            # 1. Compact chip text rendered in status bar / notch capsule
+            builder.setSubText(StringClass(str(title)))
+            # 2. Status category for system live task promotion
+            builder.setCategory(StringClass("status"))
+            # 3. Public visibility for Lock Screen NowBar / AOD
+            builder.setVisibility(1)
+        except Exception:
+            pass
+
+        # 4. Android 16 & OEM Promoted Ongoing Extras
+        try:
+            extras = builder.getExtras()
+            if extras is not None:
+                # Official Android 16 (API 36) Promoted Ongoing Live Update Key
+                extras.putBoolean("android.requestPromotedOngoing", True)
+                # Samsung One UI 7 NowBar / Live Alert Key
+                extras.putBoolean("com.samsung.android.notification.live", True)
+                extras.putString("android.substName", StringClass("WA Core"))
+        except Exception:
+            pass
+
         # Open UI on notification click
         try:
             pkg = ctx.getPackageName()
