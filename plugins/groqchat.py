@@ -6,11 +6,15 @@ Commands (prefix !ai or !groq):
   !ai reset             Forget conversation memory for this chat
   !ai help              Show command help
   !ai models            List recommended Groq models
-Owner only (your own messages, or numbers in config 'owners'):
-  !ai on / !ai off      Toggle automatic AI replies for THIS chat
+  !ai status            View plugin configuration and health status
+Owner only:
+  !ai setkey <KEY>      Save Groq API key (gsk_...) - auto-registers first user as owner
   !ai model [id]        Show or change the active model (default: llama-3.3-70b-versatile)
   !ai persona <prompt>  Customize the system persona (!ai persona reset -> default)
-  !ai setkey <KEY>      Save Groq API key (gsk_...)
+  !ai on / !ai off      Toggle automatic AI replies for THIS chat
+  !ai owners            List registered bot owners
+  !ai addowner <num>    Add an authorized phone number as owner
+  !ai delowner <num>    Remove an authorized owner
 """
 import asyncio
 import json
@@ -90,50 +94,64 @@ def _cfg_path():
 
 def _load():
     global _ctx
-    # Check ctx.load_json first
+    loaded = False
+    # 1. Try ctx.load_json first
     if _ctx and hasattr(_ctx, "load_json"):
         data = _ctx.load_json("config.json", default=None)
         if data and isinstance(data, dict):
             _cfg.update(data)
-            return
+            loaded = True
 
-    # Check direct config file
-    path = _cfg_path()
-    if os.path.exists(path):
+    # 2. Try direct config file path
+    if not loaded:
+        path = _cfg_path()
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    _cfg.update(json.load(f))
+                    loaded = True
+            except Exception as e:
+                log.warning("could not read %s: %s", path, e)
+
+    # 3. Check legacy paths if key is still missing
+    if not loaded or not _cfg.get("api_key"):
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                _cfg.update(json.load(f))
-                return
-        except Exception as e:
-            log.warning("could not read %s: %s", path, e)
-
-    # Legacy check: aichat.json in private_dir()
-    try:
-        from common import private_dir
-        legacy = os.path.join(private_dir(), "aichat.json")
-        if os.path.exists(legacy):
-            with open(legacy, "r", encoding="utf-8") as f:
-                _cfg.update(json.load(f))
-    except Exception:
-        pass
+            from common import private_dir
+            for fname in ("groqchat.json", "aichat.json"):
+                legacy = os.path.join(private_dir(), fname)
+                if os.path.exists(legacy):
+                    with open(legacy, "r", encoding="utf-8") as f:
+                        leg_data = json.load(f)
+                        if leg_data.get("api_key"):
+                            _cfg.update(leg_data)
+                            break
+        except Exception:
+            pass
 
 
 def _save():
     global _ctx
+    # 1. Save via ctx if available
     if _ctx and hasattr(_ctx, "save_json"):
-        _ctx.save_json("config.json", _cfg)
-        return
+        try:
+            _ctx.save_json("config.json", _cfg)
+        except Exception:
+            pass
 
-    path = _cfg_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(_cfg, f, indent=2)
+    # 2. Also save to direct filesystem path
     try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)
+        path = _cfg_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_cfg, f, indent=2)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    except Exception as e:
+        log.warning("could not save config: %s", e)
 
 
 def _key():
@@ -144,7 +162,7 @@ async def setup(ctx):
     global _ctx
     _ctx = ctx
     _load()
-    ctx.log.info("Groqchat ready. Model: %s", _cfg.get("model", DEFAULT_MODEL))
+    ctx.log.info("Groqchat ready. Model: %s, Key set: %s", _cfg.get("model", DEFAULT_MODEL), bool(_key()))
 
 
 # ----------------------------------------------------------------------------- Helpers
@@ -153,7 +171,13 @@ def _num(jid: str) -> str:
 
 
 def _is_owner(msg) -> bool:
-    return bool(msg.from_me) or _num(msg.sender_id) in _cfg.get("owners", [])
+    if bool(msg.from_me):
+        return True
+    owners = _cfg.get("owners", [])
+    if not owners:
+        # If no owners configured yet, allow setup
+        return True
+    return _num(msg.sender_id) in owners
 
 
 def _allowed(msg) -> bool:
@@ -299,8 +323,10 @@ async def _chat(ctx, msg, prompt):
     if not _key():
         return await ctx.reply(
             msg,
-            "🔑 *Groq API key not set!*\nSet it with: `!ai setkey <your_groq_key>`\n"
-            "Get a free key from: https://console.groq.com/keys"
+            "🔑 *Groq API key not set!*\n\n"
+            "Set it with:\n"
+            "`!ai setkey <your_groq_key>`\n\n"
+            "Get a free API key from:\nhttps://console.groq.com/keys"
         )
     uid, now = _num(msg.sender_id), time.monotonic()
     if now - _last.get(uid, 0) < USER_COOLDOWN:
@@ -354,9 +380,12 @@ async def on_message(ctx, msg):
             "• `!ai reset` - Clear memory for this chat\n"
             "• `!ai models` - List available high-speed models\n"
             "• `!ai model [name]` - View or change active model\n"
+            "• `!ai status` - View plugin health & config\n"
             "• `!ai persona [prompt]` - Set custom personality\n"
             "• `!ai on / off` - Auto-reply toggle for this chat\n"
-            "• `!ai setkey <key>` - Save Groq API key (Owner only)"
+            "• `!ai setkey <key>` - Save Groq API key\n"
+            "• `!ai owners` - View authorized owners\n"
+            "• `!ai addowner <num>` - Add new owner"
         )
         return await ctx.reply(msg, help_text)
 
@@ -373,28 +402,97 @@ async def on_message(ctx, msg):
         lines.append(f"\n👉 Switch model with: `!ai model <model_name>`")
         return await ctx.reply(msg, "\n".join(lines))
 
-    if cmd in ("on", "off", "model", "persona", "setkey"):
-        if not _is_owner(msg):
-            return
+    if cmd == "status":
+        has_key = bool(_key())
+        owners = _cfg.get("owners", [])
+        owners_str = ", ".join(f"@{o}" for o in owners) if owners else "None (Open setup)"
+        status_text = (
+            "📊 *Groq AI Plugin Status:*\n"
+            f"• 🟢 *API Key:* {'Configured ✅' if has_key else 'Missing ❌'}\n"
+            f"• 🤖 *Active Model:* `{_cfg.get('model', DEFAULT_MODEL)}`\n"
+            f"• 👑 *Owners:* {owners_str}\n"
+            f"• 🧠 *Active Chats in Memory:* {len(_hist)}\n"
+            f"• ⚡ *Auto-Reply Chats:* {len(_cfg.get('auto_chats', []))}"
+        )
+        return await ctx.reply(msg, status_text)
+
+    if cmd in ("on", "off", "model", "persona", "setkey", "addowner", "delowner", "owners"):
+        # Check authorization
+        has_owners = bool(_cfg.get("owners"))
+        is_owner = _is_owner(msg)
+
+        # First-time setup: if no key or no owners set yet, allow whoever sends setkey
+        if not has_owners or not _key():
+            is_owner = True
+
+        if not is_owner:
+            owners_list = ", ".join(f"@{o}" for o in _cfg.get("owners", []))
+            return await ctx.reply(
+                msg,
+                f"❌ *Permission Denied:*\nOnly registered bot owners ({owners_list}) can change AI settings or keys."
+            )
+
+        if cmd == "setkey":
+            clean_key = rest.strip().strip("'\"")
+            if not clean_key:
+                return await ctx.reply(msg, "⚠️ *Usage:* `!ai setkey <your_groq_api_key>`\nExample: `!ai setkey gsk_...`")
+            _cfg["api_key"] = clean_key
+            sender_num = _num(msg.sender_id)
+            if sender_num and sender_num not in _cfg.setdefault("owners", []):
+                _cfg["owners"].append(sender_num)
+            _save()
+            return await ctx.reply(
+                msg,
+                f"🔑 *Groq API key saved successfully!*\n"
+                f"👤 Registered @{sender_num} as Bot Owner.\n"
+                f"🤖 *Active Model:* `{_cfg.get('model', DEFAULT_MODEL)}`\n\n"
+                f"💡 *Ready!* Try asking anything:\n"
+                f"`!ai hi`\n\n"
+                f"⚠️ *Security Tip:* Please delete the message containing your API key from this chat!"
+            )
+
+        if cmd == "owners":
+            owners = _cfg.get("owners", [])
+            owners_str = "\n".join(f"• @{o}" for o in owners) if owners else "None registered"
+            return await ctx.reply(msg, f"👑 *Registered Bot Owners:*\n{owners_str}\n\nAdd more with: `!ai addowner <phone_number>`")
+
+        if cmd == "addowner":
+            target = re.sub(r"[^0-9]", "", rest)
+            if not target or len(target) < 10:
+                return await ctx.reply(msg, "⚠️ *Usage:* `!ai addowner <country_code_number>` (e.g. `!ai addowner 919876543210`)")
+            if target not in _cfg.setdefault("owners", []):
+                _cfg["owners"].append(target)
+                _save()
+                return await ctx.reply(msg, f"✅ Added @{target} to Bot Owners.")
+            return await ctx.reply(msg, f"ℹ️ @{target} is already a Bot Owner.")
+
+        if cmd == "delowner":
+            target = re.sub(r"[^0-9]", "", rest)
+            if target in _cfg.get("owners", []):
+                _cfg["owners"].remove(target)
+                _save()
+                return await ctx.reply(msg, f"🗑️ Removed @{target} from Bot Owners.")
+            return await ctx.reply(msg, f"⚠️ Number @{target} was not in owners list.")
+
         if cmd in ("on", "off"):
             chats = set(_cfg.get("auto_chats", []))
             (chats.add if cmd == "on" else chats.discard)(msg.chat_id)
             _cfg["auto_chats"] = sorted(chats)
             _save()
             return await ctx.reply(msg, f"🤖 Auto-reply is now *{'ON' if cmd == 'on' else 'OFF'}* for this chat.")
+
         if cmd == "model":
             if rest:
-                _cfg["model"] = rest
+                _cfg["model"] = rest.strip()
                 _save()
-            return await ctx.reply(msg, f"Active Groq Model: `{_cfg.get('model', DEFAULT_MODEL)}`")
+                return await ctx.reply(msg, f"✅ Switched active Groq model to: `{_cfg['model']}`")
+            return await ctx.reply(msg, f"🤖 Active Groq Model: `{_cfg.get('model', DEFAULT_MODEL)}`\nList all models with: `!ai models`")
+
         if cmd == "persona":
             _cfg["system"] = "" if rest.lower() in ("", "reset") else rest[:1000]
             _save()
-            return await ctx.reply(msg, "Persona updated." if _cfg["system"] else "Persona reset to default.")
-        if cmd == "setkey" and rest:
-            _cfg["api_key"] = rest
-            _save()
-            return await ctx.reply(msg, "🔑 Groq API key saved successfully! Please delete your message from chat.")
+            return await ctx.reply(msg, "✅ Custom persona saved." if _cfg["system"] else "✅ Persona reset to default.")
+
         return
 
     await _chat(ctx, msg, arg)
