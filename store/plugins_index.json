@@ -17,6 +17,18 @@
       "changelog": "Added persistent isolated storage."
     },
     {
+      "id": "callmusic",
+      "name": "Call & Video Music DJ",
+      "version": "1.0.0",
+      "author": "Sanatani Hackers",
+      "category": "Media & Fun",
+      "description": "Auto-answer/place WhatsApp voice & video calls, stream MP3/WAV/Opus music, DJ queue, call recording, and caller rules.",
+      "download_url": "https://raw.githubusercontent.com/sanatani-hackers/wa-kivy-app/main/plugins/callmusic.py",
+      "requires": [],
+      "verified": true,
+      "changelog": "Initial release powered by meowcaller Go VoIP + MLow codec."
+    },
+    {
       "id": "antiviewonce",
       "name": "Anti-ViewOnce Media Saver",
       "version": "1.1.0",

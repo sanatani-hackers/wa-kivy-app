@@ -20,13 +20,16 @@ from common import (
     SVC_PORT,
     UI_PORT,
     activity_log_path,
+    cancel_android_notification,
     get_ram_usage_mb,
     plugin_dir,
     private_dir,
     send_android_notification,
+    send_call_notification,
     stop_android_service,
     update_service_notification,
 )
+from core import call_media
 from core.wa_client import WhatsAppCore
 
 
@@ -51,9 +54,24 @@ def main():
                 net_text = "Offline"
             else:
                 net_text = "Connecting..."
-            short_t = f"{net_text} | RAM: {ram}MB | Plugins: {active_p}/{tot_p}"
-            big_t = f"State: {st_text}\nNetwork: {net_text}\nRAM Usage: {ram} MB\nActive Plugins: {active_p} / {tot_p}"
-            update_service_notification(f"WA Core • {st_text}", short_t, is_running=is_run, stats_text=big_t)
+            active_calls = getattr(core.calls, "_active", {}) if hasattr(core, "calls") else {}
+            if active_calls:
+                first_call = next(iter(active_calls.values()))
+                c_peer = first_call.get("peer_number") or "Caller"
+                c_track = first_call.get("audio_path") or ""
+                c_phase = str(first_call.get("phase") or "active").capitalize()
+                chip_title = f"♪ Call • {c_peer}" if c_track else f"Call • {c_peer}"
+                short_t = f"{c_phase} | {c_track}" if c_track else f"{c_phase} | RAM: {ram}MB"
+                big_t = (
+                    f"Active Call: {c_peer} ({c_phase})\n"
+                    f"Track: {c_track or 'Idle'}\n"
+                    f"Network: {net_text} | RAM: {ram} MB | Plugins: {active_p}/{tot_p}"
+                )
+                update_service_notification(chip_title, short_t, is_running=is_run, stats_text=big_t)
+            else:
+                short_t = f"{net_text} | RAM: {ram}MB | Plugins: {active_p}/{tot_p}"
+                big_t = f"State: {st_text}\nNetwork: {net_text}\nRAM Usage: {ram} MB\nActive Plugins: {active_p} / {tot_p}"
+                update_service_notification(f"WA Core • {st_text}", short_t, is_running=is_run, stats_text=big_t)
         except Exception as e:
             print(f"[SVC _update_notif error] {e}", flush=True)
 
@@ -64,7 +82,7 @@ def main():
             ui.send_message(addr.encode(), list(vals) or [""])
         except Exception:
             pass                                    # UI not running: fine
-        if addr in {"/status", "/engine_state"}:
+        if addr in {"/status", "/engine_state", "/call_event"}:
             _update_notif()
 
     class UiLogHandler(logging.Handler):
@@ -91,7 +109,26 @@ def main():
                 run(core.stop())
             elif act == "org.sanatani.waapp.ACTION_START":
                 run(core.resume())
-        _br = BroadcastReceiver(_on_broadcast, actions=["org.sanatani.waapp.ACTION_STOP", "org.sanatani.waapp.ACTION_START"])
+            elif act == "org.sanatani.waapp.ACTION_CALL_ANSWER_MUSIC":
+                cid = ""
+                try:
+                    cid = str(intent.getStringExtra("call_id") or "")
+                except Exception:
+                    pass
+                run(_notif_answer_and_play(cid))
+            elif act == "org.sanatani.waapp.ACTION_CALL_DECLINE":
+                cid = ""
+                try:
+                    cid = str(intent.getStringExtra("call_id") or "")
+                except Exception:
+                    pass
+                run(_notif_decline(cid))
+        _br = BroadcastReceiver(_on_broadcast, actions=[
+            "org.sanatani.waapp.ACTION_STOP",
+            "org.sanatani.waapp.ACTION_START",
+            "org.sanatani.waapp.ACTION_CALL_ANSWER_MUSIC",
+            "org.sanatani.waapp.ACTION_CALL_DECLINE",
+        ])
         _br.start()
     except Exception:
         pass
@@ -151,6 +188,106 @@ def main():
         await asyncio.sleep(0.3)
         os._exit(0)
 
+    def _dec(v):
+        if isinstance(v, bytes):
+            return v.decode("utf-8", "ignore")
+        return str(v or "")
+
+    async def _notif_answer_and_play(cid: str):
+        cancel_android_notification(3001)
+        cid = cid or (core.calls.latest_active_call_id() or "")
+        if not cid:
+            return
+        res = await core.calls.answer(cid)
+        if res.get("ok"):
+            # Brief wait for relay RTP readiness before starting default track
+            for _ in range(30):
+                st = core.calls._active.get(cid, {})
+                if st.get("phase") == "active":
+                    break
+                await asyncio.sleep(0.25)
+            await core.calls.play_audio(cid, "", loop=True)
+
+    async def _notif_decline(cid: str):
+        cancel_android_notification(3001)
+        cid = cid or (core.calls.latest_active_call_id() or "")
+        if cid:
+            await core.calls.decline(cid)
+
+    async def _call_place(target, is_video):
+        tgt = _dec(target).strip()
+        vid = int(is_video) != 0 if str(is_video).isdigit() else bool(is_video)
+        res = await core.calls.place_call(tgt, is_video=vid)
+        if not res.get("ok"):
+            emit("/log", f"✗ CallPlace error: {res.get('error')}")
+
+    async def _call_play(call_id, track, loop_flag):
+        cid = _dec(call_id).strip() or (core.calls.latest_active_call_id() or "")
+        if not cid:
+            emit("/log", "✗ No active call selected to play audio.")
+            return
+        lp = int(loop_flag) != 0 if str(loop_flag).lstrip("-").isdigit() else bool(loop_flag)
+        res = await core.calls.play_audio(cid, _dec(track).strip(), loop=lp)
+        if not res.get("ok"):
+            emit("/log", f"✗ Audio play error: {res.get('error')}")
+        else:
+            emit("/call_event", json.dumps({"event": "track_update", "active_calls": list(core.calls._active.values())}))
+
+    async def _call_play_video(call_id, vpath, fps, loop_flag):
+        cid = _dec(call_id).strip() or (core.calls.latest_active_call_id() or "")
+        if not cid:
+            emit("/log", "✗ No active call selected to stream video.")
+            return
+        try:
+            fps_i = int(fps)
+        except Exception:
+            fps_i = 15
+        lp = int(loop_flag) != 0 if str(loop_flag).lstrip("-").isdigit() else True
+        res = await core.calls.play_video(cid, _dec(vpath).strip(), fps=fps_i, loop=lp)
+        if not res.get("ok"):
+            emit("/log", f"✗ Video stream error: {res.get('error')}")
+
+    async def _call_refresh():
+        emit("/call_tracks", json.dumps(call_media.list_media_tracks()))
+        emit("/call_history", json.dumps(core.calls.history(25)))
+        emit("/call_event", json.dumps({
+            "event": "snapshot",
+            "supported": core.calls.is_supported(),
+            "active_calls": list(core.calls._active.values()),
+        }))
+
+    async def _call_simple(action: str, cid_raw="", extra=None):
+        cid = _dec(cid_raw).strip() or (core.calls.latest_active_call_id() or "")
+        if not cid:
+            emit("/log", f"✗ Cannot {action}: no active call.")
+            return
+        if action == "answer":
+            cancel_android_notification(3001)
+            res = await core.calls.answer(cid)
+        elif action == "decline":
+            cancel_android_notification(3001)
+            res = await core.calls.decline(cid)
+        elif action == "hangup":
+            cancel_android_notification(3001)
+            res = await core.calls.hangup(cid)
+        elif action == "pause":
+            res = await core.calls.pause_audio(cid)
+        elif action == "resume":
+            res = await core.calls.resume_audio(cid)
+        elif action == "stop_audio":
+            res = await core.calls.stop_audio(cid)
+        elif action == "stop_video":
+            res = await core.calls.stop_video_stream(cid)
+        elif action == "record":
+            en = 1 if extra is None else (int(extra) if str(extra).lstrip("-").isdigit() else 1)
+            res = await core.calls.record_audio(cid, "auto" if en else "")
+        elif action == "react":
+            res = await core.calls.send_reaction(cid, _dec(extra) or "🎵")
+        else:
+            res = {"ok": False, "error": f"unknown action {action}"}
+        if not res.get("ok"):
+            emit("/log", f"✗ Call {action} failed: {res.get('error')}")
+
     # Periodic background stats updater (every 8 seconds)
     async def _periodic_notif_loop():
         while True:
@@ -168,6 +305,20 @@ def main():
     server.bind(b"/delete_plugin", lambda name: run(_delete_plugin(name)))
     server.bind(b"/clear_session", lambda *a: run(core.clear_session()))
     server.bind(b"/wipe_cache", lambda *a: run(_wipe_cache()))
+    server.bind(b"/call_place", lambda *a: run(_call_place(a[0] if len(a) > 0 else "", a[1] if len(a) > 1 else 0)))
+    server.bind(b"/call_answer", lambda *a: run(_call_simple("answer", a[0] if a else "")))
+    server.bind(b"/call_decline", lambda *a: run(_call_simple("decline", a[0] if a else "")))
+    server.bind(b"/call_hangup", lambda *a: run(_call_simple("hangup", a[0] if a else "")))
+    server.bind(b"/call_play", lambda *a: run(_call_play(a[0] if len(a) > 0 else "", a[1] if len(a) > 1 else "", a[2] if len(a) > 2 else 1)))
+    server.bind(b"/call_pause", lambda *a: run(_call_simple("pause", a[0] if a else "")))
+    server.bind(b"/call_resume", lambda *a: run(_call_simple("resume", a[0] if a else "")))
+    server.bind(b"/call_stop_audio", lambda *a: run(_call_simple("stop_audio", a[0] if a else "")))
+    server.bind(b"/call_play_video", lambda *a: run(_call_play_video(a[0] if len(a) > 0 else "", a[1] if len(a) > 1 else "", a[2] if len(a) > 2 else 15, a[3] if len(a) > 3 else 1)))
+    server.bind(b"/call_stop_video", lambda *a: run(_call_simple("stop_video", a[0] if a else "")))
+    server.bind(b"/call_record", lambda *a: run(_call_simple("record", a[0] if len(a) > 0 else "", a[1] if len(a) > 1 else 1)))
+    server.bind(b"/call_react", lambda *a: run(_call_simple("react", a[0] if len(a) > 0 else "", a[1] if len(a) > 1 else "🎵")))
+    server.bind(b"/call_refresh", lambda *a: run(_call_refresh()))
+    server.bind(b"/call_clear_history", lambda *a: (core.calls.clear_history(), run(_call_refresh())))
 
     loop.create_task(core.start())
     loop.create_task(_periodic_notif_loop())

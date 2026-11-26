@@ -1,9 +1,10 @@
 """importlib-based plugin loader. Drop .py files into plugin_dir(); no APK rebuild needed.
 
-Plugin contract (all optional except on_message or setup):
+Plugin contract (all optional except on_message, on_call, or setup):
     NAME = "ping"
     async def setup(ctx): ...                # called once after load (register ctx.every(...) here)
     async def on_message(ctx, msg): ...      # called for every incoming message
+    async def on_call(ctx, call_ev): ...     # called for call lifecycle events (incoming, ready, end, etc.)
     async def teardown(ctx): ...             # called before unload/reload
 """
 import asyncio
@@ -80,6 +81,50 @@ class PluginContext:
     def every(self, seconds: float, fn) -> bool:
         """Run `async fn(ctx)` periodically (min interval enforced by the supervisor)."""
         return self._core.supervisor.every(self.name, seconds, lambda: fn(self))
+
+    # ---- VoIP & Video Call Control Helpers
+    @property
+    def calls(self):
+        return self._core.calls
+
+    async def call(self, target: str, video: bool = False) -> dict:
+        return await self._core.calls.place_call(target, is_video=video)
+
+    async def answer_call(self, call_id: str) -> dict:
+        return await self._core.calls.answer(call_id)
+
+    async def decline_call(self, call_id: str, caller_jid=None) -> dict:
+        return await self._core.calls.decline(call_id, caller_jid=caller_jid)
+
+    async def hangup_call(self, call_id: str) -> dict:
+        return await self._core.calls.hangup(call_id)
+
+    async def play_call_audio(self, call_id: str, track: str = "", loop: bool = False) -> dict:
+        return await self._core.calls.play_audio(call_id, track, loop=loop)
+
+    async def pause_call_audio(self, call_id: str) -> dict:
+        return await self._core.calls.pause_audio(call_id)
+
+    async def resume_call_audio(self, call_id: str) -> dict:
+        return await self._core.calls.resume_audio(call_id)
+
+    async def stop_call_audio(self, call_id: str) -> dict:
+        return await self._core.calls.stop_audio(call_id)
+
+    async def play_call_video(self, call_id: str, video_file: str = "", fps: int = 15, loop: bool = True, with_audio: bool = True) -> dict:
+        return await self._core.calls.play_video(call_id, video_file, fps=fps, loop=loop, with_audio=with_audio)
+
+    async def stop_call_video(self, call_id: str) -> dict:
+        return await self._core.calls.stop_video_stream(call_id)
+
+    async def record_call_audio(self, call_id: str, path: str = "auto") -> dict:
+        return await self._core.calls.record_audio(call_id, path)
+
+    async def record_call_video(self, call_id: str, path: str = "auto") -> dict:
+        return await self._core.calls.record_video(call_id, path)
+
+    async def send_call_reaction(self, call_id: str, emoji: str) -> dict:
+        return await self._core.calls.send_reaction(call_id, emoji)
 
 
 class PluginManager:
@@ -206,6 +251,17 @@ class PluginManager:
             fn = getattr(p["mod"], "on_message", None)
             if fn and not self.core.supervisor.is_quarantined(name):
                 t = asyncio.create_task(self.core.supervisor.run(name, fn, p["ctx"], msg))
+                self._tasks.add(t)
+                t.add_done_callback(self._tasks.discard)
+
+    def dispatch_call(self, call_ev):
+        """Fan-out call lifecycle events (incoming, ready, end, etc.) to active plugins defining on_call."""
+        for name, p in self.loaded.items():
+            if name in self.disabled:
+                continue
+            fn = getattr(p["mod"], "on_call", None)
+            if fn and not self.core.supervisor.is_quarantined(name):
+                t = asyncio.create_task(self.core.supervisor.run(name, fn, p["ctx"], call_ev))
                 self._tasks.add(t)
                 t.add_done_callback(self._tasks.discard)
 

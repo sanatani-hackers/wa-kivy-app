@@ -769,6 +769,33 @@ if not os.environ.get("SPHINX"):
     ]
     gocode.BuildEdit.restype = ctypes.POINTER(Bytes)
 
+    # Custom meowcaller VoIP & Video Streaming FFI bindings (optional-safe if symbols missing)
+    _CALL_FFI_SIGNATURES = {
+        "CallRegisterCallback": [func_string],
+        "CallPlace": [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int],
+        "CallAnswer": [ctypes.c_char_p, ctypes.c_char_p],
+        "CallDecline": [ctypes.c_char_p, ctypes.c_char_p],
+        "CallHangup": [ctypes.c_char_p, ctypes.c_char_p],
+        "CallPlayAudio": [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int],
+        "CallPauseAudio": [ctypes.c_char_p, ctypes.c_char_p],
+        "CallResumeAudio": [ctypes.c_char_p, ctypes.c_char_p],
+        "CallStopAudio": [ctypes.c_char_p, ctypes.c_char_p],
+        "CallPlayVideo": [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int],
+        "CallStopVideoStream": [ctypes.c_char_p, ctypes.c_char_p],
+        "CallStartVideo": [ctypes.c_char_p, ctypes.c_char_p],
+        "CallAcceptVideo": [ctypes.c_char_p, ctypes.c_char_p],
+        "CallStopVideo": [ctypes.c_char_p, ctypes.c_char_p],
+        "CallRecordAudio": [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p],
+        "CallRecordVideo": [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p],
+        "CallSendReaction": [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p],
+        "CallListActive": [ctypes.c_char_p],
+    }
+    for _fn_name, _argtypes in _CALL_FFI_SIGNATURES.items():
+        _fn = getattr(gocode, _fn_name, None)
+        if _fn is not None:
+            _fn.argtypes = _argtypes
+            _fn.restype = ctypes.c_void_p
+
     def consume_cstring(result, func, arguments):
         """ctypes errcheck for FFI functions returning a Go-allocated ``*C.char``.
 
@@ -863,8 +890,29 @@ if not os.environ.get("SPHINX"):
         "MarkNotDirty",
         "SendMediaRetryReceipt",
         "DownloadAnyToFile",
+        "CallRegisterCallback",
+        "CallPlace",
+        "CallAnswer",
+        "CallDecline",
+        "CallHangup",
+        "CallPlayAudio",
+        "CallPauseAudio",
+        "CallResumeAudio",
+        "CallStopAudio",
+        "CallPlayVideo",
+        "CallStopVideoStream",
+        "CallStartVideo",
+        "CallAcceptVideo",
+        "CallStopVideo",
+        "CallRecordAudio",
+        "CallRecordVideo",
+        "CallSendReaction",
+        "CallListActive",
     ):
-        getattr(gocode, _string_returning_func).errcheck = consume_cstring
+        try:
+            getattr(gocode, _string_returning_func).errcheck = consume_cstring
+        except AttributeError:
+            pass
 
     # Attach consume_bytes_struct errcheck to every FFI function returning POINTER(Bytes).
     # After this, callers receive a plain ``bytes`` object and the C-heap struct is freed automatically.

@@ -1,5 +1,6 @@
 """Glue between neonize (async client) and the queue / supervisor / plugin manager."""
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -7,6 +8,8 @@ from typing import Any
 
 import core._shims
 from common import qr_cache_path
+from . import call_media
+from .call_engine import CallEngine
 from .plugins import PluginManager
 from .throttle import Job, OutboundQueue, PluginSupervisor
 
@@ -37,6 +40,7 @@ class WhatsAppCore:
             on_quarantine=lambda n, why: self.emit("/log", f"plugin {n} quarantined: {why}"),
             on_error=lambda n, err: self.emit("/log", f"plugin {n} error: {err}"))
         self.plugins = PluginManager(plugin_dir, self)
+        self.calls = CallEngine(self, private_dir)
         self._run_task = None
         self.status = "stopped"
 
@@ -51,6 +55,7 @@ class WhatsAppCore:
             )
 
             self.client = c = NewAClient(self.db)
+            self.calls.attach_client(c, asyncio.get_running_loop())
             self.emit("/log", "WhatsApp engine initialized. Connecting to servers...")
 
             @c.event(ConnectedEv)
@@ -289,6 +294,16 @@ class WhatsAppCore:
     async def snapshot(self):
         self.emit("/plugins", self.plugins.formatted_list())
         self.emit("/stats", str(self.supervisor.report()))
+        try:
+            self.emit("/call_tracks", json.dumps(call_media.list_media_tracks()))
+            self.emit("/call_history", json.dumps(self.calls.history(25)))
+            self.emit("/call_event", json.dumps({
+                "event": "snapshot",
+                "supported": self.calls.is_supported(),
+                "active_calls": list(self.calls._active.values()),
+            }))
+        except Exception:
+            pass
         state = "running" if (self._run_task and not self._run_task.done()) else "stopped"
         self.emit("/engine_state", state)
         if state == "stopped":

@@ -4,6 +4,7 @@ package.name = waapp
 package.domain = org.sanatani
 source.dir = .
 source.include_exts = py,png,jpg,kv,json,so,ttf
+source.exclude_dirs = voip_bridge,.git,__pycache__,bin,.buildozer
 version = 0.2.0
 orientation = portrait
 fullscreen = 0

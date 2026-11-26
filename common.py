@@ -163,6 +163,84 @@ def send_android_notification(title: str, text: str, notif_id: int = 1001):
         print(f"send_android_notification failed: {e}")
 
 
+def send_call_notification(call_id: str, caller_label: str, is_video: bool = False, notif_id: int = 3001):
+    """Post an interactive heads-up notification for an incoming call with [Answer+Music] & [Decline] buttons."""
+    ctx = _android_ctx()
+    if not ctx:
+        return
+    try:
+        from jnius import autoclass
+        NotificationBuilder = autoclass("android.app.Notification$Builder")
+        NotificationManager = autoclass("android.app.NotificationManager")
+        Context = autoclass("android.content.Context")
+        Intent = autoclass("android.content.Intent")
+        PendingIntent = autoclass("android.app.PendingIntent")
+        StringClass = autoclass("java.lang.String")
+
+        nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE)
+        channel_id = "org.sanatani.waapp.calls_v1"
+        try:
+            NotificationChannel = autoclass("android.app.NotificationChannel")
+            channel = NotificationChannel(channel_id, "WA Core Calls", NotificationManager.IMPORTANCE_HIGH)
+            channel.setDescription("Incoming WhatsApp Voice & Video Call Alerts")
+            channel.enableVibration(True)
+            nm.createNotificationChannel(channel)
+            builder = NotificationBuilder(ctx, channel_id)
+        except Exception:
+            builder = NotificationBuilder(ctx)
+
+        kind = "Video Call" if is_video else "Voice Call"
+        builder.setContentTitle(StringClass(f"Incoming {kind}"))
+        builder.setContentText(StringClass(f"From: {caller_label}"))
+        builder.setAutoCancel(True)
+        builder.setCategory(StringClass("call"))
+        builder.setVisibility(1)
+        try:
+            builder.setSmallIcon(ctx.getApplicationInfo().icon)
+        except Exception:
+            pass
+
+        try:
+            pkg = ctx.getPackageName()
+            app_icon = ctx.getApplicationInfo().icon
+            flags = 0x04000000 | 0x08000000
+
+            ans_intent = Intent("org.sanatani.waapp.ACTION_CALL_ANSWER_MUSIC")
+            ans_intent.setPackage(pkg)
+            ans_intent.putExtra("call_id", str(call_id))
+            p_ans = PendingIntent.getBroadcast(ctx, 301, ans_intent, flags)
+
+            dec_intent = Intent("org.sanatani.waapp.ACTION_CALL_DECLINE")
+            dec_intent.setPackage(pkg)
+            dec_intent.putExtra("call_id", str(call_id))
+            p_dec = PendingIntent.getBroadcast(ctx, 302, dec_intent, flags)
+
+            NotificationActionBuilder = autoclass("android.app.Notification$Action$Builder")
+            Icon = autoclass("android.graphics.drawable.Icon")
+            icon_obj = Icon.createWithResource(ctx, app_icon)
+            builder.addAction(NotificationActionBuilder(icon_obj, StringClass("Answer+Music"), p_ans).build())
+            builder.addAction(NotificationActionBuilder(icon_obj, StringClass("Decline"), p_dec).build())
+        except Exception as e_act:
+            print(f"send_call_notification actions failed: {e_act}")
+
+        nm.notify(notif_id, builder.build())
+    except Exception as e:
+        print(f"send_call_notification failed: {e}")
+
+
+def cancel_android_notification(notif_id: int = 3001):
+    ctx = _android_ctx()
+    if not ctx:
+        return
+    try:
+        from jnius import autoclass
+        Context = autoclass("android.content.Context")
+        nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE)
+        nm.cancel(int(notif_id))
+    except Exception:
+        pass
+
+
 def update_service_notification(title: str, text: str, is_running: bool = True, stats_text: str = ""):
     """Update persistent foreground notification (ID 1) with live stats and [STOP]/[START] action button."""
     ctx = _android_ctx()

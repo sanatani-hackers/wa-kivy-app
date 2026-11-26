@@ -9,6 +9,7 @@ Features:
 - DejaVuSans font integration for crisp symbol rendering without tofu glyph boxes
 """
 import ast
+import json
 import os
 import shutil
 import threading
@@ -66,13 +67,14 @@ ICON_PREV = "\uf053"       # nf-fa-chevron_left
 ICON_NEXT = "\uf054"       # nf-fa-chevron_right
 
 BUILTIN_PLUGINS = {
-    "antidelete", "antiviewonce", "autoreply", "echo", "ping", "remind", "stats"
+    "antidelete", "antiviewonce", "autoreply", "callmusic", "echo", "ping", "remind", "stats"
 }
 
 PLUGIN_DESCRIPTIONS = {
     "antidelete": "Intercepts and recovers deleted messages & media",
     "antiviewonce": "Bypasses view-once restriction on photos & media",
     "autoreply": "Automated keyword replies and responder triggers",
+    "callmusic": "Voice & video call handler, auto-answer, and in-call music DJ",
     "echo": "Echo & broadcast testing tool (!say command)",
     "ping": "Heartbeat and bot response latency checker",
     "remind": "Task scheduler and timed reminder alerts",
@@ -99,7 +101,7 @@ from common import (
     qr_cache_path,
     stop_android_service,
 )
-from core import pip_hub, plugin_store, updater
+from core import call_media, pip_hub, plugin_store, updater
 
 
 def ask_all_files_permission():
@@ -444,7 +446,7 @@ KV_STYLES = """
     background_color: (0, 0, 0, 0)
     background_normal: ''
     background_down: ''
-    font_size: '12sp'
+    font_size: '11sp'
     bold: True
     color: get_color_from_hex('#10B981') if self.active else get_color_from_hex('#94A3B8')
     canvas.before:
@@ -679,7 +681,7 @@ class PluginEditorDialog(ModalView):
         self.lbl_telemetry.text = f"Ln {lines} | {size_str} | Ready"
 
     def show_snippets_menu(self, *_):
-        dialog = ModalView(size_hint=(0.88, None), height=dp(300), auto_dismiss=True)
+        dialog = ModalView(size_hint=(0.88, None), height=dp(336), auto_dismiss=True)
         dcard = Factory.DialogCard()
         dcard.padding = dp(14)
         dcard.spacing = dp(6)
@@ -703,8 +705,10 @@ class PluginEditorDialog(ModalView):
         btn5.bind(on_release=lambda *_: _pick("antidelete"))
         btn6 = Factory.SecondaryButton(text="Periodic Task (ctx.every)")
         btn6.bind(on_release=lambda *_: _pick("remind"))
+        btn7 = Factory.SecondaryButton(text="Call Music Responder (on_call)")
+        btn7.bind(on_release=lambda *_: _pick("callmusic"))
 
-        for b in (btn1, btn2, btn3, btn4, btn5, btn6):
+        for b in (btn1, btn2, btn3, btn4, btn5, btn6, btn7):
             b.font_size = "11sp"
             b.size_hint_y = None
             b.height = dp(32)
@@ -816,6 +820,22 @@ class PluginEditorDialog(ModalView):
                 "async def setup(ctx):\n"
                 "    # Schedule to run every 5 minutes (300 seconds)\n"
                 "    ctx.every(300, run_task)\n"
+            )
+        elif kind == "callmusic":
+            if not self.filename_input.text:
+                self.filename_input.text = "custom_call_dj.py"
+            self.code_input.text = (
+                "# Custom Call & Video Call Music Handler\n"
+                "NAME = 'custom_call_dj'\n\n"
+                "async def on_call(ctx, call_ev):\n"
+                "    if call_ev.event == 'incoming':\n"
+                "        await ctx.answer_call(call_ev.call_id)\n"
+                "    elif call_ev.event == 'ready':\n"
+                "        await ctx.play_call_audio(call_ev.call_id, '', loop=True)\n\n"
+                "async def on_message(ctx, msg):\n"
+                "    if (msg.text or '').strip().lower() == '!songcall':\n"
+                "        res = await ctx.call(msg.chat_id, video=False)\n"
+                "        await ctx.reply(msg, f\"Calling: {res}\")\n"
             )
         self._update_telemetry()
 
@@ -1733,6 +1753,458 @@ class PluginsScreen(Screen):
             self.list_box.add_widget(p_card)
 
 
+class CallsScreen(Screen):
+    """Voice & Video Call Controller, In-Call Music/Video DJ Deck, Auto-Policy, and Call History."""
+
+    VOICE_MODES = ["off", "music", "reject", "vip"]
+    VIDEO_MODES = ["same", "music", "reject", "off"]
+
+    def __init__(self, app_root, **kw):
+        super().__init__(name="calls", **kw)
+        self.root = app_root
+        self.active_calls = []
+        self.selected_call_id = ""
+        self.selected_track = ""
+        self.loop_enabled = True
+        self.tracks = {"audio": [], "video": []}
+        self.voice_mode = "off"
+        self.video_mode = "same"
+
+        scroll = ScrollView(size_hint=(1, 1))
+        content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(12), size_hint_y=None)
+        content.bind(minimum_height=content.setter("height"))
+
+        # ------------------------------------------------ Card 1: Live Call & Music Deck
+        card_live = Factory.Card()
+        card_live.padding = [dp(14), dp(12), dp(14), dp(12)]
+        card_live.spacing = dp(8)
+
+        row_head = BoxLayout(size_hint_y=None, height=dp(26), spacing=dp(8))
+        lbl_live_title = Label(
+            text="Live Call & Music Deck", font_size="14sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle"
+        )
+        lbl_live_title.bind(size=lbl_live_title.setter("text_size"))
+        self.lbl_voip_badge = Label(
+            text="Checking...", font_size="10sp", bold=True,
+            color=get_color_from_hex("#F59E0B"), size_hint_x=None, width=dp(100), halign="right", valign="middle"
+        )
+        self.lbl_voip_badge.bind(size=self.lbl_voip_badge.setter("text_size"))
+        row_head.add_widget(lbl_live_title)
+        row_head.add_widget(self.lbl_voip_badge)
+
+        self.lbl_active_call = Label(
+            text="No active calls right now.", font_size="12sp",
+            color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(36),
+            halign="left", valign="middle"
+        )
+        self.lbl_active_call.bind(size=self.lbl_active_call.setter("text_size"))
+
+        # Call Actions: [Answer] [Decline] [Hangup] [Record]
+        row_call_btns = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+        btn_ans = Factory.PrimaryButton(text="Answer", size_hint=(0.25, 1))
+        btn_ans.font_size = "11sp"
+        btn_ans.bind(on_release=lambda *_: self.root.send("/call_answer", self.selected_call_id))
+
+        btn_dec = Factory.SecondaryButton(text="Decline", size_hint=(0.25, 1))
+        btn_dec.font_size = "11sp"
+        btn_dec.bind(on_release=lambda *_: self.root.send("/call_decline", self.selected_call_id))
+
+        btn_hup = Factory.DangerButton(text="Hangup", size_hint=(0.25, 1))
+        btn_hup.font_size = "11sp"
+        btn_hup.bind(on_release=lambda *_: self.root.send("/call_hangup", self.selected_call_id))
+
+        btn_rec = Factory.SecondaryButton(text="Rec Audio", size_hint=(0.25, 1))
+        btn_rec.font_size = "11sp"
+        btn_rec.bind(on_release=lambda *_: self.root.send("/call_record", self.selected_call_id, 1))
+
+        for b in (btn_ans, btn_dec, btn_hup, btn_rec):
+            row_call_btns.add_widget(b)
+
+        # Selected Track Row
+        row_trk = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+        self.lbl_track = Label(
+            text="Track: hold_chime.wav (Default)", font_size="11sp",
+            color=get_color_from_hex("#CBD5E1"), halign="left", valign="middle"
+        )
+        self.lbl_track.bind(size=self.lbl_track.setter("text_size"))
+        btn_pick_trk = Factory.SecondaryButton(text="Library", size_hint=(None, 1), width=dp(66))
+        btn_pick_trk.font_size = "11sp"
+        btn_pick_trk.bind(on_release=self.open_track_picker)
+
+        btn_add_trk = Factory.SecondaryButton(text="+ File", size_hint=(None, 1), width=dp(62))
+        btn_add_trk.font_size = "11sp"
+        btn_add_trk.bind(on_release=self.browse_media_file)
+
+        row_trk.add_widget(self.lbl_track)
+        row_trk.add_widget(btn_pick_trk)
+        row_trk.add_widget(btn_add_trk)
+
+        # Audio / Video Streaming Transport Controls
+        row_player = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+        btn_play = Factory.PrimaryButton(text=f"{ICON_PLAY} Play", size_hint=(0.24, 1))
+        btn_play.font_size = "11sp"
+        btn_play.bind(on_release=lambda *_: self.play_selected_audio())
+
+        btn_pause = Factory.SecondaryButton(text=f"{ICON_PAUSE}", size_hint=(0.15, 1))
+        btn_pause.font_size = "11sp"
+        btn_pause.bind(on_release=lambda *_: self.root.send("/call_pause", self.selected_call_id))
+
+        btn_resume = Factory.SecondaryButton(text="Resume", size_hint=(0.21, 1))
+        btn_resume.font_size = "11sp"
+        btn_resume.bind(on_release=lambda *_: self.root.send("/call_resume", self.selected_call_id))
+
+        btn_stop_a = Factory.DangerButton(text=f"{ICON_STOP}", size_hint=(0.15, 1))
+        btn_stop_a.font_size = "11sp"
+        btn_stop_a.bind(on_release=lambda *_: self.root.send("/call_stop_audio", self.selected_call_id))
+
+        self.btn_loop = SwitchBtn(text="Loop", is_active=True, size_hint=(0.25, 1))
+        self.btn_loop.font_size = "11sp"
+        self.btn_loop.bind(on_release=self.toggle_loop)
+
+        for b in (btn_play, btn_pause, btn_resume, btn_stop_a, self.btn_loop):
+            row_player.add_widget(b)
+
+        card_live.add_widget(row_head)
+        card_live.add_widget(self.lbl_active_call)
+        card_live.add_widget(row_call_btns)
+        card_live.add_widget(row_trk)
+        card_live.add_widget(row_player)
+
+        # ------------------------------------------------ Card 2: Place Voice / Video Call
+        card_dial = Factory.Card()
+        card_dial.padding = [dp(14), dp(12), dp(14), dp(12)]
+        card_dial.spacing = dp(8)
+
+        lbl_dial = Label(
+            text="Place Voice or Video Call", font_size="14sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(24), halign="left"
+        )
+        lbl_dial.bind(size=lbl_dial.setter("text_size"))
+
+        self.input_call_target = Factory.ModernInput()
+        self.input_call_target.hint_text = "Phone number with country code (e.g. 9198xxxxxxxx)"
+
+        row_dial_btns = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
+        btn_vcall_audio = Factory.PrimaryButton(text="Voice Call", size_hint=(0.5, 1))
+        btn_vcall_audio.font_size = "12sp"
+        btn_vcall_audio.bind(on_release=lambda *_: self.dial_call(is_video=False))
+
+        btn_vcall_video = Factory.SecondaryButton(text="Video Call", size_hint=(0.5, 1))
+        btn_vcall_video.font_size = "12sp"
+        btn_vcall_video.bind(on_release=lambda *_: self.dial_call(is_video=True))
+
+        row_dial_btns.add_widget(btn_vcall_audio)
+        row_dial_btns.add_widget(btn_vcall_video)
+
+        lbl_dial_hint = Label(
+            text="Tip: Use !call dial <num> <song> or !call vcall <num> <clip> in WhatsApp chat.",
+            font_size="10sp", color=get_color_from_hex("#64748B"),
+            size_hint_y=None, height=dp(18), halign="left", valign="middle"
+        )
+        lbl_dial_hint.bind(size=lbl_dial_hint.setter("text_size"))
+
+        card_dial.add_widget(lbl_dial)
+        card_dial.add_widget(self.input_call_target)
+        card_dial.add_widget(row_dial_btns)
+        card_dial.add_widget(lbl_dial_hint)
+
+        # ------------------------------------------------ Card 3: Call Guard & Auto-Music Policy
+        card_policy = Factory.Card()
+        card_policy.padding = [dp(14), dp(12), dp(14), dp(12)]
+        card_policy.spacing = dp(8)
+
+        lbl_pol = Label(
+            text="Call Guard & Auto-Music Rules", font_size="14sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(24), halign="left"
+        )
+        lbl_pol.bind(size=lbl_pol.setter("text_size"))
+
+        row_vm = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        lbl_vm = Label(text="Incoming Voice Calls:", font_size="12sp", color=get_color_from_hex("#CBD5E1"), halign="left", valign="middle")
+        lbl_vm.bind(size=lbl_vm.setter("text_size"))
+        self.btn_vmode = Factory.SecondaryButton(text="Mode: off", size_hint=(None, 1), width=dp(120))
+        self.btn_vmode.font_size = "11sp"
+        self.btn_vmode.bind(on_release=self.cycle_voice_mode)
+        row_vm.add_widget(lbl_vm)
+        row_vm.add_widget(self.btn_vmode)
+
+        row_vidm = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        lbl_vidm = Label(text="Incoming Video Calls:", font_size="12sp", color=get_color_from_hex("#CBD5E1"), halign="left", valign="middle")
+        lbl_vidm.bind(size=lbl_vidm.setter("text_size"))
+        self.btn_vidmode = Factory.SecondaryButton(text="Video: same", size_hint=(None, 1), width=dp(120))
+        self.btn_vidmode.font_size = "11sp"
+        self.btn_vidmode.bind(on_release=self.cycle_video_mode)
+        row_vidm.add_widget(lbl_vidm)
+        row_vidm.add_widget(self.btn_vidmode)
+
+        self.lbl_music_dir = Label(
+            text=f"Music Folder: {call_media.call_music_dir()}",
+            font_size="10sp", color=get_color_from_hex("#64748B"),
+            size_hint_y=None, height=dp(26), halign="left", valign="middle"
+        )
+        self.lbl_music_dir.bind(size=self.lbl_music_dir.setter("text_size"))
+
+        card_policy.add_widget(lbl_pol)
+        card_policy.add_widget(row_vm)
+        card_policy.add_widget(row_vidm)
+        card_policy.add_widget(self.lbl_music_dir)
+
+        # ------------------------------------------------ Card 4: Recent Call History
+        card_hist = Factory.Card()
+        card_hist.padding = [dp(14), dp(12), dp(14), dp(12)]
+        card_hist.spacing = dp(8)
+
+        row_hh = BoxLayout(size_hint_y=None, height=dp(30), spacing=dp(8))
+        lbl_ht = Label(text="Recent Call Log", font_size="14sp", bold=True, color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle")
+        lbl_ht.bind(size=lbl_ht.setter("text_size"))
+        btn_href = Factory.SecondaryButton(text=ICON_REFRESH, size_hint=(None, 1), width=dp(36))
+        btn_href.font_size = "12sp"
+        btn_href.bind(on_release=lambda *_: self.root.send("/call_refresh"))
+        btn_hclr = Factory.DangerButton(text="Clear", size_hint=(None, 1), width=dp(58))
+        btn_hclr.font_size = "11sp"
+        btn_hclr.bind(on_release=lambda *_: self.root.send("/call_clear_history"))
+        row_hh.add_widget(lbl_ht)
+        row_hh.add_widget(btn_href)
+        row_hh.add_widget(btn_hclr)
+
+        self.hist_box = BoxLayout(orientation="vertical", spacing=dp(4), size_hint_y=None)
+        self.hist_box.bind(minimum_height=self.hist_box.setter("height"))
+        self.hist_box.add_widget(Label(
+            text="No calls recorded yet.", font_size="11sp",
+            color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(26)
+        ))
+
+        card_hist.add_widget(row_hh)
+        card_hist.add_widget(self.hist_box)
+
+        content.add_widget(card_live)
+        content.add_widget(card_dial)
+        content.add_widget(card_policy)
+        content.add_widget(card_hist)
+        scroll.add_widget(content)
+        self.add_widget(scroll)
+
+        self._load_policy_from_disk()
+
+    def _policy_path(self) -> str:
+        return os.path.join(plugin_data_dir("callmusic"), "config.json")
+
+    def _load_policy_from_disk(self):
+        try:
+            p = self._policy_path()
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                self.voice_mode = str(cfg.get("mode") or "off")
+                self.video_mode = str(cfg.get("video_mode") or "same")
+                self.loop_enabled = bool(cfg.get("loop", True))
+                self.btn_loop.is_active = self.loop_enabled
+                self.btn_loop.text = "Loop ON" if self.loop_enabled else "Loop OFF"
+                if cfg.get("default_track"):
+                    self.selected_track = str(cfg["default_track"])
+                    self.lbl_track.text = f"Track: {os.path.basename(self.selected_track)}"
+        except Exception:
+            pass
+        self._refresh_policy_labels()
+
+    def _save_policy_to_disk(self):
+        try:
+            p = self._policy_path()
+            cfg = {}
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+            cfg["mode"] = self.voice_mode
+            cfg["video_mode"] = self.video_mode
+            cfg["loop"] = self.loop_enabled
+            if self.selected_track:
+                cfg["default_track"] = self.selected_track
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+            self.root.send("/reload")
+        except Exception as e:
+            self.root.on_log(f"Call policy save failed: {e}")
+
+    def _refresh_policy_labels(self):
+        self.btn_vmode.text = f"Mode: {self.voice_mode}"
+        self.btn_vidmode.text = f"Video: {self.video_mode}"
+
+    def cycle_voice_mode(self, *_):
+        idx = (self.VOICE_MODES.index(self.voice_mode) + 1) % len(self.VOICE_MODES) if self.voice_mode in self.VOICE_MODES else 0
+        self.voice_mode = self.VOICE_MODES[idx]
+        self._refresh_policy_labels()
+        self._save_policy_to_disk()
+
+    def cycle_video_mode(self, *_):
+        idx = (self.VIDEO_MODES.index(self.video_mode) + 1) % len(self.VIDEO_MODES) if self.video_mode in self.VIDEO_MODES else 0
+        self.video_mode = self.VIDEO_MODES[idx]
+        self._refresh_policy_labels()
+        self._save_policy_to_disk()
+
+    def toggle_loop(self, *_):
+        self.loop_enabled = not self.loop_enabled
+        self.btn_loop.is_active = self.loop_enabled
+        self.btn_loop.text = "Loop ON" if self.loop_enabled else "Loop OFF"
+        self._save_policy_to_disk()
+
+    def play_selected_audio(self):
+        lp = 1 if self.loop_enabled else 0
+        if self.selected_track.lower().endswith((".mp4", ".h264", ".mkv")):
+            self.root.send("/call_play_video", self.selected_call_id, self.selected_track, 15, lp)
+        else:
+            self.root.send("/call_play", self.selected_call_id, self.selected_track, lp)
+
+    def dial_call(self, is_video=False):
+        tgt = self.input_call_target.text.strip()
+        if not tgt:
+            InfoDialog("Target Required", "Enter a WhatsApp phone number with country code.").open()
+            return
+        self.root.send("/call_place", tgt, 1 if is_video else 0)
+        self.root.on_log(f"Dialing {tgt} ({'Video' if is_video else 'Voice'})...")
+
+    def open_track_picker(self, *_):
+        self.tracks = call_media.list_media_tracks()
+        items = self.tracks.get("audio", []) + self.tracks.get("video", [])
+        modal = ModalView(size_hint=(0.92, 0.72), auto_dismiss=True)
+        card = Factory.DialogCard()
+        card.padding = dp(12)
+        card.spacing = dp(8)
+        card.add_widget(Label(
+            text=f"Select Call Music / Video ({len(items)} files)",
+            font_size="14sp", bold=True, color=get_color_from_hex("#F8FAFC"),
+            size_hint_y=None, height=dp(26)
+        ))
+        sc = ScrollView(size_hint=(1, 1))
+        box = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None)
+        box.bind(minimum_height=box.setter("height"))
+        if not items:
+            box.add_widget(Label(text="No media files found.", color=get_color_from_hex("#94A3B8"), size_hint_y=None, height=dp(40)))
+        for p in items:
+            tag = "[Video]" if p.lower().endswith((".mp4", ".h264", ".mkv")) else "[Audio]"
+            b = Factory.SecondaryButton(text=f"{tag} {os.path.basename(p)}", size_hint_y=None, height=dp(36))
+            b.font_size = "11sp"
+            def _choose(_, path=p):
+                self.selected_track = path
+                self.lbl_track.text = f"Track: {os.path.basename(path)}"
+                self._save_policy_to_disk()
+                modal.dismiss()
+            b.bind(on_release=_choose)
+            box.add_widget(b)
+        sc.add_widget(box)
+        card.add_widget(sc)
+        btn_close = Factory.SecondaryButton(text="Close", size_hint_y=None, height=dp(36))
+        btn_close.bind(on_release=lambda *_: modal.dismiss())
+        card.add_widget(btn_close)
+        modal.add_widget(card)
+        modal.open()
+
+    def browse_media_file(self, *_):
+        if platform != "android":
+            self.open_track_picker()
+            return
+        try:
+            from jnius import autoclass
+            from android.activity import bind as android_bind, unbind as android_unbind
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            Intent = autoclass("android.content.Intent")
+            intent = Intent(Intent.ACTION_GET_CONTENT)
+            intent.setType("*/*")
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            REQ_MEDIA = 8809
+
+            def _on_res(req, res, data_intent):
+                if req == REQ_MEDIA:
+                    try:
+                        android_unbind(on_activity_result=_on_res)
+                    except Exception:
+                        pass
+                    if res == -1 and data_intent is not None:
+                        try:
+                            uri = data_intent.getData()
+                            if uri:
+                                saved = copy_content_uri_to_folder(activity, uri, call_media.call_music_dir(), fallback_name="call_track.mp3")
+                                def _apply(dt):
+                                    self.selected_track = saved
+                                    self.lbl_track.text = f"Track: {os.path.basename(saved)}"
+                                    self._save_policy_to_disk()
+                                    self.root.send("/call_refresh")
+                                Clock.schedule_once(_apply, 0)
+                        except Exception as e:
+                            Clock.schedule_once(lambda dt, err=e: InfoDialog("Import Failed", str(err)).open(), 0)
+
+            android_bind(on_activity_result=_on_res)
+            activity.startActivityForResult(intent, REQ_MEDIA)
+        except Exception as e:
+            self.root.on_log(f"Media browse fallback: {e}")
+            self.open_track_picker()
+
+    def on_call_event(self, payload_str: str):
+        try:
+            data = json.loads(payload_str)
+        except Exception:
+            return
+        if "supported" in data:
+            ok = bool(data["supported"])
+            self.lbl_voip_badge.text = "VoIP Ready" if ok else "Build .so Needed"
+            self.lbl_voip_badge.color = get_color_from_hex("#10B981" if ok else "#EF4444")
+
+        calls = data.get("active_calls")
+        if isinstance(calls, list):
+            self.active_calls = calls
+            if calls:
+                c = calls[-1]
+                self.selected_call_id = str(c.get("call_id") or "")
+                kind = "Video" if c.get("is_video") else "Voice"
+                trk = c.get("audio_path") or "Idle"
+                self.lbl_active_call.text = (
+                    f"{kind} Call ({c.get('direction', '').upper()}) • {c.get('peer_number') or c.get('peer')}\n"
+                    f"Phase: {c.get('phase')}  |  Audio: {trk}"
+                )
+                self.lbl_active_call.color = get_color_from_hex("#10B981")
+            else:
+                self.selected_call_id = ""
+                self.lbl_active_call.text = "No active calls right now."
+                self.lbl_active_call.color = get_color_from_hex("#94A3B8")
+
+        if data.get("event") in ("end", "incoming", "outgoing"):
+            self.root.send("/call_refresh")
+
+    def on_call_history(self, payload_str: str):
+        try:
+            rows = json.loads(payload_str)
+        except Exception:
+            return
+        self.hist_box.clear_widgets()
+        if not rows:
+            self.hist_box.add_widget(Label(
+                text="No calls recorded yet.", font_size="11sp",
+                color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(26)
+            ))
+            return
+        for r in rows[:15]:
+            kind = "Video" if r.get("is_video") else "Voice"
+            arrow = "IN" if r.get("direction") == "in" else "OUT"
+            ts_str = time.strftime("%d/%m %H:%M", time.localtime(r.get("started_at") or 0))
+            trk = f" | {r['track_played']}" if r.get("track_played") else ""
+            txt = f"[{arrow} {kind}] {r.get('peer_number') or r.get('peer')} • {r.get('status')} ({ts_str}){trk}"
+            lbl = Label(
+                text=txt, font_size="11sp", color=get_color_from_hex("#CBD5E1"),
+                size_hint_y=None, height=dp(22), halign="left", valign="middle"
+            )
+            lbl.bind(size=lbl.setter("text_size"))
+            self.hist_box.add_widget(lbl)
+
+    def on_call_tracks(self, payload_str: str):
+        try:
+            data = json.loads(payload_str)
+            if isinstance(data, dict):
+                self.tracks = data
+        except Exception:
+            pass
+
+
 class QuickSendScreen(Screen):
     """Direct message dispatch to test bot delivery and anti-spam pacing."""
 
@@ -1935,6 +2407,75 @@ class ConsoleScreen(Screen):
         if self.auto_scroll:
             self.current_page = self.total_pages()
         self.render_page()
+
+
+def copy_content_uri_to_folder(activity, uri, dest_dir: str, fallback_name: str = "imported_file") -> str:
+    """Stream bytes from a content:// URI into dest_dir using ParcelFileDescriptor or FileUtils."""
+    from jnius import autoclass
+    cr = activity.getContentResolver()
+
+    filename = fallback_name
+    try:
+        OpenableColumns = autoclass("android.provider.OpenableColumns")
+        cursor = cr.query(uri, None, None, None, None)
+        if cursor and cursor.moveToFirst():
+            name_idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if name_idx >= 0:
+                val = cursor.getString(name_idx)
+                if val:
+                    filename = str(val)
+            cursor.close()
+    except Exception:
+        pass
+
+    if "." not in filename:
+        try:
+            last_seg = uri.getLastPathSegment()
+            if last_seg and "." in last_seg:
+                filename = last_seg.split("/")[-1]
+        except Exception:
+            pass
+
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, os.path.basename(filename))
+
+    copied = False
+    try:
+        pfd = cr.openFileDescriptor(uri, "r")
+        if pfd:
+            fd = pfd.getFd()
+            with open(fd, "rb", closefd=False) as src_f, open(dest, "wb") as dst_f:
+                shutil.copyfileobj(src_f, dst_f, length=65536)
+            pfd.close()
+            if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                copied = True
+    except Exception:
+        copied = False
+
+    if not copied:
+        try:
+            FileUtils = autoclass("android.os.FileUtils")
+            FileOutputStream = autoclass("java.io.FileOutputStream")
+            in_stream = cr.openInputStream(uri)
+            out_stream = FileOutputStream(dest)
+            FileUtils.copy(in_stream, out_stream)
+            try:
+                in_stream.close()
+            except Exception:
+                pass
+            try:
+                out_stream.close()
+            except Exception:
+                pass
+            if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                copied = True
+        except Exception:
+            copied = False
+
+    if not os.path.exists(dest) or os.path.getsize(dest) == 0:
+        raise RuntimeError("Selected file could not be read or is empty (0 bytes).")
+
+    return dest
 
 
 class SettingsScreen(Screen):
@@ -2275,76 +2816,8 @@ class SettingsScreen(Screen):
             self.open_kivy_file_chooser()
 
     def copy_content_uri_to_private(self, activity, uri) -> str:
-        """Stream bytes from content:// URI into private storage using native file descriptor."""
-        from jnius import autoclass
-        cr = activity.getContentResolver()
-
-        # 1. Resolve filename safely
-        filename = "imported_session_backup"
-        try:
-            OpenableColumns = autoclass("android.provider.OpenableColumns")
-            cursor = cr.query(uri, None, None, None, None)
-            if cursor and cursor.moveToFirst():
-                name_idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if name_idx >= 0:
-                    val = cursor.getString(name_idx)
-                    if val:
-                        filename = str(val)
-                cursor.close()
-        except Exception:
-            pass
-
-        if "." not in filename:
-            try:
-                last_seg = uri.getLastPathSegment()
-                if last_seg and "." in last_seg:
-                    filename = last_seg.split("/")[-1]
-            except Exception:
-                pass
-
-        dest = os.path.join(private_dir(), filename)
-
-        # 2. Kernel-level direct copy via ParcelFileDescriptor (fastest & 100% reliable)
-        copied = False
-        try:
-            pfd = cr.openFileDescriptor(uri, "r")
-            if pfd:
-                fd = pfd.getFd()
-                with open(fd, "rb", closefd=False) as src_f, open(dest, "wb") as dst_f:
-                    shutil.copyfileobj(src_f, dst_f, length=65536)
-                pfd.close()
-                if os.path.exists(dest) and os.path.getsize(dest) > 0:
-                    copied = True
-        except Exception as e:
-            self.root.on_log(f"pfd copy note: {e}")
-            copied = False
-
-        # 3. Native Android OS stream copy via android.os.FileUtils (Android 10+ / API 29+)
-        if not copied:
-            try:
-                FileUtils = autoclass("android.os.FileUtils")
-                FileOutputStream = autoclass("java.io.FileOutputStream")
-                in_stream = cr.openInputStream(uri)
-                out_stream = FileOutputStream(dest)
-                FileUtils.copy(in_stream, out_stream)
-                try:
-                    in_stream.close()
-                except Exception:
-                    pass
-                try:
-                    out_stream.close()
-                except Exception:
-                    pass
-                if os.path.exists(dest) and os.path.getsize(dest) > 0:
-                    copied = True
-            except Exception as e:
-                self.root.on_log(f"FileUtils copy note: {e}")
-                copied = False
-
-        if not os.path.exists(dest) or os.path.getsize(dest) == 0:
-            raise RuntimeError("Selected file could not be read or is empty (0 bytes).")
-
-        return dest
+        """Stream bytes from content:// URI into private storage using shared native copier."""
+        return copy_content_uri_to_folder(activity, uri, private_dir(), fallback_name="imported_session_backup")
 
     def apply_restored_file(self, local_path):
         """Perform restore with chosen local file."""
@@ -2477,12 +2950,14 @@ class Root(BoxLayout):
             self.sm = ScreenManager(transition=FadeTransition(duration=0.15))
             self.screen_connect = ConnectScreen(self)
             self.screen_plugins = PluginsScreen(self)
+            self.screen_calls = CallsScreen(self)
             self.screen_send = QuickSendScreen(self)
             self.screen_console = ConsoleScreen(self)
             self.screen_settings = SettingsScreen(self)
 
             self.sm.add_widget(self.screen_connect)
             self.sm.add_widget(self.screen_plugins)
+            self.sm.add_widget(self.screen_calls)
             self.sm.add_widget(self.screen_send)
             self.sm.add_widget(self.screen_console)
             self.sm.add_widget(self.screen_settings)
@@ -2513,6 +2988,9 @@ class Root(BoxLayout):
             self.server.bind(b"/plugins", ui(self.on_plugins))
             self.server.bind(b"/log", ui(self.on_log))
             self.server.bind(b"/qr", ui(self.on_qr))
+            self.server.bind(b"/call_event", ui(self.on_call_event))
+            self.server.bind(b"/call_history", ui(self.on_call_history))
+            self.server.bind(b"/call_tracks", ui(self.on_call_tracks))
 
             Clock.schedule_once(lambda dt: self.send("/hello"), 1.2)
         except Exception as e:
@@ -2527,6 +3005,7 @@ class Root(BoxLayout):
         if self.is_connected:
             tab_defs = [
                 ("plugins", "Plugins"),
+                ("calls", "Calls"),
                 ("send", "Send"),
                 ("console", "Console"),
                 ("settings", "Settings"),
@@ -2536,6 +3015,7 @@ class Root(BoxLayout):
             tab_defs = [
                 ("connect", "Connect"),
                 ("plugins", "Plugins"),
+                ("calls", "Calls"),
                 ("send", "Send"),
                 ("console", "Console"),
                 ("settings", "Settings"),
@@ -2618,6 +3098,18 @@ class Root(BoxLayout):
     def on_qr(self, *data):
         d = data[0] if data else ""
         self.screen_connect.set_qr(str(d))
+
+    def on_call_event(self, *data):
+        d = data[0] if data else "{}"
+        self.screen_calls.on_call_event(str(d))
+
+    def on_call_history(self, *data):
+        d = data[0] if data else "[]"
+        self.screen_calls.on_call_history(str(d))
+
+    def on_call_tracks(self, *data):
+        d = data[0] if data else "{}"
+        self.screen_calls.on_call_tracks(str(d))
 
     def send(self, addr, *vals):
         try:
