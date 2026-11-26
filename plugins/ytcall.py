@@ -20,6 +20,7 @@ Commands (prefix !yt or !ytcall):
   !yt pause / resume / stop / hangup Quick call & playback controls
   !yt status / clearcache            Status & cache management
   !yt loop <on|off>                  Loop single-track playback (default OFF)
+  !yt quality <hq|fast>              Audio bitrate mode (hq=130kbps, fast=~50kbps)
   !yt maxmins <N>                    Max video duration in minutes (default 20, 0=off)
   !yt public <on|off>                Allow non-owners to queue/play YT tracks
 """
@@ -58,9 +59,18 @@ _yt_client = None
 _PENDING_PLAY: Dict[str, dict] = {}
 _YT_QUEUES: Dict[str, List[dict]] = {}
 _LAST_SEARCH: Dict[str, List[dict]] = {}
+_BG_TASKS: set = set()
 _CACHE_LOCK = threading.Lock()
 _DL_LOCKS: Dict[str, threading.Lock] = {}
 _DL_LOCKS_GUARD = threading.Lock()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """Run coroutine outside PluginSupervisor's 20s handler timeout window."""
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
 
 
 def _vid_lock(vid: str) -> threading.Lock:
@@ -348,7 +358,7 @@ def _parse_duration_str(txt: str) -> int:
 class _HttpSession:
     """HTTP helper preferring requests+certifi (connection pooled), falling back to urllib+certifi."""
 
-    def __init__(self, timeout: float = 15.0):
+    def __init__(self, timeout: float = 20.0):
         self.timeout = timeout
         self._ssl_ctx = _ssl_context()
         self._local = threading.local()
@@ -361,6 +371,10 @@ class _HttpSession:
         except Exception:
             self._has_requests = False
 
+    def _req_timeout(self, timeout: Optional[float]):
+        read_t = float(timeout or self.timeout)
+        return (min(6.0, read_t), read_t)
+
     def _req_sess(self):
         s = getattr(self._local, "rs", None)
         if s is None:
@@ -371,25 +385,32 @@ class _HttpSession:
 
     def post_json(self, url: str, body: dict, headers: Dict[str, str], timeout: Optional[float] = None) -> dict:
         hdrs = {"Content-Type": "application/json", **headers}
-        t = timeout or self.timeout
         if self._has_requests:
-            resp = self._req_sess().post(url, json=body, headers=hdrs, timeout=t)
+            resp = self._req_sess().post(url, json=body, headers=hdrs, timeout=self._req_timeout(timeout))
             resp.raise_for_status()
             return resp.json()
+        t = float(timeout or self.timeout)
         req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=hdrs, method="POST")
         with self._opener.open(req, timeout=t) as r:
             return json.loads(r.read().decode("utf-8", "replace"))
 
     def get_bytes(self, url: str, headers: Dict[str, str], timeout: Optional[float] = None) -> Tuple[int, bytes, Optional[str]]:
-        t = timeout or self.timeout
         if self._has_requests:
-            resp = self._req_sess().get(url, headers=headers, timeout=t)
-            status = resp.status_code
-            if status in (400, 401, 403, 404, 410, 416):
-                return status, b"", resp.headers.get("Content-Range")
-            if status >= 400:
-                raise urllib.error.HTTPError(url, status, resp.reason or "", resp.headers, None)
-            return status, resp.content, resp.headers.get("Content-Range")
+            with self._req_sess().get(
+                url, headers=headers, timeout=self._req_timeout(timeout), stream=True
+            ) as resp:
+                status = resp.status_code
+                cr = resp.headers.get("Content-Range")
+                if status in (400, 401, 403, 404, 410, 416):
+                    return status, b"", cr
+                if status >= 400:
+                    raise urllib.error.HTTPError(url, status, resp.reason or "", resp.headers, None)
+                buf = bytearray()
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if chunk:
+                        buf.extend(chunk)
+                return status, bytes(buf), cr
+        t = float(timeout or self.timeout)
         req = urllib.request.Request(url, headers=headers)
         try:
             with self._opener.open(req, timeout=t) as r:
@@ -400,7 +421,7 @@ class _HttpSession:
             raise
 
     def probe(self, url: str, headers: Dict[str, str], byte_range: str, timeout: Optional[float] = None) -> int:
-        status, _, _ = self.get_bytes(url, {**headers, "Range": f"bytes={byte_range}"}, timeout=timeout)
+        status, _, _ = self.get_bytes(url, {**headers, "Range": f"bytes={byte_range}"}, timeout=timeout or 8.0)
         return status
 
 
@@ -434,6 +455,7 @@ class _VisitorCache:
                 _VISITOR_URL,
                 {"context": {"client": _WEB_VISITOR_CONTEXT}},
                 {"User-Agent": _CHROME_UA},
+                timeout=6.0,
             )
             val = (data.get("responseContext") or {}).get("visitorData")
             if val:
@@ -768,6 +790,11 @@ class _YTClient:
 
                 stream = info.select(selector, max_kbps)
                 if stream is None:
+                    if selector.startswith("best"):
+                        raise YTError(
+                            "No muxed MP4 stream available for this video (YouTube served adaptive-only streams). "
+                            "Use `!yt playcall` or `!yt dial` to stream its audio!"
+                        )
                     have = ", ".join(f"{s.itag}({s.ext})" for s in info.streams) or "none"
                     raise YTError(f"No matching format `{selector}` (available: {have})")
 
@@ -1023,8 +1050,39 @@ async def setup(ctx):
 
 
 async def teardown(ctx):
+    for t in list(_BG_TASKS):
+        t.cancel()
+    _BG_TASKS.clear()
     _PENDING_PLAY.clear()
     _YT_QUEUES.clear()
+
+
+async def _advance_queue(ctx, cid: str):
+    q = _YT_QUEUES.get(cid)
+    while q:
+        nxt = q.pop(0)
+        ev_ready = nxt.get("ready_event")
+        if ev_ready and not ev_ready.is_set():
+            await ev_ready.wait()
+        if cid not in ctx.calls._active:
+            return
+        if nxt.get("error"):
+            if nxt.get("notify_chat"):
+                await ctx.send(
+                    nxt["notify_chat"],
+                    f"⚠️ Skipped failed queued track `{nxt.get('query')}`: {nxt['error']}",
+                )
+            continue
+        res = await ctx.play_call_audio(cid, nxt["path"], loop=False)
+        if res.get("ok"):
+            if nxt.get("notify_chat"):
+                await ctx.send(
+                    nxt["notify_chat"],
+                    f"⏭️ *Now Playing from YT Queue:* {nxt['title']} (`{_fmt_dur(nxt['duration'])}`)",
+                )
+            return
+        if nxt.get("notify_chat"):
+            await ctx.send(nxt["notify_chat"], f"⚠️ Next track playback error: {res.get('error')}")
 
 
 async def on_call(ctx, call_ev):
@@ -1035,56 +1093,35 @@ async def on_call(ctx, call_ev):
         spec = _PENDING_PLAY.pop(cid, None)
         if not spec:
             return
-        kind = spec.get("kind", "audio")
-        path = spec.get("path", "")
-        title = spec.get("title", "YouTube Track")
-        loop = bool(spec.get("loop", _cfg.get("loop", False)))
-        notify = spec.get("notify_chat")
 
-        if kind == "video":
-            res = await ctx.play_call_video(cid, path, fps=15, loop=loop, with_audio=True)
-        else:
-            res = await ctx.play_call_audio(cid, path, loop=loop)
-
-        if notify:
-            if res.get("ok"):
-                await ctx.send(
-                    notify,
-                    f"📺 *YouTube {'Video' if kind == 'video' else 'Audio'} Live!*\n"
-                    f"▶️ *Title:* {title}\n"
-                    f"⏱️ *Length:* `{_fmt_dur(spec.get('duration', 0))}` • "
-                    f"🔁 *Loop:* `{'ON' if loop else 'OFF'}`\n"
-                    f"Controls: `!yt skip` | `!yt queue <song>` | `!yt stop` | `!yt hangup`"
-                )
+        async def _start_ready():
+            kind = spec.get("kind", "audio")
+            path = spec.get("path", "")
+            title = spec.get("title", "YouTube Track")
+            loop = bool(spec.get("loop", _cfg.get("loop", False)))
+            notify = spec.get("notify_chat")
+            if kind == "video":
+                res = await ctx.play_call_video(cid, path, fps=15, loop=loop, with_audio=True)
             else:
-                await ctx.send(notify, f"⚠️ Call connected, but YT playback failed: {res.get('error')}")
+                res = await ctx.play_call_audio(cid, path, loop=loop)
+            if notify:
+                if res.get("ok"):
+                    await ctx.send(
+                        notify,
+                        f"📺 *YouTube {'Video' if kind == 'video' else 'Audio'} Live!*\n"
+                        f"▶️ *Title:* {title}\n"
+                        f"⏱️ *Length:* `{_fmt_dur(spec.get('duration', 0))}` • "
+                        f"🔁 *Loop:* `{'ON' if loop else 'OFF'}`\n"
+                        f"Controls: `!yt skip` | `!yt queue <song>` | `!yt stop` | `!yt hangup`"
+                    )
+                else:
+                    await ctx.send(notify, f"⚠️ Call connected, but YT playback failed: {res.get('error')}")
+
+        _spawn(_start_ready())
 
     elif ev == "audio_finish":
-        q = _YT_QUEUES.get(cid)
-        while q:
-            nxt = q.pop(0)
-            ev_ready = nxt.get("ready_event")
-            if ev_ready and not ev_ready.is_set():
-                await ev_ready.wait()
-            if cid not in ctx.calls._active:
-                return
-            if nxt.get("error"):
-                if nxt.get("notify_chat"):
-                    await ctx.send(
-                        nxt["notify_chat"],
-                        f"⚠️ Skipped failed queued track `{nxt.get('query')}`: {nxt['error']}",
-                    )
-                continue
-            res = await ctx.play_call_audio(cid, nxt["path"], loop=False)
-            if res.get("ok"):
-                if nxt.get("notify_chat"):
-                    await ctx.send(
-                        nxt["notify_chat"],
-                        f"⏭️ *Now Playing from YT Queue:* {nxt['title']} (`{_fmt_dur(nxt['duration'])}`)",
-                    )
-                return
-            if nxt.get("notify_chat"):
-                await ctx.send(nxt["notify_chat"], f"⚠️ Next track playback error: {res.get('error')}")
+        if _YT_QUEUES.get(cid):
+            _spawn(_advance_queue(ctx, cid))
 
     elif ev == "end":
         _PENDING_PLAY.pop(cid, None)
@@ -1113,10 +1150,9 @@ async def on_message(ctx, msg):
     known_cmds = {
         "", "help", "search", "s", "info", "play", "dial", "playcall", "vcall",
         "queue", "q", "skip", "pause", "resume", "stop", "hangup", "save",
-        "status", "clearcache", "loop", "maxmins", "public",
+        "status", "clearcache", "loop", "quality", "maxmins", "public",
     }
     if cmd not in known_cmds:
-        # Shorthand: `!yt <url|query|#N>` -> auto-play if in a call, else search/inspect
         rest = raw_arg
         cmd = "__auto__"
 
@@ -1140,7 +1176,8 @@ async def on_message(ctx, msg):
             "• `!yt q` | `skip` | `pause` | `resume` | `stop` | `hangup`\n"
             "• `!yt save <url|song|#N>` — Save permanently to `!call tracks`\n\n"
             "*Settings (Owner):*\n"
-            "• `!yt loop <on|off>` | `maxmins <N>` | `public <on|off>` | `status` | `clearcache`"
+            "• `!yt loop <on|off>` | `quality <hq|fast>` | `maxmins <N>`\n"
+            "• `!yt public <on|off>` | `status` | `clearcache`"
         )
 
     if cmd == "status":
@@ -1153,13 +1190,14 @@ async def on_message(ctx, msg):
             ytdlp_ok = "Available ✅"
         except Exception:
             ytdlp_ok = "Not installed (InnerTube active)"
+        q_label = "fast (<=80k)" if int(_cfg.get("max_kbps", 160)) <= 80 else "hq (<=160k)"
         return await ctx.reply(
             msg,
             "📺 *YouTube Call Plugin Status*\n"
             f"• ⚙️ *VoIP Engine:* {'Ready ✅' if ctx.calls.is_supported() else 'Missing .so ❌'}\n"
-            f"• 📡 *Active Calls:* `{len(active)}`\n"
-            f"• 🔁 *Loop:* `{'ON' if _cfg.get('loop') else 'OFF'}` | "
-            f"*Max Audio:* `{_cfg.get('max_minutes')}m` | *Max Video:* `{_cfg.get('video_max_minutes')}m`\n"
+            f"• 📡 *Active Calls:* `{len(active)}` | *Jobs:* `{len(_BG_TASKS)}`\n"
+            f"• 🎛️ *Quality:* `{q_label}` | 🔁 *Loop:* `{'ON' if _cfg.get('loop') else 'OFF'}`\n"
+            f"• ⏱️ *Max Audio:* `{_cfg.get('max_minutes')}m` | *Max Video:* `{_cfg.get('video_max_minutes')}m`\n"
             f"• 💾 *YT Cache:* `{len(cfiles)} files ({cbytes / _MIB:.1f} / {_cfg.get('max_cache_mb')} MB)`\n"
             f"• 🧩 *yt-dlp Fallback:* {ytdlp_ok}"
         )
@@ -1181,62 +1219,78 @@ async def on_message(ctx, msg):
     if cmd in ("search", "s"):
         if not rest:
             return await ctx.reply(msg, "⚠️ Usage: `!yt search <song name>`")
-        try:
-            hits = await asyncio.to_thread(_yt().search, rest, 5)
-        except Exception as e:
-            return await ctx.reply(msg, f"❌ YouTube search failed: {e}")
-        if not hits:
-            return await ctx.reply(msg, f"🔍 No results found for `{rest}`.")
-        _LAST_SEARCH[msg.chat_id] = hits
-        lines = [f"🔍 *YouTube Results for:* `{rest}`"]
-        for i, h in enumerate(hits, 1):
-            lines.append(f"`#{i}` *{h['title']}*\n   👤 {h['author'] or 'YouTube'} • ⏱️ `{h['duration_text']}` • {h['url']}")
-        lines.append("\nReply with `!yt playcall #1`, `!yt dial me #1`, `!yt play #1`, or `!yt queue #1`.")
-        return await ctx.reply(msg, "\n".join(lines))
+
+        async def _job_search():
+            try:
+                hits = await asyncio.to_thread(_yt().search, rest, 5)
+            except Exception as e:
+                return await ctx.reply(msg, f"❌ YouTube search failed: {e}")
+            if not hits:
+                return await ctx.reply(msg, f"🔍 No results found for `{rest}`.")
+            _LAST_SEARCH[msg.chat_id] = hits
+            lines = [f"🔍 *YouTube Results for:* `{rest}`"]
+            for i, h in enumerate(hits, 1):
+                lines.append(f"`#{i}` *{h['title']}*\n   👤 {h['author'] or 'YouTube'} • ⏱️ `{h['duration_text']}` • {h['url']}")
+            lines.append("\nReply with `!yt playcall #1`, `!yt dial me #1`, `!yt play #1`, or `!yt queue #1`.")
+            await ctx.reply(msg, "\n".join(lines))
+
+        _spawn(_job_search())
+        return
 
     if cmd == "info":
         if not rest:
             return await ctx.reply(msg, "⚠️ Usage: `!yt info <url|id|query|#N>`")
-        try:
-            vid, note = await asyncio.to_thread(
-                _resolve_target_ref, msg.chat_id, rest, int(_cfg.get("max_minutes", 20))
+
+        async def _job_info():
+            try:
+                vid, _ = await asyncio.to_thread(
+                    _resolve_target_ref, msg.chat_id, rest, int(_cfg.get("max_minutes", 20))
+                )
+                info = await asyncio.to_thread(_yt().extract, vid, max_kbps=int(_cfg.get("max_kbps", 160)))
+            except Exception as e:
+                return await ctx.reply(msg, f"❌ Could not resolve `{rest}`: {e}")
+            m4a = info.select("m4a/bestaudio", int(_cfg.get("max_kbps", 160)))
+            sz = f" (~{m4a.content_length / _MIB:.1f} MB)" if (m4a and m4a.content_length) else ""
+            fmt_txt = f"{m4a.ext.upper()} {m4a.kbps}kbps{sz}" if m4a else "none"
+            await ctx.reply(
+                msg,
+                f"🎬 *{info.title}*\n"
+                f"👤 *Channel:* {info.author or 'YouTube'}\n"
+                f"⏱️ *Duration:* `{_fmt_dur(info.duration)}` {'(LIVE)' if info.is_live else ''}\n"
+                f"🎵 *Best Audio:* `{fmt_txt}` via `{info.client}`\n"
+                f"🔗 https://youtu.be/{info.video_id}"
             )
-            info = await asyncio.to_thread(_yt().extract, vid, max_kbps=int(_cfg.get("max_kbps", 160)))
-        except Exception as e:
-            return await ctx.reply(msg, f"❌ Could not resolve `{rest}`: {e}")
-        m4a = info.select("m4a/bestaudio", int(_cfg.get("max_kbps", 160)))
-        sz = f" (~{m4a.content_length / _MIB:.1f} MB)" if (m4a and m4a.content_length) else ""
-        fmt_txt = f"{m4a.ext.upper()} {m4a.kbps}kbps{sz}" if m4a else "none"
-        return await ctx.reply(
-            msg,
-            f"🎬 *{info.title}*\n"
-            f"👤 *Channel:* {info.author or 'YouTube'}\n"
-            f"⏱️ *Duration:* `{_fmt_dur(info.duration)}` {'(LIVE)' if info.is_live else ''}\n"
-            f"🎵 *Best Audio:* `{fmt_txt}` via `{info.client}`\n"
-            f"🔗 https://youtu.be/{info.video_id}"
-        )
+
+        _spawn(_job_info())
+        return
 
     if cmd == "save":
         if not rest:
             return await ctx.reply(msg, "⚠️ Usage: `!yt save <url|id|query|#N>`")
         await ctx.reply(msg, f"⏳ Downloading & preparing `{rest}` for CallMusic library...")
-        try:
-            meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, rest, "audio")
-            from core import call_media
-            ok_p, prep = await asyncio.to_thread(call_media.prepare_audio_for_call, meta["path"])
-            if not ok_p:
-                return await ctx.reply(msg, f"❌ Transcode failed: {prep}")
-            ext = os.path.splitext(prep)[1] or ".wav"
-            clean_title = re.sub(r'[\\/:*?"<>|\x00-\x1f\s]+', "_", meta["title"]).strip("._")[:48] or meta["video_id"]
-            dst = os.path.join(call_media.call_music_dir(), f"{clean_title}_[{meta['video_id']}]{ext}")
-            await asyncio.to_thread(shutil.copy2, prep, dst)
-            return await ctx.reply(
-                msg,
-                f"💾 *Saved to CallMusic Library!*\n"
-                f"🎵 `{os.path.basename(dst)}`\nUse `!call tracks` or `!yt play` anytime."
-            )
-        except Exception as e:
-            return await ctx.reply(msg, f"❌ Failed to save track: {e}")
+
+        async def _job_save():
+            try:
+                meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, rest, "audio")
+                from core import call_media
+                ok_p, prep = await asyncio.to_thread(call_media.prepare_audio_for_call, meta["path"])
+                if not ok_p:
+                    return await ctx.reply(msg, f"❌ Transcode failed: {prep}")
+                ext = os.path.splitext(prep)[1] or ".wav"
+                clean_title = re.sub(r'[\\/:*?"<>|\x00-\x1f\s]+', "_", meta["title"]).strip("._")[:48] or meta["video_id"]
+                dst = os.path.join(call_media.call_music_dir(), f"{clean_title}_[{meta['video_id']}]{ext}")
+                await asyncio.to_thread(shutil.copy2, prep, dst)
+                await ctx.reply(
+                    msg,
+                    f"💾 *Saved to CallMusic Library!*\n"
+                    f"🎵 `{os.path.basename(dst)}`\nUse `!call tracks` or `!yt play` anytime."
+                )
+            except Exception as e:
+                log.exception("yt save failed")
+                await ctx.reply(msg, f"❌ Failed to save track: {e}")
+
+        _spawn(_job_save())
+        return
 
     # ---- Outbound Dial + Play (`!yt dial`, `!yt playcall`, `!yt vcall`)
     if cmd in ("dial", "playcall", "vcall"):
@@ -1250,29 +1304,34 @@ async def on_message(ctx, msg):
             msg,
             f"⏳ Fetching & preparing YouTube {'video' if mode == 'video' else 'audio'} (`{song_q}`)..."
         )
-        try:
-            meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, song_q, mode)
-        except Exception as e:
-            return await ctx.reply(msg, f"❌ YouTube prepare failed: {e}")
 
-        await ctx.reply(
-            msg,
-            f"📲 Calling `{_num(target)}` {'(Video Call)' if mode == 'video' else '(Voice Call)'}...\n"
-            f"🎵 *Queued on pickup:* {meta['title']} (`{_fmt_dur(meta['duration'])}`, {meta['size_mb']} MB)"
-        )
-        res = await ctx.call(target, video=(mode == "video"))
-        if not res.get("ok"):
-            return await ctx.reply(msg, f"❌ Failed to place call: {res.get('error')}")
+        async def _job_dial():
+            try:
+                meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, song_q, mode)
+            except Exception as e:
+                log.exception("yt %s prepare failed", cmd)
+                return await ctx.reply(msg, f"❌ YouTube prepare failed: {e}")
 
-        cid = res.get("call_id", "")
-        _PENDING_PLAY[cid] = {
-            "kind": mode,
-            "path": meta["path"],
-            "title": meta["title"],
-            "duration": meta["duration"],
-            "loop": bool(_cfg.get("loop", False)),
-            "notify_chat": msg.chat_id,
-        }
+            await ctx.reply(
+                msg,
+                f"📲 Calling `{_num(target)}` {'(Video Call)' if mode == 'video' else '(Voice Call)'}...\n"
+                f"🎵 *Queued on pickup:* {meta['title']} (`{_fmt_dur(meta['duration'])}`, {meta['size_mb']} MB)"
+            )
+            res = await ctx.call(target, video=(mode == "video"))
+            if not res.get("ok"):
+                return await ctx.reply(msg, f"❌ Failed to place call: {res.get('error')}")
+
+            cid = res.get("call_id", "")
+            _PENDING_PLAY[cid] = {
+                "kind": mode,
+                "path": meta["path"],
+                "title": meta["title"],
+                "duration": meta["duration"],
+                "loop": bool(_cfg.get("loop", False)),
+                "notify_chat": msg.chat_id,
+            }
+
+        _spawn(_job_dial())
         return
 
     # ---- Active Call Playback & Controls
@@ -1280,30 +1339,34 @@ async def on_message(ctx, msg):
 
     if cmd == "__auto__":
         if not active_cid:
-            # Outside a call -> search top 5 and give direct call shortcuts
-            try:
-                if _is_yt_ref(rest):
-                    vid = _extract_video_id(rest)
-                    info = await asyncio.to_thread(_yt().extract, vid, max_kbps=int(_cfg.get("max_kbps", 160)))
-                    return await ctx.reply(
-                        msg,
-                        f"🎵 *{info.title}* (`{_fmt_dur(info.duration)}`)\n"
-                        f"No active call right now.\n"
-                        f"• `!yt playcall {vid}` — Call this chat & play\n"
-                        f"• `!yt dial me {vid}` — Call yourself & play"
-                    )
-                hits = await asyncio.to_thread(_yt().search, rest, 5)
-                if not hits:
-                    return await ctx.reply(msg, f"🔍 No results found for `{rest}`.")
-                _LAST_SEARCH[msg.chat_id] = hits
-                lines = [f"🔍 *YouTube Results for `{rest}`* (no active call):"]
-                for i, h in enumerate(hits, 1):
-                    lines.append(f"`#{i}` *{h['title']}* (`{h['duration_text']}`)")
-                lines.append("\nRun `!yt playcall #1` or `!yt dial me #1` to start a call with it!")
-                return await ctx.reply(msg, "\n".join(lines))
-            except Exception as e:
-                return await ctx.reply(msg, f"❌ YouTube lookup failed: {e}")
-        cmd = "play"  # Active call exists -> fall through to `play`!
+            async def _job_lookup():
+                try:
+                    if _is_yt_ref(rest):
+                        vid = _extract_video_id(rest)
+                        info = await asyncio.to_thread(_yt().extract, vid, max_kbps=int(_cfg.get("max_kbps", 160)))
+                        return await ctx.reply(
+                            msg,
+                            f"🎵 *{info.title}* (`{_fmt_dur(info.duration)}`)\n"
+                            f"No active call right now.\n"
+                            f"• `!yt playcall {vid}` — Call this chat & play\n"
+                            f"• `!yt dial me {vid}` — Call yourself & play"
+                        )
+                    hits = await asyncio.to_thread(_yt().search, rest, 5)
+                    if not hits:
+                        return await ctx.reply(msg, f"🔍 No results found for `{rest}`.")
+                    _LAST_SEARCH[msg.chat_id] = hits
+                    lines = [f"🔍 *YouTube Results for `{rest}`* (no active call):"]
+                    for i, h in enumerate(hits, 1):
+                        lines.append(f"`#{i}` *{h['title']}* (`{h['duration_text']}`)")
+                    lines.append("\nRun `!yt playcall #1` or `!yt dial me #1` to start a call with it!")
+                    await ctx.reply(msg, "\n".join(lines))
+                except Exception as e:
+                    log.exception("yt lookup failed")
+                    await ctx.reply(msg, f"❌ YouTube lookup failed: {e}")
+
+            _spawn(_job_lookup())
+            return
+        cmd = "play"
 
     if cmd == "play":
         if not rest:
@@ -1311,19 +1374,25 @@ async def on_message(ctx, msg):
         if not active_cid:
             return await ctx.reply(msg, "📭 No active call. Use `!yt playcall <song>` or `!yt dial <num|me> <song>`!")
         await ctx.reply(msg, f"⏳ Preparing `{rest}` for call...")
-        try:
-            meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, rest, "audio")
-        except Exception as e:
-            return await ctx.reply(msg, f"❌ Failed: {e}")
-        if active_cid not in ctx.calls._active:
-            return await ctx.reply(msg, "📴 Call ended while preparing audio.")
-        res = await ctx.play_call_audio(active_cid, meta["path"], loop=bool(_cfg.get("loop", False)))
-        if res.get("ok"):
-            return await ctx.reply(
-                msg,
-                f"🎵 *Now Playing:* {meta['title']} (`{_fmt_dur(meta['duration'])}`, {meta['size_mb']} MB)"
-            )
-        return await ctx.reply(msg, f"❌ Playback failed: {res.get('error')}")
+
+        async def _job_play(cid: str):
+            try:
+                meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, rest, "audio")
+            except Exception as e:
+                log.exception("yt play failed")
+                return await ctx.reply(msg, f"❌ Failed: {e}")
+            if cid not in ctx.calls._active:
+                return await ctx.reply(msg, "📴 Call ended while preparing audio.")
+            res = await ctx.play_call_audio(cid, meta["path"], loop=bool(_cfg.get("loop", False)))
+            if res.get("ok"):
+                return await ctx.reply(
+                    msg,
+                    f"🎵 *Now Playing:* {meta['title']} (`{_fmt_dur(meta['duration'])}`, {meta['size_mb']} MB)"
+                )
+            await ctx.reply(msg, f"❌ Playback failed: {res.get('error')}")
+
+        _spawn(_job_play(active_cid))
+        return
 
     if cmd == "queue":
         if not rest:
@@ -1334,16 +1403,22 @@ async def on_message(ctx, msg):
         cur_state = ctx.calls._active.get(active_cid, {}).get("audio_state", "idle")
         if cur_state == "idle" and not _YT_QUEUES.get(active_cid):
             await ctx.reply(msg, f"⏳ Preparing `{rest}` to play now...")
-            try:
-                meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, rest, "audio")
-            except Exception as e:
-                return await ctx.reply(msg, f"❌ Queue prepare failed: {e}")
-            if active_cid not in ctx.calls._active:
-                return await ctx.reply(msg, "📴 Call ended while preparing audio.")
-            res = await ctx.play_call_audio(active_cid, meta["path"], loop=False)
-            if res.get("ok"):
-                return await ctx.reply(msg, f"🎵 *Started Playing:* {meta['title']} (`{_fmt_dur(meta['duration'])}`)")
-            return await ctx.reply(msg, f"❌ Error: {res.get('error')}")
+
+            async def _job_q_now(cid: str):
+                try:
+                    meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, rest, "audio")
+                except Exception as e:
+                    log.exception("yt queue play failed")
+                    return await ctx.reply(msg, f"❌ Queue prepare failed: {e}")
+                if cid not in ctx.calls._active:
+                    return await ctx.reply(msg, "📴 Call ended while preparing audio.")
+                res = await ctx.play_call_audio(cid, meta["path"], loop=False)
+                if res.get("ok"):
+                    return await ctx.reply(msg, f"🎵 *Started Playing:* {meta['title']} (`{_fmt_dur(meta['duration'])}`)")
+                await ctx.reply(msg, f"❌ Error: {res.get('error')}")
+
+            _spawn(_job_q_now(active_cid))
+            return
 
         q_list = _YT_QUEUES.setdefault(active_cid, [])
         item = {
@@ -1369,7 +1444,7 @@ async def on_message(ctx, msg):
             finally:
                 entry["ready_event"].set()
 
-        asyncio.create_task(_bg_prepare(item, msg.chat_id, rest))
+        _spawn(_bg_prepare(item, msg.chat_id, rest))
         return await ctx.reply(msg, f"📋 Added `{rest}` to YT Queue (`#{pos}` — downloading in background).")
 
     if cmd == "q":
@@ -1392,15 +1467,22 @@ async def on_message(ctx, msg):
             await ctx.stop_call_audio(active_cid)
             return await ctx.reply(msg, "⏹️ YT queue empty — stopped playback.")
         nxt = q_list.pop(0)
-        if not nxt["ready_event"].is_set():
-            await ctx.reply(msg, f"⏳ Finishing download for `{nxt['query']}`...")
-            await nxt["ready_event"].wait()
-        if nxt.get("error"):
-            return await ctx.reply(msg, f"❌ Next track failed: {nxt['error']}")
-        res = await ctx.play_call_audio(active_cid, nxt["path"], loop=False)
-        if res.get("ok"):
-            return await ctx.reply(msg, f"⏭️ *Skipped to:* {nxt['title']} (`{_fmt_dur(nxt['duration'])}`)")
-        return await ctx.reply(msg, f"❌ Skip failed: {res.get('error')}")
+
+        async def _job_skip(cid: str, entry: dict):
+            if not entry["ready_event"].is_set():
+                await ctx.reply(msg, f"⏳ Finishing download for `{entry['query']}`...")
+                await entry["ready_event"].wait()
+            if cid not in ctx.calls._active:
+                return
+            if entry.get("error"):
+                return await ctx.reply(msg, f"❌ Next track failed: {entry['error']}")
+            res = await ctx.play_call_audio(cid, entry["path"], loop=False)
+            if res.get("ok"):
+                return await ctx.reply(msg, f"⏭️ *Skipped to:* {entry['title']} (`{_fmt_dur(entry['duration'])}`)")
+            await ctx.reply(msg, f"❌ Skip failed: {res.get('error')}")
+
+        _spawn(_job_skip(active_cid, nxt))
+        return
 
     if cmd == "pause":
         if not active_cid:
@@ -1440,6 +1522,18 @@ async def on_message(ctx, msg):
         _cfg["loop"] = val
         _save()
         return await ctx.reply(msg, f"🔁 YT loop playback: *{'ON' if val else 'OFF'}*")
+
+    if cmd == "quality":
+        m = rest.lower()
+        if m in ("fast", "low", "lite", "data"):
+            _cfg["max_kbps"] = 80
+            _save()
+            return await ctx.reply(msg, "⚡ Audio quality set to *FAST* (`<=80 kbps` — smaller files, quicker start).")
+        if m in ("hq", "high", "best"):
+            _cfg["max_kbps"] = 160
+            _save()
+            return await ctx.reply(msg, "🎧 Audio quality set to *HQ* (`<=160 kbps`).")
+        return await ctx.reply(msg, "⚠️ Usage: `!yt quality <hq|fast>`")
 
     if cmd == "maxmins":
         try:
