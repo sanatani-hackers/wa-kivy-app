@@ -121,6 +121,9 @@ async def setup(ctx):
     try:
         from core import call_media
         call_media.ensure_builtin_tracks()
+        vf = _cfg.get("video_file", "")
+        if vf and os.path.isfile(vf):
+            asyncio.create_task(asyncio.to_thread(call_media.prepare_video_for_call, vf, 15))
     except Exception:
         pass
     ctx.log.info(
@@ -383,22 +386,47 @@ async def on_message(ctx, msg):
                 target = re.sub(r"[^0-9@a-zA-Z.]", "", p1)
             song_q = p2.strip()
 
-        media_kind = "video" if (is_video and song_q and song_q.lower().endswith((".mp4", ".h264", ".mkv"))) else ("video" if (is_video and _cfg.get("video_file") and not song_q) else "audio")
+        from core import call_media
+
         resolved_path = ""
         disp_name = "default hold track"
-        if media_kind == "video":
-            q = song_q or _cfg.get("video_file", "")
-            resolved_path, disp_name = _resolve_indexed_or_name(q, "video")
-            if not resolved_path and song_q:
-                # User asked for an audio song inside a video call!
-                media_kind = "audio"
-                resolved_path, disp_name = _resolve_indexed_or_name(song_q, "audio")
+        media_kind = "audio"
+
+        if is_video:
+            if song_q:
+                v_path, v_disp = _resolve_indexed_or_name(song_q, "video")
+                if v_path:
+                    media_kind = "video"
+                    resolved_path, disp_name = v_path, v_disp
+                else:
+                    a_path, a_disp = _resolve_indexed_or_name(song_q, "audio")
+                    if a_path:
+                        media_kind = "audio"
+                        resolved_path, disp_name = a_path, a_disp
+                    else:
+                        return await ctx.reply(msg, f"⚠️ Video/Audio `{song_q}` not found. Check `!call tracks`.")
+            elif _cfg.get("video_file"):
+                v_path, v_disp = _resolve_indexed_or_name(_cfg["video_file"], "video")
+                if v_path:
+                    media_kind = "video"
+                    resolved_path, disp_name = v_path, v_disp
         else:
             q = song_q or _cfg.get("default_track", "")
             if q:
                 resolved_path, disp_name = _resolve_indexed_or_name(q, "audio")
                 if not resolved_path:
                     return await ctx.reply(msg, f"⚠️ Track `{q}` not found. Check `!call tracks`.")
+
+        # Pre-prepare / hardware-transcode BEFORE dialing so playback starts instantaneously at 1.0x sync
+        if media_kind == "video" and resolved_path:
+            await ctx.reply(msg, f"⏳ Preparing `{disp_name}` (<=480p 15fps H.264 + 16kHz audio) before dialing...")
+            ok_v, _, _, status_v = await asyncio.to_thread(call_media.prepare_video_for_call, resolved_path, 15)
+            if not ok_v:
+                return await ctx.reply(msg, f"❌ Video preparation failed: {status_v}")
+        elif media_kind == "audio" and resolved_path:
+            ok_a, status_a = await asyncio.to_thread(call_media.prepare_audio_for_call, resolved_path)
+            if not ok_a:
+                return await ctx.reply(msg, f"❌ Audio preparation failed: {status_a}")
 
         await ctx.reply(msg, f"📲 Calling `{_num(target)}` {'(Video Call)' if is_video else '(Voice Call)'}...\n🎵 Queued on pickup: `{disp_name}`")
         res = await ctx.call(target, video=is_video)
@@ -569,7 +597,9 @@ async def on_message(ctx, msg):
             return await ctx.reply(msg, f"⚠️ Video `{rest}` not found. See `!call tracks`.")
         _cfg["video_file"] = path
         _save()
-        return await ctx.reply(msg, f"✅ Default video stream set to: `{disp}`")
+        from core import call_media
+        asyncio.create_task(asyncio.to_thread(call_media.prepare_video_for_call, path, 15))
+        return await ctx.reply(msg, f"✅ Default video stream set to: `{disp}` (pre-transcoding in background)")
 
     if cmd == "loop":
         val = rest.lower() in ("on", "1", "true", "yes")

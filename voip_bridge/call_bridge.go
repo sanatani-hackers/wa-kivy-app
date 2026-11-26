@@ -670,9 +670,18 @@ func CallStopAudio(id *C.char, callID *C.char) *C.char {
 
 //export CallPlayVideo
 func CallPlayVideo(id *C.char, callID *C.char, h264Path *C.char, fps C.int, loop C.int) *C.char {
+	return CallPlayAV(id, callID, h264Path, nil, fps, loop)
+}
+
+//export CallPlayAV
+func CallPlayAV(id *C.char, callID *C.char, h264Path *C.char, audioPath *C.char, fps C.int, loop C.int) *C.char {
 	uuid := C.GoString(id)
 	cid := C.GoString(callID)
 	vPath := strings.TrimSpace(C.GoString(h264Path))
+	aPath := ""
+	if audioPath != nil {
+		aPath = strings.TrimSpace(C.GoString(audioPath))
+	}
 	if vPath == "" {
 		return callJSONErr("H.264 file path required")
 	}
@@ -690,18 +699,43 @@ func CallPlayVideo(id *C.char, callID *C.char, h264Path *C.char, fps C.int, loop
 		return callJSONErr(err.Error())
 	}
 
+	var firstAudioSrc meowcaller.AudioSource
+	if aPath != "" {
+		firstAudioSrc, err = openAudioSource(aPath)
+		if err != nil {
+			emitCallEvent(uuid, map[string]any{
+				"event":   "audio_error",
+				"call_id": cid,
+				"path":    aPath,
+				"error":   fmt.Sprintf("video audio decode failed: %v", err),
+			})
+			aPath = ""
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	h.mu.Lock()
 	if h.ended {
 		h.mu.Unlock()
 		cancel()
+		if firstAudioSrc != nil {
+			_ = firstAudioSrc.Close()
+		}
 		return callJSONErr("call already ended")
 	}
 	oldCancel := h.videoCancel
 	h.videoCancel = cancel
 	h.videoPath = vPath
 	h.videoLoop = loop != 0
+	var myAudioGen uint64
+	if firstAudioSrc != nil {
+		h.audioGen++
+		myAudioGen = h.audioGen
+		h.audioPath = aPath
+		h.audioLoop = loop != 0
+		h.audioState = "playing"
+	}
 	h.mu.Unlock()
 
 	if oldCancel != nil {
@@ -711,11 +745,47 @@ func CallPlayVideo(id *C.char, callID *C.char, h264Path *C.char, fps C.int, loop
 	frameDur := time.Second / time.Duration(fpsInt)
 	shouldLoop := loop != 0
 
+	var attachAudioLoop func(gen uint64)
+	attachAudioLoop = func(gen uint64) {
+		if aPath == "" {
+			return
+		}
+		h.player.OnFinish(func() {
+			go func() {
+				h.mu.Lock()
+				stillMine := !h.ended && h.audioGen == gen
+				wantLoop := stillMine && h.audioLoop
+				curA := h.audioPath
+				if stillMine && !wantLoop {
+					h.audioState = "idle"
+				}
+				h.mu.Unlock()
+				if !stillMine || !wantLoop || curA == "" {
+					return
+				}
+				if nxt, oerr := openAudioSource(curA); oerr == nil {
+					h.mu.Lock()
+					ok := !h.ended && h.audioGen == gen && h.audioLoop
+					h.mu.Unlock()
+					if ok {
+						attachAudioLoop(gen)
+						h.player.Play(nxt)
+						return
+					}
+					_ = nxt.Close()
+				}
+			}()
+		})
+	}
+
 	go func() {
 		defer cancel()
-		// Wait briefly for call to become active before pacing frames
-		for i := 0; i < 300; i++ {
+		// Poll every 10ms until call becomes Active so video and audio start locked to t0
+		for i := 0; i < 1500; i++ {
 			if ctx.Err() != nil {
+				if firstAudioSrc != nil {
+					_ = firstAudioSrc.Close()
+				}
 				return
 			}
 			st := h.call.State()
@@ -723,22 +793,33 @@ func CallPlayVideo(id *C.char, callID *C.char, h264Path *C.char, fps C.int, loop
 				break
 			}
 			if st == meowcaller.CallPhaseEnded {
+				if firstAudioSrc != nil {
+					_ = firstAudioSrc.Close()
+				}
 				return
 			}
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 
-		ticker := time.NewTicker(frameDur)
-		defer ticker.Stop()
+		// Launch synchronized audio & video right when Active begins
+		if firstAudioSrc != nil {
+			h.mu.Lock()
+			valid := !h.ended && h.audioGen == myAudioGen
+			h.mu.Unlock()
+			if valid {
+				attachAudioLoop(myAudioGen)
+				h.player.Play(firstAudioSrc)
+			} else {
+				_ = firstAudioSrc.Close()
+			}
+		}
+
+		startTime := time.Now()
+		var sentCount int64
 
 		for {
 			for idx, au := range aus {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-				}
-				if h.call.State() == meowcaller.CallPhaseEnded {
+				if ctx.Err() != nil || h.call.State() == meowcaller.CallPhaseEnded {
 					return
 				}
 				if err := h.call.SendVideoWithDuration(au, frameDur); err != nil {
@@ -753,6 +834,19 @@ func CallPlayVideo(id *C.char, callID *C.char, h264Path *C.char, fps C.int, loop
 						return
 					}
 				}
+				sentCount++
+				targetAt := startTime.Add(time.Duration(sentCount) * frameDur)
+				if waitDur := time.Until(targetAt); waitDur > 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(waitDur):
+					}
+				} else if waitDur < -500*time.Millisecond {
+					// Reset baseline clock if relay stalled so we don't fast-forward burst frames
+					startTime = time.Now()
+					sentCount = 0
+				}
 			}
 			if !shouldLoop {
 				emitCallEvent(uuid, map[string]any{
@@ -766,11 +860,12 @@ func CallPlayVideo(id *C.char, callID *C.char, h264Path *C.char, fps C.int, loop
 	}()
 
 	return callJSONOK(map[string]any{
-		"call_id": cid,
-		"path":    vPath,
-		"frames":  len(aus),
-		"fps":     fpsInt,
-		"loop":    shouldLoop,
+		"call_id":    cid,
+		"path":       vPath,
+		"audio_path": aPath,
+		"frames":     len(aus),
+		"fps":        fpsInt,
+		"loop":       shouldLoop,
 	})
 }
 

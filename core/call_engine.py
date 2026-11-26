@@ -431,13 +431,22 @@ class CallEngine:
         if not ok_v:
             return {"ok": False, "error": msg_v}
 
-        res = await self._call_ffi("CallPlayVideo", call_id, h264_path, int(fps), 1 if loop else 0)
+        aud_arg = (aud_path or "") if with_audio else ""
+        g = self._resolve_gocode()
+        if g and hasattr(g, "CallPlayAV"):
+            res = await self._call_ffi("CallPlayAV", call_id, h264_path, aud_arg, int(fps), 1 if loop else 0)
+        else:
+            res = await self._call_ffi("CallPlayVideo", call_id, h264_path, int(fps), 1 if loop else 0)
+            if res.get("ok") and aud_arg:
+                await self._call_ffi("CallPlayAudio", call_id, aud_arg, 1 if loop else 0)
+
         if res.get("ok"):
-            if with_audio and aud_path:
-                await self._call_ffi("CallPlayAudio", call_id, aud_path, 1 if loop else 0)
             fname = os.path.basename(resolved)
+            if call_id in self._active and aud_arg:
+                self._active[call_id]["audio_state"] = "playing"
+                self._active[call_id]["audio_path"] = fname
             self._upsert_call_db(call_id, track_played=fname)
-            self.core.emit("/log", f"🎬 Streaming video in call {call_id[:8]}: {fname}")
+            self.core.emit("/log", f"🎬 Streaming video in call {call_id[:8]}: {fname} ({msg_v})")
         return res
 
     async def stop_video_stream(self, call_id: str) -> dict:

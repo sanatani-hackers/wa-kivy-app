@@ -15,6 +15,7 @@ log = logging.getLogger("wa.call_media")
 AUDIO_EXTS = (".mp3", ".wav", ".ogg", ".opus")
 VIDEO_EXTS = (".h264", ".mp4", ".mkv", ".mov")
 EXTRA_AUDIO_EXTS = (".m4a", ".aac", ".flac")
+CACHE_VERSION = "v2"
 
 
 def call_music_dir() -> str:
@@ -276,14 +277,43 @@ def _android_extract_h264_from_mp4(mp4_path: str, out_h264_path: str) -> tuple[b
             pass
 
 
+def _android_java_transcode_audio(media_path: str, out_wav_path: str) -> tuple[bool, str]:
+    """Use native Android Java WaMediaTranscoder for exact 16kHz mono WAV (handles SBR/PS rate changes)."""
+    try:
+        from jnius import autoclass
+        Transcoder = autoclass("org.sanatani.waapp.WaMediaTranscoder")
+        err = str(Transcoder.extractAudioToWav16k(str(media_path), str(out_wav_path)) or "")
+        if not err and os.path.exists(out_wav_path) and os.path.getsize(out_wav_path) > 44:
+            return True, out_wav_path
+        return False, err or "Empty audio output"
+    except Exception as e:
+        return False, f"WaMediaTranscoder audio unavailable: {e}"
+
+
+def _android_java_transcode_video(mp4_path: str, out_h264_path: str, fps: int = 15) -> tuple[bool, str]:
+    """Use native Android MediaCodec GPU Surface encoder to downscale to <=480p 15fps H.264."""
+    try:
+        from jnius import autoclass
+        Transcoder = autoclass("org.sanatani.waapp.WaMediaTranscoder")
+        err = str(Transcoder.transcodeVideoToH264(str(mp4_path), str(out_h264_path), 480, int(fps), 700000) or "")
+        if not err and os.path.exists(out_h264_path) and os.path.getsize(out_h264_path) > 0:
+            return True, out_h264_path
+        return False, err or "Empty H.264 output"
+    except Exception as e:
+        return False, f"WaMediaTranscoder video unavailable: {e}"
+
+
 def _android_extract_wav_from_media(media_path: str, out_wav_path: str) -> tuple[bool, str]:
     """Decode Android-supported audio (.m4a/.aac/.mp4) into 16kHz mono PCM WAV via MediaCodec."""
+    ok_j, res_j = _android_java_transcode_audio(media_path, out_wav_path)
+    if ok_j:
+        return True, res_j
+
     try:
         from jnius import autoclass
         MediaExtractor = autoclass("android.media.MediaExtractor")
         MediaCodec = autoclass("android.media.MediaCodec")
         BufferInfo = autoclass("android.media.MediaCodec$BufferInfo")
-        ByteBuffer = autoclass("java.nio.ByteBuffer")
     except Exception as e:
         return False, f"Android MediaCodec unavailable: {e}"
 
@@ -308,6 +338,7 @@ def _android_extract_wav_from_media(media_path: str, out_wav_path: str) -> tuple
         extractor.selectTrack(a_track)
         sample_rate = int(a_format.getInteger("sample-rate")) if a_format.containsKey("sample-rate") else 44100
         channels = int(a_format.getInteger("channel-count")) if a_format.containsKey("channel-count") else 2
+        pcm_enc = int(a_format.getInteger("pcm-encoding")) if a_format.containsKey("pcm-encoding") else 2
 
         codec = MediaCodec.createDecoderByType(mime)
         codec.configure(a_format, None, None, 0)
@@ -333,7 +364,15 @@ def _android_extract_wav_from_media(media_path: str, out_wav_path: str) -> tuple
                         extractor.advance()
 
             out_idx = codec.dequeueOutputBuffer(info, 5000)
-            if out_idx >= 0:
+            if out_idx == -2:  # MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
+                out_fmt = codec.getOutputFormat()
+                if out_fmt.containsKey("sample-rate"):
+                    sample_rate = int(out_fmt.getInteger("sample-rate")) or sample_rate
+                if out_fmt.containsKey("channel-count"):
+                    channels = int(out_fmt.getInteger("channel-count")) or channels
+                if out_fmt.containsKey("pcm-encoding"):
+                    pcm_enc = int(out_fmt.getInteger("pcm-encoding")) or pcm_enc
+            elif out_idx >= 0:
                 out_buf = codec.getOutputBuffer(out_idx)
                 if out_buf is not None and info.size > 0:
                     out_buf.position(info.offset)
@@ -341,7 +380,13 @@ def _android_extract_wav_from_media(media_path: str, out_wav_path: str) -> tuple
                     chunk = bytearray(info.size)
                     for i in range(info.size):
                         chunk[i] = out_buf.get() & 0xFF
-                    raw_pcm.extend(chunk)
+                    if pcm_enc == 4:  # ENCODING_PCM_FLOAT -> s16le
+                        n_flt = len(chunk) // 4
+                        floats = struct.unpack(f"<{n_flt}f", bytes(chunk[:n_flt * 4]))
+                        s16 = [max(-32767, min(32767, int(v * 32767.0))) for v in floats]
+                        raw_pcm.extend(struct.pack(f"<{len(s16)}h", *s16))
+                    else:
+                        raw_pcm.extend(chunk)
                 codec.releaseOutputBuffer(out_idx, False)
                 if (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0:
                     saw_output_eof = True
@@ -358,7 +403,7 @@ def _android_extract_wav_from_media(media_path: str, out_wav_path: str) -> tuple
         os.replace(tmp_wav, out_wav_path)
         return True, out_wav_path
     except Exception as e:
-        return False, f"Android audio decode error: {e}"
+        return False, f"Android audio decode error: {e} ({res_j})"
     finally:
         if codec is not None:
             try:
@@ -381,7 +426,7 @@ def prepare_audio_for_call(path: str) -> tuple[bool, str]:
         return True, path
 
     base = os.path.splitext(os.path.basename(path))[0]
-    out_wav = os.path.join(call_cache_dir(), f"{base}_conv.wav")
+    out_wav = os.path.join(call_cache_dir(), f"{base}_{CACHE_VERSION}_conv.wav")
     if os.path.exists(out_wav) and os.path.getmtime(out_wav) >= os.path.getmtime(path):
         return True, out_wav
 
@@ -413,27 +458,33 @@ def prepare_video_for_call(path: str, fps: int = 15) -> tuple[bool, str, Optiona
 
     base = os.path.splitext(os.path.basename(path))[0]
     cache_dir = call_cache_dir()
-    out_h264 = os.path.join(cache_dir, f"{base}.h264")
-    out_audio = os.path.join(cache_dir, f"{base}_vtrack.mp3")
-    out_wav = os.path.join(cache_dir, f"{base}_vtrack.wav")
+    fps_i = max(1, min(30, int(fps)))
+    out_h264 = os.path.join(cache_dir, f"{base}_{CACHE_VERSION}_{fps_i}fps.h264")
+    out_audio = os.path.join(cache_dir, f"{base}_{CACHE_VERSION}_vtrack.mp3")
+    out_wav = os.path.join(cache_dir, f"{base}_{CACHE_VERSION}_vtrack.wav")
 
     src_mtime = os.path.getmtime(path)
     if os.path.exists(out_h264) and os.path.getmtime(out_h264) >= src_mtime:
         aud = out_audio if os.path.exists(out_audio) else (out_wav if os.path.exists(out_wav) else None)
+        if aud is None:
+            ok_a, _ = _android_extract_wav_from_media(path, out_wav)
+            if ok_a:
+                aud = out_wav
         return True, out_h264, aud, "Using cached H.264 + audio assets"
 
     ff = shutil.which("ffmpeg")
     if ff:
-        keyint = str(max(1, int(fps)))
+        keyint = str(fps_i)
         try:
             subprocess.run(
                 [
                     ff, "-y", "-hide_banner", "-loglevel", "error", "-t", "600", "-i", path,
                     "-map", "0:v:0", "-an", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
-                    "-profile:v", "main", "-level", "3.1", "-pix_fmt", "yuv420p", "-r", keyint,
-                    "-vf", "scale=-2:480", "-g", keyint, "-keyint_min", keyint, "-sc_threshold", "0",
+                    "-profile:v", "baseline", "-level", "3.1", "-pix_fmt", "yuv420p", "-r", keyint,
+                    "-vf", "scale='min(480,iw)':'min(480,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                    "-g", keyint, "-keyint_min", keyint, "-sc_threshold", "0",
                     "-x264-params", "repeat-headers=1:bframes=0:open-gop=0:sliced-threads=0:slices=1",
-                    "-b:v", "1200k", "-maxrate", "1800k", "-bufsize", "3600k", "-f", "h264", out_h264,
+                    "-b:v", "700k", "-maxrate", "950k", "-bufsize", "1900k", "-f", "h264", out_h264,
                     "-map", "0:a:0?", "-vn", "-ac", "1", "-ar", "16000", "-codec:a", "libmp3lame", "-q:a", "2", out_audio,
                 ],
                 check=True, timeout=180,
@@ -443,9 +494,15 @@ def prepare_video_for_call(path: str, fps: int = 15) -> tuple[bool, str, Optiona
         except Exception as e:
             log.warning("ffmpeg video transcode failed: %s", e)
 
-    ok_v, msg_v = _android_extract_h264_from_mp4(path, out_h264)
+    # Primary Android path: Hardware MediaCodec <=480p 15fps H.264 + accurate 16kHz mono WAV
+    ok_v, msg_v = _android_java_transcode_video(path, out_h264, fps=fps_i)
+    method_msg = "Hardware transcoded <=480p 15fps H.264"
     if not ok_v:
-        return False, "", None, f"Could not extract H.264 video: {msg_v}"
+        log.warning("Java hardware transcoder fallback (%s); extracting raw stream", msg_v)
+        ok_v, msg_v = _android_extract_h264_from_mp4(path, out_h264)
+        method_msg = "Extracted H.264 stream (fallback)"
+        if not ok_v:
+            return False, "", None, f"Could not prepare video: {msg_v}"
 
     ok_a, _ = _android_extract_wav_from_media(path, out_wav)
-    return True, out_h264, (out_wav if ok_a else None), "Extracted H.264 stream on-device"
+    return True, out_h264, (out_wav if ok_a else None), method_msg

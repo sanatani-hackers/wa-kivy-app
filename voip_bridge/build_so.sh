@@ -34,6 +34,45 @@ find meowcaller -type f \( -name "*.go" -o -name "go.mod" \) -exec sed -i "s|git
 
 cp "$SCRIPT_DIR/call_bridge.go" ./call_bridge.go
 
+# Micro-pace multi-packet video frames (especially IDR keyframes) so UDP relay doesn't drop bursts
+python3 - <<'PY'
+em_path = "meowcaller/engine_media.go"
+with open(em_path, "r", encoding="utf-8") as f:
+    src = f.read()
+
+old_loop = """\tfor _, pkt := range packets {
+\t\tif _, err := vs.ch.Send(pkt); err != nil {
+\t\t\treturn
+\t\t}
+\t\tsent++
+\t\twireBytes += len(pkt)
+\t}"""
+
+new_loop = """\tfor pktIdx, pkt := range packets {
+\t\tif _, err := vs.ch.Send(pkt); err != nil {
+\t\t\treturn
+\t\t}
+\t\tsent++
+\t\twireBytes += len(pkt)
+\t\tif len(packets) > 6 && pktIdx < len(packets)-1 {
+\t\t\tpace := (duration / 4) / time.Duration(len(packets))
+\t\t\tif pace > 1500*time.Microsecond {
+\t\t\t\tpace = 1500 * time.Microsecond
+\t\t\t}
+\t\t\tif pace >= 200*time.Microsecond {
+\t\t\t\ttime.Sleep(pace)
+\t\t\t}
+\t\t}
+\t}"""
+
+if new_loop not in src:
+    assert old_loop in src, "expected videoSender.send loop not found in engine_media.go"
+    src = src.replace(old_loop, new_loop, 1)
+    with open(em_path, "w", encoding="utf-8") as f:
+        f.write(src)
+    print("Patched meowcaller/engine_media.go with RTP micro-pacing")
+PY
+
 # Patch goneonize main.go deterministically to hook meowcaller lifecycle
 python3 - <<'PY'
 with open("main.go", "r", encoding="utf-8") as f:
