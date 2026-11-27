@@ -23,6 +23,7 @@ from kivy.core.clipboard import Clipboard
 from kivy.core.text import DEFAULT_FONT, LabelBase
 from kivy.core.window import Window
 from kivy.factory import Factory
+from kivy.graphics import Color, Line, Rectangle, RoundedRectangle
 
 # Ensure window displays status bar and dynamically shifts up when software keyboard appears
 Window.fullscreen = False
@@ -30,7 +31,8 @@ Window.borderless = False
 Window.softinput_mode = ""
 Window.keyboard_anim_args = {'d': 0.2, 't': 'in_out_quart'}
 from kivy.lang import Builder
-from kivy.properties import BooleanProperty
+from kivy.properties import BooleanProperty, NumericProperty
+from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.image import Image
@@ -39,11 +41,12 @@ from kivy.uix.modalview import ModalView
 from kivy.uix.screenmanager import FadeTransition, Screen, ScreenManager
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
+from kivy.uix.widget import Widget
 from kivy.utils import get_color_from_hex, platform
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 # UbuntuMono Nerd Font Icons (verified in custom user font.ttf)
 ICON_STOP = "\uf04d"       # nf-fa-stop
@@ -103,6 +106,8 @@ from common import (
     stop_android_service,
 )
 from core import call_media, pip_hub, plugin_store, updater
+from core.client_db import ClientDB, normalize_jid
+from core.ghost import GhostConfig
 
 
 def ask_all_files_permission():
@@ -462,10 +467,101 @@ KV_STYLES = """
         Line:
             points: [self.x + dp(8), self.y + dp(2), self.right - dp(8), self.y + dp(2)] if self.active else []
             width: dp(2)
+
+<FilterPill>:
+    background_color: (0, 0, 0, 0)
+    background_normal: ''
+    background_down: ''
+    font_size: '11sp'
+    bold: True
+    size_hint_y: None
+    height: dp(30)
+    color: get_color_from_hex('#080C14') if self.active else get_color_from_hex('#94A3B8')
+    canvas.before:
+        Color:
+            rgba: get_color_from_hex('#10B981') if self.active else (get_color_from_hex('#151E2E') if self.state == 'down' else get_color_from_hex('#0F172A'))
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+        Color:
+            rgba: (0, 0, 0, 0) if self.active else get_color_from_hex('#1E293B')
+        Line:
+            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(8)]
+            width: dp(1)
+
+<AvatarBadge>:
+    size_hint: (None, None)
+    size: (dp(42), dp(42))
+    font_size: '13sp'
+    bold: True
+    color: get_color_from_hex('#10B981') if self.is_group else get_color_from_hex('#F8FAFC')
+    halign: 'center'
+    valign: 'middle'
+    canvas.before:
+        Color:
+            rgba: get_color_from_hex('#064E3B') if self.is_group else get_color_from_hex('#1E293B')
+        Ellipse:
+            pos: self.pos
+            size: self.size
+        Color:
+            rgba: get_color_from_hex('#10B981') if self.is_online else get_color_from_hex('#334155')
+        Line:
+            ellipse: [self.x, self.y, self.width, self.height]
+            width: dp(1.2) if self.is_online else dp(1)
+
+<UnreadBadge>:
+    size_hint: (None, None)
+    height: dp(20)
+    width: dp(24) if self.count < 10 else dp(32)
+    font_size: '10sp'
+    bold: True
+    color: get_color_from_hex('#080C14')
+    halign: 'center'
+    valign: 'middle'
+    canvas.before:
+        Color:
+            rgba: get_color_from_hex('#10B981') if self.count > 0 else (0, 0, 0, 0)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(10)]
+
+<ClickableRow>:
+    canvas.before:
+        Color:
+            rgba: get_color_from_hex('#151E2E') if self.state == 'down' else get_color_from_hex('#0F172A')
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(10)]
+        Color:
+            rgba: get_color_from_hex('#1E293B')
+        Line:
+            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(10)]
+            width: dp(1)
+
+<ClickableBubble>:
+    canvas.before:
+        Color:
+            rgba: (get_color_from_hex('#059669') if self.state == 'down' else get_color_from_hex('#064E3B')) if self.from_me else (get_color_from_hex('#283548') if self.state == 'down' else get_color_from_hex('#1E293B'))
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(12)]
+        Color:
+            rgba: get_color_from_hex('#059669') if self.from_me else get_color_from_hex('#334155')
+        Line:
+            rounded_rectangle: [self.x, self.y, self.width, self.height, dp(12)]
+            width: dp(1)
 """
 
 
 class TabButton(Button):
+    active = BooleanProperty(False)
+
+
+class FilterPill(Button):
     active = BooleanProperty(False)
 
 
@@ -475,6 +571,202 @@ class SwitchBtn(Button):
 
 class MasterHeaderBtn(Button):
     is_running = BooleanProperty(True)
+
+
+class AvatarBadge(Label):
+    is_group = BooleanProperty(False)
+    is_online = BooleanProperty(False)
+
+
+class UnreadBadge(Label):
+    count = NumericProperty(0)
+
+
+class _LongPressBehavior(ButtonBehavior):
+    """ButtonBehavior extension supporting clean single-tap release vs long-press callback."""
+
+    def __init__(self, on_long_press=None, **kw):
+        super().__init__(**kw)
+        self._lp_cb = on_long_press
+        self._lp_event = None
+        self._lp_triggered = False
+
+    def _fire_lp(self, _dt):
+        self._lp_event = None
+        self._lp_triggered = True
+        self.state = "normal"
+        if self._lp_cb:
+            self._lp_cb(self)
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            self._lp_triggered = False
+            if self._lp_cb:
+                self._lp_event = Clock.schedule_once(self._fire_lp, 0.55)
+        return super().on_touch_down(touch)
+
+    def on_touch_move(self, touch):
+        if self._lp_event is not None:
+            if abs(touch.x - touch.ox) > dp(10) or abs(touch.y - touch.oy) > dp(10):
+                self._lp_event.cancel()
+                self._lp_event = None
+        return super().on_touch_move(touch)
+
+    def on_touch_up(self, touch):
+        if self._lp_event is not None:
+            self._lp_event.cancel()
+            self._lp_event = None
+        if self._lp_triggered and touch.grab_current is self:
+            touch.ungrab(self)
+            self.state = "normal"
+            return True
+        return super().on_touch_up(touch)
+
+
+class ClickableRow(_LongPressBehavior, BoxLayout):
+    pass
+
+
+class ClickableBubble(_LongPressBehavior, BoxLayout):
+    from_me = BooleanProperty(False)
+
+
+def _short_jid(jid: str) -> str:
+    s = normalize_jid(jid)
+    return s.split("@", 1)[0] if "@" in s else s
+
+
+def _initials(name: str, jid: str = "") -> str:
+    clean = (name or "").strip()
+    if clean and clean != jid and "@" not in clean:
+        parts = [p for p in clean.split() if p]
+        if len(parts) >= 2:
+            return (parts[0][0] + parts[1][0]).upper()
+        if parts:
+            return parts[0][:2].upper()
+    s = _short_jid(jid or clean)
+    return (s[-2:] if len(s) >= 2 else s or "?").upper()
+
+
+def _fmt_ts(ts: int, include_time: bool = False) -> str:
+    if not ts:
+        return ""
+    try:
+        t_val = int(ts)
+        lt = time.localtime(t_val)
+        now = time.localtime()
+        if (lt.tm_year, lt.tm_yday) == (now.tm_year, now.tm_yday):
+            return time.strftime("%H:%M", lt)
+        if lt.tm_year == now.tm_year and (now.tm_yday - lt.tm_yday) == 1:
+            return f"Yest {time.strftime('%H:%M', lt)}" if include_time else "Yesterday"
+        return time.strftime("%d/%m %H:%M" if include_time else "%d/%m", lt)
+    except Exception:
+        return ""
+
+
+def _infer_media_kind(path: str) -> str:
+    ext = os.path.splitext(path or "")[1].lower()
+    if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+        return "image"
+    if ext in (".mp4", ".mkv", ".mov", ".avi", ".3gp", ".webm"):
+        return "video"
+    if ext in (".mp3", ".wav", ".ogg", ".opus", ".m4a", ".aac", ".flac"):
+        return "audio"
+    return "document"
+
+
+def _open_media_file(path: str):
+    """Open a local media file via Android VIEW intent or show location fallback."""
+    if not path or not os.path.exists(path):
+        InfoDialog("Media Unavailable", "Media file is not downloaded locally yet.").open()
+        return
+    if platform == "android":
+        try:
+            from jnius import autoclass
+            act = autoclass("org.kivy.android.PythonActivity").mActivity
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            File = autoclass("java.io.File")
+            StrictMode = autoclass("android.os.StrictMode")
+            try:
+                VmPolicyBuilder = autoclass("android.os.StrictMode$VmPolicy$Builder")
+                StrictMode.setVmPolicy(VmPolicyBuilder().build())
+            except Exception:
+                pass
+            kind = _infer_media_kind(path)
+            mime_map = {"image": "image/*", "video": "video/*", "audio": "audio/*"}
+            mime = mime_map.get(kind, "*/*")
+            intent = Intent(Intent.ACTION_VIEW)
+            intent.setDataAndType(Uri.fromFile(File(path)), mime)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            act.startActivity(intent)
+            return
+        except Exception:
+            pass
+    InfoDialog("Saved Media File", f"Path:\n{path}").open()
+
+
+def _pick_attachment_file(on_picked, fallback_dir: str = "/sdcard/Download"):
+    """Pick any file using Android native chooser or Kivy FileChooser fallback."""
+    if platform == "android":
+        try:
+            from jnius import autoclass
+            from android.activity import bind as android_bind, unbind as android_unbind
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            if activity:
+                Intent = autoclass("android.content.Intent")
+                intent = Intent(Intent.ACTION_GET_CONTENT)
+                intent.setType("*/*")
+                intent.addCategory(Intent.CATEGORY_OPENABLE)
+                REQ_ATTACH = 8812
+
+                def _on_res(req, res, data_intent):
+                    if req == REQ_ATTACH:
+                        try:
+                            android_unbind(on_activity_result=_on_res)
+                        except Exception:
+                            pass
+                        if res == -1 and data_intent is not None:
+                            try:
+                                uri = data_intent.getData()
+                                if uri:
+                                    dest_dir = os.path.join(private_dir(), "outgoing_media")
+                                    saved = copy_content_uri_to_folder(activity, uri, dest_dir, fallback_name="attachment.bin")
+                                    Clock.schedule_once(lambda dt: on_picked(saved), 0)
+                                    return
+                            except Exception as e:
+                                Clock.schedule_once(lambda dt, err=e: InfoDialog("Attachment Error", str(err)).open(), 0)
+
+                android_bind(on_activity_result=_on_res)
+                activity.startActivityForResult(intent, REQ_ATTACH)
+                return
+        except Exception:
+            pass
+
+    from kivy.uix.filechooser import FileChooserListView
+    from kivy.uix.popup import Popup
+    start_dir = fallback_dir if os.path.isdir(fallback_dir) else os.path.expanduser("~")
+    content = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+    fc = FileChooserListView(path=start_dir)
+    btn_box = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+    popup = Popup(title="Select Attachment", size_hint=(0.95, 0.9), auto_dismiss=True)
+
+    def _select(*_):
+        if fc.selection:
+            sel = fc.selection[0]
+            popup.dismiss()
+            on_picked(sel)
+
+    btn_ok = Factory.PrimaryButton(text="Select")
+    btn_ok.bind(on_release=_select)
+    btn_cancel = Factory.SecondaryButton(text="Cancel")
+    btn_cancel.bind(on_release=popup.dismiss)
+    btn_box.add_widget(btn_cancel)
+    btn_box.add_widget(btn_ok)
+    content.add_widget(fc)
+    content.add_widget(btn_box)
+    popup.content = content
+    popup.open()
 
 
 Builder.load_string(KV_STYLES)
@@ -1754,11 +2046,1362 @@ class PluginsScreen(Screen):
             self.list_box.add_widget(p_card)
 
 
+class PowerScreen(Screen):
+    """Power tools hub combining Plugins, Quick Send, and Console inside compact segment tabs."""
+
+    SUBTABS = [("plugins", "Plugins"), ("send", "Quick Send"), ("console", "Console")]
+
+    def __init__(self, app_root, **kw):
+        super().__init__(name="power", **kw)
+        self.root = app_root
+        self.sub_btns = {}
+
+        layout = BoxLayout(orientation="vertical")
+
+        seg_bar = BoxLayout(
+            size_hint_y=None, height=dp(42),
+            padding=[dp(12), dp(6), dp(12), dp(4)], spacing=dp(6)
+        )
+        for sid, slabel in self.SUBTABS:
+            btn = FilterPill(text=slabel, size_hint=(1, None), height=dp(30))
+            btn.bind(on_release=lambda _, s=sid: self.switch_subtab(s))
+            self.sub_btns[sid] = btn
+            seg_bar.add_widget(btn)
+
+        self.inner_sm = ScreenManager(transition=FadeTransition(duration=0.12))
+        for scr in (app_root.screen_plugins, app_root.screen_send, app_root.screen_console):
+            if scr.parent:
+                scr.parent.remove_widget(scr)
+            self.inner_sm.add_widget(scr)
+
+        layout.add_widget(seg_bar)
+        layout.add_widget(self.inner_sm)
+        self.add_widget(layout)
+        self.switch_subtab("plugins")
+
+    def switch_subtab(self, sub_id: str):
+        if sub_id not in self.sub_btns:
+            sub_id = "plugins"
+        self.inner_sm.current = sub_id
+        for sid, btn in self.sub_btns.items():
+            btn.active = (sid == sub_id)
+
+
+class ChatsScreen(Screen):
+    """Full WhatsApp chat inbox backed directly by local SQLite WAL ClientDB."""
+
+    FILTERS = [("all", "All"), ("unread", "Unread"), ("groups", "Groups"), ("archived", "Archived")]
+
+    def __init__(self, app_root, **kw):
+        super().__init__(name="chats", **kw)
+        self.root = app_root
+        self.filter_mode = "all"
+        self.render_limit = 100
+        self._refresh_ev = None
+        self.filter_btns = {}
+
+        layout = BoxLayout(orientation="vertical", padding=[dp(12), dp(8), dp(12), dp(8)], spacing=dp(8))
+
+        # Top Search + New Chat + Resync row
+        top_row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(6))
+        self.search_input = Factory.ModernInput(size_hint_x=1, height=dp(38))
+        self.search_input.font_size = "12sp"
+        self.search_input.hint_text = "Search chats, names, messages..."
+        self.search_input.bind(text=lambda *_: self.schedule_refresh(0.08))
+
+        btn_new = Factory.PrimaryButton(text="New Chat", size_hint=(None, None), size=(dp(78), dp(38)))
+        btn_new.font_size = "11sp"
+        btn_new.bind(on_release=lambda *_: self.root.switch_tab("contacts"))
+
+        btn_resync = Factory.SecondaryButton(text=ICON_REFRESH, size_hint=(None, None), size=(dp(38), dp(38)))
+        btn_resync.font_size = "13sp"
+        btn_resync.bind(on_release=self.on_resync_press)
+
+        top_row.add_widget(self.search_input)
+        top_row.add_widget(btn_new)
+        top_row.add_widget(btn_resync)
+        layout.add_widget(top_row)
+
+        # Filter pills row
+        filter_row = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
+        for fid, flabel in self.FILTERS:
+            btn = FilterPill(text=flabel, size_hint=(1, None), height=dp(30))
+            btn.bind(on_release=lambda _, f=fid: self.set_filter(f))
+            self.filter_btns[fid] = btn
+            filter_row.add_widget(btn)
+        layout.add_widget(filter_row)
+
+        # Scrollable chat list
+        self.scroll = ScrollView(size_hint=(1, 1))
+        self.list_box = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None)
+        self.list_box.bind(minimum_height=self.list_box.setter("height"))
+        self.scroll.add_widget(self.list_box)
+        layout.add_widget(self.scroll)
+
+        self.add_widget(layout)
+        self._update_filter_pills()
+
+    def _update_filter_pills(self):
+        for fid, btn in self.filter_btns.items():
+            btn.active = (fid == self.filter_mode)
+
+    def set_filter(self, mode: str):
+        self.filter_mode = mode
+        self.render_limit = 100
+        self._update_filter_pills()
+        self.refresh(immediate=True)
+
+    def on_resync_press(self, *_):
+        self.root.send("/resync_contacts")
+        self.root.on_log("Requested contacts & chats resync...")
+
+    def schedule_refresh(self, delay: float = 0.12):
+        if self._refresh_ev is not None:
+            self._refresh_ev.cancel()
+        self._refresh_ev = Clock.schedule_once(lambda _dt: self.refresh(immediate=True), delay)
+
+    def refresh(self, *_args, immediate: bool = False):
+        if self._refresh_ev is not None:
+            self._refresh_ev.cancel()
+            self._refresh_ev = None
+        try:
+            db = ClientDB.get(private_dir())
+            q = self.search_input.text.strip()
+            rows = db.get_chats(filter_mode=self.filter_mode, search=q, limit=self.render_limit + 1)
+        except Exception as e:
+            log_exception(f"ChatsScreen.refresh error: {e}")
+            rows = []
+
+        has_more = len(rows) > self.render_limit
+        chats = rows[: self.render_limit]
+        ghost_read = bool(getattr(getattr(self.root, "ghost_config", None), "ghost_read", False))
+
+        self.list_box.clear_widgets()
+        if not chats:
+            empty_card = Factory.Card()
+            empty_card.padding = dp(16)
+            msg = (
+                "No chats match your search/filter."
+                if (q or self.filter_mode != "all")
+                else "No chats synced yet. Incoming messages or contact sync will appear here."
+            )
+            lbl_empty = Label(
+                text=msg, font_size="12sp", color=get_color_from_hex("#94A3B8"),
+                size_hint_y=None, height=dp(44), halign="center", valign="middle"
+            )
+            lbl_empty.bind(size=lbl_empty.setter("text_size"))
+            empty_card.add_widget(lbl_empty)
+            btn_row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+            btn_contacts = Factory.PrimaryButton(text="Open Contacts", size_hint=(0.5, 1))
+            btn_contacts.font_size = "11sp"
+            btn_contacts.bind(on_release=lambda *_: self.root.switch_tab("contacts"))
+            btn_sync = Factory.SecondaryButton(text="Resync Contacts", size_hint=(0.5, 1))
+            btn_sync.font_size = "11sp"
+            btn_sync.bind(on_release=self.on_resync_press)
+            btn_row.add_widget(btn_contacts)
+            btn_row.add_widget(btn_sync)
+            empty_card.add_widget(btn_row)
+            self.list_box.add_widget(empty_card)
+            return
+
+        now_ts = int(time.time())
+        for chat in chats:
+            self.list_box.add_widget(self._build_chat_row(chat, ghost_read, now_ts))
+
+        if has_more:
+            btn_more = Factory.SecondaryButton(text="Load More Chats", size_hint_y=None, height=dp(36))
+            btn_more.font_size = "11sp"
+            btn_more.bind(on_release=self._load_more)
+            self.list_box.add_widget(btn_more)
+
+    def _load_more(self, *_):
+        self.render_limit += 100
+        self.refresh(immediate=True)
+
+    def _build_chat_row(self, chat: dict, ghost_read: bool, now_ts: int) -> BoxLayout:
+        jid = chat.get("jid", "")
+        display_name = str(chat.get("display_name") or _short_jid(jid) or jid)
+        is_group = bool(chat.get("is_group"))
+        is_online = bool(chat.get("is_online"))
+        is_typing = bool(chat.get("is_typing"))
+        unread = int(chat.get("unread_count") or 0)
+        pinned = bool(chat.get("pinned"))
+        muted = int(chat.get("muted_until") or 0) > now_ts
+
+        wrapper = BoxLayout(size_hint_y=None, height=dp(68), spacing=dp(4))
+
+        row_btn = ClickableRow(
+            on_long_press=lambda _w, ch=chat: self.open_chat_actions(ch),
+            orientation="horizontal",
+            padding=[dp(10), dp(8), dp(10), dp(8)],
+            spacing=dp(10),
+        )
+        row_btn.bind(on_release=lambda w, j=jid: (None if getattr(w, "_lp_triggered", False) else self.root.open_chat(j)))
+
+        avatar = AvatarBadge(text=_initials(display_name, jid), is_group=is_group, is_online=is_online)
+        avatar_wrap = BoxLayout(orientation="vertical", size_hint=(None, 1), width=dp(42))
+        avatar_wrap.add_widget(Widget())
+        avatar_wrap.add_widget(avatar)
+        avatar_wrap.add_widget(Widget())
+
+        mid = BoxLayout(orientation="vertical", spacing=dp(3))
+
+        # Top line: Name + Tags + Timestamp
+        top_line = BoxLayout(size_hint_y=None, height=dp(22), spacing=dp(4))
+        lbl_name = Label(
+            text=display_name, font_size="13sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"),
+            halign="left", valign="middle", shorten=True, shorten_from="right"
+        )
+        lbl_name.bind(size=lbl_name.setter("text_size"))
+        top_line.add_widget(lbl_name)
+
+        tags = []
+        if pinned:
+            tags.append("[PIN]")
+        if muted:
+            tags.append("[MUTE]")
+        if ghost_read and unread > 0:
+            tags.append("[GHOST]")
+        if tags:
+            tag_txt = " ".join(tags)
+            lbl_tags = Label(
+                text=tag_txt, font_size="9sp", bold=True,
+                color=get_color_from_hex("#10B981" if pinned or ghost_read else "#64748B"),
+                size_hint=(None, 1), width=dp(len(tag_txt) * 6.5 + 4),
+                halign="right", valign="middle"
+            )
+            lbl_tags.bind(size=lbl_tags.setter("text_size"))
+            top_line.add_widget(lbl_tags)
+
+        ts_str = _fmt_ts(chat.get("last_ts") or 0)
+        lbl_ts = Label(
+            text=ts_str, font_size="10sp",
+            color=get_color_from_hex("#10B981" if unread > 0 else "#64748B"),
+            size_hint=(None, 1), width=dp(54), halign="right", valign="middle"
+        )
+        lbl_ts.bind(size=lbl_ts.setter("text_size"))
+        top_line.add_widget(lbl_ts)
+
+        # Bottom line: Preview + Unread Pill
+        bot_line = BoxLayout(size_hint_y=None, height=dp(22), spacing=dp(6))
+        if is_typing:
+            prev_text = "Typing..."
+            prev_color = "#10B981"
+        else:
+            raw_prev = str(chat.get("last_preview") or "").replace("\r", " ").replace("\n", " ").strip()
+            prev_text = raw_prev or _short_jid(jid)
+            prev_color = "#CBD5E1" if unread > 0 else "#94A3B8"
+
+        lbl_prev = Label(
+            text=prev_text, font_size="11sp",
+            color=get_color_from_hex(prev_color),
+            halign="left", valign="middle", shorten=True, shorten_from="right"
+        )
+        lbl_prev.bind(size=lbl_prev.setter("text_size"))
+        bot_line.add_widget(lbl_prev)
+
+        if unread > 0:
+            badge_txt = "99+" if unread > 99 else str(unread)
+            badge = UnreadBadge(text=badge_txt, count=unread)
+            bot_line.add_widget(badge)
+
+        mid.add_widget(top_line)
+        mid.add_widget(bot_line)
+
+        row_btn.add_widget(avatar_wrap)
+        row_btn.add_widget(mid)
+
+        btn_menu = Factory.SecondaryButton(text="...", size_hint=(None, None), size=(dp(32), dp(68)))
+        btn_menu.font_size = "12sp"
+        btn_menu.bold = True
+        btn_menu.bind(on_release=lambda _b, ch=chat: self.open_chat_actions(ch))
+
+        wrapper.add_widget(row_btn)
+        wrapper.add_widget(btn_menu)
+        return wrapper
+
+    def open_chat_actions(self, chat: dict):
+        jid = chat.get("jid", "")
+        if not jid:
+            return
+        name = str(chat.get("display_name") or _short_jid(jid))
+        pinned = bool(chat.get("pinned"))
+        archived = bool(chat.get("archived"))
+        muted = int(chat.get("muted_until") or 0) > int(time.time())
+        unread = int(chat.get("unread_count") or 0)
+
+        modal = ModalView(size_hint=(0.86, None), height=dp(360), auto_dismiss=True)
+        modal.background_color = (0, 0, 0, 0.82)
+        card = Factory.DialogCard()
+        card.padding = dp(14)
+        card.spacing = dp(8)
+
+        lbl_t = Label(
+            text=name, font_size="15sp", bold=True, color=get_color_from_hex("#F8FAFC"),
+            size_hint_y=None, height=dp(24), halign="left", valign="middle", shorten=True
+        )
+        lbl_t.bind(size=lbl_t.setter("text_size"))
+        lbl_j = Label(
+            text=jid, font_size="10sp", color=get_color_from_hex("#64748B"),
+            size_hint_y=None, height=dp(18), halign="left", valign="middle", shorten=True
+        )
+        lbl_j.bind(size=lbl_j.setter("text_size"))
+        card.add_widget(lbl_t)
+        card.add_widget(lbl_j)
+
+        def _act(action_name: str):
+            self.root.send("/chat_action", jid, action_name)
+            modal.dismiss()
+            Clock.schedule_once(lambda _dt: self.refresh(immediate=True), 0.25)
+
+        actions = [
+            ("Unpin Chat" if pinned else "Pin Chat", "unpin" if pinned else "pin"),
+            ("Unarchive Chat" if archived else "Archive Chat", "unarchive" if archived else "archive"),
+            ("Unmute Chat" if muted else "Mute Chat", "unmute" if muted else "mute"),
+        ]
+        for label_txt, act_code in actions:
+            b = Factory.SecondaryButton(text=label_txt, size_hint_y=None, height=dp(36))
+            b.font_size = "12sp"
+            b.bind(on_release=lambda _b, ac=act_code: _act(ac))
+            card.add_widget(b)
+
+        if unread > 0:
+            b_read = Factory.PrimaryButton(text="Mark as Read", size_hint_y=None, height=dp(36))
+            b_read.font_size = "12sp"
+            def _do_read(*_):
+                self.root.send("/mark_read", jid)
+                modal.dismiss()
+                Clock.schedule_once(lambda _dt: self.refresh(immediate=True), 0.25)
+            b_read.bind(on_release=_do_read)
+            card.add_widget(b_read)
+
+        row_calls = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        b_v = Factory.SecondaryButton(text="Voice Call", size_hint=(0.5, 1))
+        b_v.font_size = "11sp"
+        b_v.bind(on_release=lambda *_: (self.root.send("/call_place", jid, 0), modal.dismiss()))
+        b_vid = Factory.SecondaryButton(text="Video Call", size_hint=(0.5, 1))
+        b_vid.font_size = "11sp"
+        b_vid.bind(on_release=lambda *_: (self.root.send("/call_place", jid, 1), modal.dismiss()))
+        row_calls.add_widget(b_v)
+        row_calls.add_widget(b_vid)
+        card.add_widget(row_calls)
+
+        b_close = Factory.SecondaryButton(text="Close", size_hint_y=None, height=dp(34))
+        b_close.bind(on_release=lambda *_: modal.dismiss())
+        card.add_widget(b_close)
+
+        modal.add_widget(card)
+        modal.open()
+
+
+class ChatRoomScreen(Screen):
+    """Full-featured Chat Room view with bubbles, quotes, media, reactions, Ghost Read & live YT call."""
+
+    def __init__(self, app_root, **kw):
+        super().__init__(name="chatroom", **kw)
+        self.root = app_root
+        self.current_jid = ""
+        self.chat_info = {}
+        self.msg_limit = 100
+        self.reply_to_msg = None
+        self._refresh_ev = None
+        self._contact_names = {}
+
+        layout = BoxLayout(orientation="vertical")
+
+        # ------------------------------------------------ Top Header Bar
+        header = BoxLayout(
+            size_hint_y=None, height=dp(58),
+            padding=[dp(8), dp(6), dp(8), dp(6)], spacing=dp(6)
+        )
+        with header.canvas.before:
+            Color(*get_color_from_hex("#0F172A"))
+            self._hdr_bg = Rectangle(pos=header.pos, size=header.size)
+            Color(*get_color_from_hex("#1E293B"))
+            self._hdr_line = Line(points=[header.x, header.y, header.right, header.y], width=dp(1))
+        header.bind(
+            pos=lambda w, *_: (
+                setattr(self._hdr_bg, "pos", w.pos),
+                setattr(self._hdr_line, "points", [w.x, w.y, w.right, w.y]),
+            ),
+            size=lambda w, *_: (
+                setattr(self._hdr_bg, "size", w.size),
+                setattr(self._hdr_line, "points", [w.x, w.y, w.right, w.y]),
+            ),
+        )
+
+        btn_back = Factory.SecondaryButton(text=ICON_PREV, size_hint=(None, None), size=(dp(34), dp(38)))
+        btn_back.font_size = "13sp"
+        btn_back.bind(on_release=lambda *_: self.root.switch_tab("chats"))
+
+        title_box = BoxLayout(orientation="vertical", spacing=dp(1))
+        self.lbl_title = Label(
+            text="Chat", font_size="14sp", bold=True, color=get_color_from_hex("#F8FAFC"),
+            halign="left", valign="middle", shorten=True, shorten_from="right"
+        )
+        self.lbl_title.bind(size=self.lbl_title.setter("text_size"))
+
+        self.lbl_sub = Label(
+            text="", font_size="10sp", color=get_color_from_hex("#94A3B8"),
+            halign="left", valign="middle", shorten=True, shorten_from="right"
+        )
+        self.lbl_sub.bind(size=self.lbl_sub.setter("text_size"))
+        title_box.add_widget(self.lbl_title)
+        title_box.add_widget(self.lbl_sub)
+
+        btn_voice = Factory.SecondaryButton(text="Voice", size_hint=(None, None), size=(dp(44), dp(34)))
+        btn_voice.font_size = "10sp"
+        btn_voice.bind(on_release=lambda *_: self.root.send("/call_place", self.current_jid, 0))
+
+        btn_video = Factory.SecondaryButton(text="Video", size_hint=(None, None), size=(dp(44), dp(34)))
+        btn_video.font_size = "10sp"
+        btn_video.bind(on_release=lambda *_: self.root.send("/call_place", self.current_jid, 1))
+
+        btn_yt = Factory.SecondaryButton(text="YT", size_hint=(None, None), size=(dp(32), dp(34)))
+        btn_yt.font_size = "10sp"
+        btn_yt.bold = True
+        btn_yt.color = get_color_from_hex("#10B981")
+        btn_yt.bind(on_release=lambda *_: self.open_yt_modal())
+
+        self.btn_mark_read = Factory.PrimaryButton(text="Read", size_hint=(None, None), size=(dp(44), dp(34)))
+        self.btn_mark_read.font_size = "10sp"
+        self.btn_mark_read.bind(on_release=self.on_manual_mark_read)
+
+        header.add_widget(btn_back)
+        header.add_widget(title_box)
+        header.add_widget(btn_voice)
+        header.add_widget(btn_video)
+        header.add_widget(btn_yt)
+        header.add_widget(self.btn_mark_read)
+        layout.add_widget(header)
+
+        # ------------------------------------------------ Message List
+        self.msg_scroll = ScrollView(size_hint=(1, 1))
+        self.msg_box = BoxLayout(
+            orientation="vertical", padding=[dp(10), dp(10), dp(10), dp(10)],
+            spacing=dp(8), size_hint_y=None
+        )
+        self.msg_box.bind(minimum_height=self.msg_box.setter("height"))
+        self.msg_scroll.add_widget(self.msg_box)
+        layout.add_widget(self.msg_scroll)
+
+        # ------------------------------------------------ Collapsible Reply Preview Bar
+        self.reply_bar = BoxLayout(
+            size_hint_y=None, height=0, opacity=0,
+            padding=[dp(10), dp(4), dp(10), dp(4)], spacing=dp(8)
+        )
+        with self.reply_bar.canvas.before:
+            Color(*get_color_from_hex("#0F172A"))
+            self._rep_bg = Rectangle(pos=self.reply_bar.pos, size=self.reply_bar.size)
+            Color(*get_color_from_hex("#10B981"))
+            self._rep_bar = Rectangle(pos=self.reply_bar.pos, size=(dp(3), self.reply_bar.height))
+        self.reply_bar.bind(
+            pos=lambda w, *_: (
+                setattr(self._rep_bg, "pos", w.pos),
+                setattr(self._rep_bar, "pos", w.pos),
+            ),
+            size=lambda w, *_: (
+                setattr(self._rep_bg, "size", w.size),
+                setattr(self._rep_bar, "size", (dp(3), w.height)),
+            ),
+        )
+        self.lbl_reply_preview = Label(
+            text="", font_size="11sp", color=get_color_from_hex("#CBD5E1"),
+            halign="left", valign="middle", shorten=True, shorten_from="right"
+        )
+        self.lbl_reply_preview.bind(size=self.lbl_reply_preview.setter("text_size"))
+        btn_cancel_reply = Factory.SecondaryButton(text=ICON_CLOSE, size_hint=(None, None), size=(dp(28), dp(28)))
+        btn_cancel_reply.font_size = "11sp"
+        btn_cancel_reply.bind(on_release=lambda *_: self.clear_reply())
+        self.reply_bar.add_widget(self.lbl_reply_preview)
+        self.reply_bar.add_widget(btn_cancel_reply)
+        layout.add_widget(self.reply_bar)
+
+        # ------------------------------------------------ Composer Bar
+        composer = BoxLayout(
+            size_hint_y=None, height=dp(54),
+            padding=[dp(8), dp(6), dp(8), dp(6)], spacing=dp(6)
+        )
+        with composer.canvas.before:
+            Color(*get_color_from_hex("#0F172A"))
+            self._comp_bg = Rectangle(pos=composer.pos, size=composer.size)
+            Color(*get_color_from_hex("#1E293B"))
+            self._comp_line = Line(points=[composer.x, composer.top, composer.right, composer.top], width=dp(1))
+        composer.bind(
+            pos=lambda w, *_: (
+                setattr(self._comp_bg, "pos", w.pos),
+                setattr(self._comp_line, "points", [w.x, w.top, w.right, w.top]),
+            ),
+            size=lambda w, *_: (
+                setattr(self._comp_bg, "size", w.size),
+                setattr(self._comp_line, "points", [w.x, w.top, w.right, w.top]),
+            ),
+        )
+
+        btn_attach = Factory.SecondaryButton(text="+", size_hint=(None, None), size=(dp(38), dp(40)))
+        btn_attach.font_size = "16sp"
+        btn_attach.bold = True
+        btn_attach.bind(on_release=self.on_attach_press)
+
+        self.input_msg = Factory.ModernInput(size_hint_x=1, height=dp(40))
+        self.input_msg.font_size = "13sp"
+        self.input_msg.hint_text = "Message..."
+        self.input_msg.bind(on_text_validate=self.on_send_press)
+
+        btn_send = Factory.PrimaryButton(text="Send", size_hint=(None, None), size=(dp(62), dp(40)))
+        btn_send.font_size = "12sp"
+        btn_send.bind(on_release=self.on_send_press)
+
+        composer.add_widget(btn_attach)
+        composer.add_widget(self.input_msg)
+        composer.add_widget(btn_send)
+        layout.add_widget(composer)
+
+        self.add_widget(layout)
+
+    def _ghost_read_enabled(self) -> bool:
+        cfg = getattr(self.root, "ghost_config", None)
+        if cfg is not None:
+            return bool(getattr(cfg, "ghost_read", False))
+        return bool(GhostConfig.load(private_dir()).ghost_read)
+
+    def load_chat(self, jid: str):
+        self.current_jid = normalize_jid(jid)
+        self.msg_limit = 100
+        self.clear_reply()
+        if not self.current_jid:
+            return
+        self.root.send("/subscribe_presence", self.current_jid)
+        if not self._ghost_read_enabled():
+            self.root.send("/mark_read", self.current_jid)
+        self.refresh(scroll_to_bottom=True)
+
+    def on_manual_mark_read(self, *_):
+        if not self.current_jid:
+            return
+        self.root.send("/mark_read", self.current_jid)
+        Clock.schedule_once(lambda _dt: self.refresh(scroll_to_bottom=False), 0.25)
+
+    def on_chat_updated(self, jid: str = ""):
+        if not self.current_jid:
+            return
+        if jid and normalize_jid(jid) != self.current_jid:
+            return
+        self.schedule_refresh(0.1)
+
+    def on_presence_update(self, jid: str, payload: dict = None):
+        if not self.current_jid:
+            return
+        if jid and normalize_jid(jid) != self.current_jid:
+            return
+        self._update_header_meta(override_presence=payload if isinstance(payload, dict) else None)
+
+    def schedule_refresh(self, delay: float = 0.12):
+        if self._refresh_ev is not None:
+            self._refresh_ev.cancel()
+        self._refresh_ev = Clock.schedule_once(lambda _dt: self.refresh(scroll_to_bottom=False), delay)
+
+    def _update_header_meta(self, override_presence: dict = None):
+        if not self.current_jid:
+            return
+        chat = None
+        try:
+            db = ClientDB.get(private_dir())
+            chat = db.get_chat(self.current_jid)
+            if chat is None:
+                # Contact without chat row yet
+                contacts = db.get_contacts(search=_short_jid(self.current_jid), limit=20)
+                for ct in contacts:
+                    if normalize_jid(ct.get("jid", "")) == self.current_jid:
+                        chat = {
+                            "jid": self.current_jid,
+                            "display_name": ct.get("display_name") or _short_jid(self.current_jid),
+                            "is_group": ct.get("is_group", 0),
+                            "is_online": ct.get("is_online", 0),
+                            "is_typing": ct.get("is_typing", 0),
+                            "last_seen_ts": ct.get("last_seen_ts", 0),
+                            "unread_count": 0,
+                        }
+                        break
+        except Exception as e:
+            log_exception(f"ChatRoom _update_header_meta error: {e}")
+
+        self.chat_info = chat or {"jid": self.current_jid, "display_name": _short_jid(self.current_jid), "unread_count": 0}
+        if override_presence:
+            for k in ("is_online", "is_typing", "last_seen_ts"):
+                if k in override_presence and override_presence[k] is not None:
+                    self.chat_info[k] = override_presence[k]
+
+        self.lbl_title.text = str(self.chat_info.get("display_name") or _short_jid(self.current_jid))
+
+        is_typing = bool(self.chat_info.get("is_typing"))
+        is_online = bool(self.chat_info.get("is_online"))
+        last_seen = int(self.chat_info.get("last_seen_ts") or 0)
+        if is_typing:
+            self.lbl_sub.text = "Typing..."
+            self.lbl_sub.color = get_color_from_hex("#10B981")
+        elif is_online:
+            self.lbl_sub.text = "Online"
+            self.lbl_sub.color = get_color_from_hex("#10B981")
+        elif last_seen > 0:
+            self.lbl_sub.text = f"Last seen {_fmt_ts(last_seen, include_time=True)}"
+            self.lbl_sub.color = get_color_from_hex("#94A3B8")
+        else:
+            self.lbl_sub.text = _short_jid(self.current_jid)
+            self.lbl_sub.color = get_color_from_hex("#64748B")
+
+        unread = int(self.chat_info.get("unread_count") or 0)
+        show_read = (unread > 0) or self._ghost_read_enabled()
+        if show_read:
+            self.btn_mark_read.width = dp(46)
+            self.btn_mark_read.opacity = 1
+            self.btn_mark_read.disabled = False
+        else:
+            self.btn_mark_read.width = 0
+            self.btn_mark_read.opacity = 0
+            self.btn_mark_read.disabled = True
+
+    def _resolve_sender_label(self, sender_jid: str) -> str:
+        nj = normalize_jid(sender_jid)
+        if nj in self._contact_names:
+            return self._contact_names[nj]
+        return _short_jid(nj) or "Contact"
+
+    def refresh(self, *_args, scroll_to_bottom: bool = False):
+        if self._refresh_ev is not None:
+            self._refresh_ev.cancel()
+            self._refresh_ev = None
+        if not self.current_jid:
+            return
+
+        self._update_header_meta()
+        try:
+            db = ClientDB.get(private_dir())
+            # Build fast sender lookup map once per render
+            self._contact_names = {
+                normalize_jid(ct.get("jid", "")): str(ct.get("display_name") or _short_jid(ct.get("jid", "")))
+                for ct in db.get_contacts(limit=500)
+            }
+            rows = db.get_messages(self.current_jid, limit=self.msg_limit + 1, offset=0)
+        except Exception as e:
+            log_exception(f"ChatRoomScreen.refresh error: {e}")
+            rows = []
+
+        has_older = len(rows) > self.msg_limit
+        messages = rows[-self.msg_limit:] if has_older else rows
+        is_group = bool(self.chat_info.get("is_group")) or self.current_jid.endswith("@g.us")
+
+        self.msg_box.clear_widgets()
+        if has_older:
+            btn_older = Factory.SecondaryButton(text="Load Older Messages", size_hint_y=None, height=dp(32))
+            btn_older.font_size = "11sp"
+            btn_older.bind(on_release=self._load_older)
+            self.msg_box.add_widget(btn_older)
+
+        if not messages:
+            lbl_none = Label(
+                text="No messages stored for this chat yet.",
+                font_size="12sp", color=get_color_from_hex("#64748B"),
+                size_hint_y=None, height=dp(60), halign="center", valign="middle"
+            )
+            lbl_none.bind(size=lbl_none.setter("text_size"))
+            self.msg_box.add_widget(lbl_none)
+            return
+
+        for msg in messages:
+            self.msg_box.add_widget(self._build_bubble_row(msg, is_group))
+
+        if scroll_to_bottom:
+            Clock.schedule_once(lambda _dt: setattr(self.msg_scroll, "scroll_y", 0), 0.05)
+
+    def _load_older(self, *_):
+        self.msg_limit += 100
+        self.refresh(scroll_to_bottom=False)
+
+    def _build_bubble_row(self, msg: dict, is_group: bool) -> BoxLayout:
+        from_me = bool(msg.get("from_me"))
+        outer = BoxLayout(orientation="horizontal", size_hint_y=None)
+
+        bubble = ClickableBubble(
+            from_me=from_me,
+            orientation="vertical",
+            size_hint=(0.82, None),
+            padding=[dp(10), dp(8), dp(10), dp(8)],
+            spacing=dp(4),
+        )
+        bubble.bind(
+            minimum_height=bubble.setter("height"),
+            height=lambda _w, h: setattr(outer, "height", h),
+        )
+        bubble.bind(on_release=lambda w, m=msg: (None if getattr(w, "_lp_triggered", False) else self.open_bubble_actions(m)))
+
+        def _fit_lbl(lbl: Label):
+            lbl.bind(
+                width=lambda w, v: setattr(w, "text_size", (max(dp(40), v), None)),
+                texture_size=lambda w, ts: setattr(w, "height", max(dp(14), ts[1])),
+            )
+            return lbl
+
+        # 1. Group sender label
+        if is_group and not from_me and msg.get("sender_id"):
+            sender_lbl = _fit_lbl(Label(
+                text=self._resolve_sender_label(msg["sender_id"]),
+                font_size="11sp", bold=True, color=get_color_from_hex("#38BDF8"),
+                size_hint_y=None, halign="left", valign="top"
+            ))
+            bubble.add_widget(sender_lbl)
+
+        # 2. Quoted reply snippet
+        quoted_id = str(msg.get("quoted_id") or "")
+        if quoted_id:
+            q_sender = self._resolve_sender_label(msg.get("quoted_sender") or "") if msg.get("quoted_sender") else "Reply"
+            q_body = str(msg.get("quoted_body") or "[Quoted message]").replace("\n", " ").strip()
+            if len(q_body) > 90:
+                q_body = q_body[:87] + "..."
+            q_box = BoxLayout(orientation="vertical", size_hint_y=None, padding=[dp(8), dp(4), dp(6), dp(4)], spacing=dp(1))
+            q_box.bind(minimum_height=q_box.setter("height"))
+            with q_box.canvas.before:
+                Color(*get_color_from_hex("#0F172A"))
+                q_bg = RoundedRectangle(pos=q_box.pos, size=q_box.size, radius=[dp(6)])
+                Color(*get_color_from_hex("#10B981"))
+                q_bar = Rectangle(pos=q_box.pos, size=(dp(3), q_box.height))
+            q_box.bind(
+                pos=lambda w, *_: (setattr(q_bg, "pos", w.pos), setattr(q_bar, "pos", w.pos)),
+                size=lambda w, *_: (setattr(q_bg, "size", w.size), setattr(q_bar, "size", (dp(3), w.height))),
+            )
+            q_box.add_widget(_fit_lbl(Label(
+                text=q_sender, font_size="10sp", bold=True,
+                color=get_color_from_hex("#10B981"), size_hint_y=None, halign="left", valign="top"
+            )))
+            q_box.add_widget(_fit_lbl(Label(
+                text=q_body, font_size="11sp",
+                color=get_color_from_hex("#CBD5E1"), size_hint_y=None, halign="left", valign="top"
+            )))
+            bubble.add_widget(q_box)
+
+        # 3. View-Once / Deleted / Edited badges
+        if msg.get("is_view_once"):
+            bubble.add_widget(_fit_lbl(Label(
+                text="[View-Once Saved]", font_size="10sp", bold=True,
+                color=get_color_from_hex("#F59E0B"), size_hint_y=None, halign="left", valign="top"
+            )))
+
+        if msg.get("is_deleted"):
+            rec = str(msg.get("original_body") or msg.get("body") or "[media]").strip()
+            bubble.add_widget(_fit_lbl(Label(
+                text=f"[Deleted - Recovered: {rec}]", font_size="11sp", bold=True,
+                color=get_color_from_hex("#EF4444"), size_hint_y=None, halign="left", valign="top"
+            )))
+        elif msg.get("is_edited") and msg.get("original_body"):
+            orig = str(msg.get("original_body") or "").strip()
+            bubble.add_widget(_fit_lbl(Label(
+                text=f"[Edited - Orig: {orig}]", font_size="10sp",
+                color=get_color_from_hex("#F59E0B"), size_hint_y=None, halign="left", valign="top"
+            )))
+
+        # 4. Media Attachment Preview / Action
+        mtype = str(msg.get("msg_type") or "text").lower()
+        mpath = str(msg.get("media_path") or "")
+        tag_map = {
+            "image": "[Photo]", "video": "[Video]", "audio": "[Audio]",
+            "ptt": "[Voice Note]", "document": "[Document]", "sticker": "[Sticker]"
+        }
+        if mtype != "text" or mpath:
+            tag = tag_map.get(mtype, f"[{mtype.capitalize()}]")
+            if mpath and os.path.exists(mpath):
+                ext = os.path.splitext(mpath)[1].lower()
+                if mtype == "image" and ext in (".jpg", ".jpeg", ".png") and os.path.getsize(mpath) > 0:
+                    img_preview = Image(source=mpath, size_hint_y=None, height=dp(140), fit_mode="contain")
+                    bubble.add_widget(img_preview)
+                btn_m = Factory.SecondaryButton(
+                    text=f"{tag} {os.path.basename(mpath)}",
+                    size_hint_y=None, height=dp(30)
+                )
+                btn_m.font_size = "10sp"
+                btn_m.bind(on_release=lambda _b, p=mpath: _open_media_file(p))
+                bubble.add_widget(btn_m)
+            elif mtype != "text":
+                btn_dl = Factory.SecondaryButton(
+                    text=f"{tag} Tap to Download",
+                    size_hint_y=None, height=dp(30)
+                )
+                btn_dl.font_size = "10sp"
+                btn_dl.bind(on_release=lambda _b, mid=msg.get("id", ""): self.root.send("/download_msg_media", self.current_jid, mid))
+                bubble.add_widget(btn_dl)
+
+        # 5. Message Body
+        body = str(msg.get("body") or "")
+        if body and not (msg.get("is_deleted") and body == msg.get("original_body")):
+            text_color = "#ECFDF5" if from_me else "#F8FAFC"
+            bubble.add_widget(_fit_lbl(Label(
+                text=body, font_size="13sp",
+                color=get_color_from_hex(text_color),
+                size_hint_y=None, halign="left", valign="top"
+            )))
+
+        # 6. Reactions summary
+        rx_raw = str(msg.get("reactions_json") or "{}")
+        try:
+            rx_map = json.loads(rx_raw) if rx_raw else {}
+            if isinstance(rx_map, dict) and rx_map:
+                counts = {}
+                for em in rx_map.values():
+                    if em:
+                        counts[em] = counts.get(em, 0) + 1
+                if counts:
+                    rx_txt = "  ".join(f"{em} {cnt}" if cnt > 1 else em for em, cnt in counts.items())
+                    bubble.add_widget(_fit_lbl(Label(
+                        text=rx_txt, font_size="11sp",
+                        color=get_color_from_hex("#CBD5E1"),
+                        size_hint_y=None, halign="left", valign="top"
+                    )))
+        except Exception:
+            pass
+
+        # 7. Timestamp & Delivery Ticks Footer
+        foot = BoxLayout(size_hint_y=None, height=dp(16), spacing=dp(4))
+        foot.add_widget(Widget())
+        ts_lbl = Label(
+            text=_fmt_ts(msg.get("ts") or 0), font_size="9sp",
+            color=get_color_from_hex("#A7F3D0" if from_me else "#94A3B8"),
+            size_hint=(None, 1), width=dp(48), halign="right", valign="middle"
+        )
+        ts_lbl.bind(size=ts_lbl.setter("text_size"))
+        foot.add_widget(ts_lbl)
+
+        if from_me:
+            st = str(msg.get("receipt_status") or "sent").lower()
+            if st in ("read", "played"):
+                tick_txt, tick_col = "✓✓", "#38BDF8"
+            elif st == "delivered":
+                tick_txt, tick_col = "✓✓", "#CBD5E1"
+            elif st == "pending":
+                tick_txt, tick_col = "...", "#94A3B8"
+            else:
+                tick_txt, tick_col = "✓", "#CBD5E1"
+            lbl_tick = Label(
+                text=tick_txt, font_size="10sp", bold=True,
+                color=get_color_from_hex(tick_col),
+                size_hint=(None, 1), width=dp(22), halign="right", valign="middle"
+            )
+            lbl_tick.bind(size=lbl_tick.setter("text_size"))
+            foot.add_widget(lbl_tick)
+
+        bubble.add_widget(foot)
+
+        if from_me:
+            outer.add_widget(Widget(size_hint_x=0.18))
+            outer.add_widget(bubble)
+        else:
+            outer.add_widget(bubble)
+            outer.add_widget(Widget(size_hint_x=0.18))
+        return outer
+
+    def set_reply(self, msg: dict):
+        self.reply_to_msg = msg
+        sender = "You" if msg.get("from_me") else self._resolve_sender_label(msg.get("sender_id") or "")
+        snippet = str(msg.get("body") or msg.get("original_body") or f"[{msg.get('msg_type', 'media')}]")
+        snippet = snippet.replace("\n", " ").strip()
+        if len(snippet) > 64:
+            snippet = snippet[:61] + "..."
+        self.lbl_reply_preview.text = f"Replying to {sender}: {snippet}"
+        self.reply_bar.height = dp(40)
+        self.reply_bar.opacity = 1
+
+    def clear_reply(self):
+        self.reply_to_msg = None
+        self.lbl_reply_preview.text = ""
+        self.reply_bar.height = 0
+        self.reply_bar.opacity = 0
+
+    def open_bubble_actions(self, msg: dict):
+        msg_id = str(msg.get("id") or "")
+        body = str(msg.get("body") or msg.get("original_body") or "")
+        mpath = str(msg.get("media_path") or "")
+        mtype = str(msg.get("msg_type") or "text").lower()
+
+        has_media_btn = (bool(mpath) and os.path.exists(mpath)) or (mtype != "text")
+        modal_h = dp(292 if has_media_btn else 248)
+        modal = ModalView(size_hint=(0.82, None), height=modal_h, auto_dismiss=True)
+        modal.background_color = (0, 0, 0, 0.80)
+        card = Factory.DialogCard()
+        card.padding = dp(14)
+        card.spacing = dp(8)
+
+        preview = (body or f"[{mtype}]").replace("\n", " ").strip()
+        if len(preview) > 56:
+            preview = preview[:53] + "..."
+        lbl_h = Label(
+            text=preview, font_size="12sp", bold=True, color=get_color_from_hex("#F8FAFC"),
+            size_hint_y=None, height=dp(24), halign="left", valign="middle", shorten=True
+        )
+        lbl_h.bind(size=lbl_h.setter("text_size"))
+        card.add_widget(lbl_h)
+
+        # Quick React row
+        react_row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+        for em in ("👍", "❤️", "😂"):
+            br = Factory.SecondaryButton(text=f"React {em}", size_hint=(1, 1))
+            br.font_size = "11sp"
+            def _react(_b, e=em):
+                self.root.send("/send_reaction", self.current_jid, msg_id, e)
+                modal.dismiss()
+            br.bind(on_release=_react)
+            react_row.add_widget(br)
+        card.add_widget(react_row)
+
+        btn_rep = Factory.PrimaryButton(text="Reply", size_hint_y=None, height=dp(36))
+        btn_rep.font_size = "12sp"
+        btn_rep.bind(on_release=lambda *_: (self.set_reply(msg), modal.dismiss()))
+        card.add_widget(btn_rep)
+
+        btn_cpy = Factory.SecondaryButton(text="Copy Text", size_hint_y=None, height=dp(36))
+        btn_cpy.font_size = "12sp"
+        btn_cpy.bind(on_release=lambda *_: (Clipboard.put(body), modal.dismiss()))
+        card.add_widget(btn_cpy)
+
+        if mpath and os.path.exists(mpath):
+            btn_open = Factory.SecondaryButton(text="Open Media", size_hint_y=None, height=dp(36))
+            btn_open.font_size = "12sp"
+            btn_open.bind(on_release=lambda *_: (modal.dismiss(), _open_media_file(mpath)))
+            card.add_widget(btn_open)
+        elif mtype != "text":
+            btn_dl = Factory.SecondaryButton(text="Download Media", size_hint_y=None, height=dp(36))
+            btn_dl.font_size = "12sp"
+            btn_dl.bind(on_release=lambda *_: (self.root.send("/download_msg_media", self.current_jid, msg_id), modal.dismiss()))
+            card.add_widget(btn_dl)
+
+        btn_cls = Factory.SecondaryButton(text="Close", size_hint_y=None, height=dp(32))
+        btn_cls.bind(on_release=lambda *_: modal.dismiss())
+        card.add_widget(btn_cls)
+
+        modal.add_widget(card)
+        modal.open()
+
+    def on_send_press(self, *_):
+        if not self.current_jid:
+            return
+        text = self.input_msg.text.strip()
+        if not text:
+            return
+        quoted_id = str(self.reply_to_msg.get("id") or "") if self.reply_to_msg else ""
+        self.root.send("/send_chat", self.current_jid, text, quoted_id)
+        self.input_msg.text = ""
+        self.clear_reply()
+        Clock.schedule_once(lambda _dt: self.refresh(scroll_to_bottom=True), 0.25)
+
+    def on_attach_press(self, *_):
+        if not self.current_jid:
+            return
+        _pick_attachment_file(self._on_attachment_picked)
+
+    def _on_attachment_picked(self, local_path: str):
+        if not local_path or not os.path.exists(local_path):
+            return
+        kinds = ["image", "video", "audio", "document"]
+        sel_kind = [_infer_media_kind(local_path)]
+
+        modal = ModalView(size_hint=(0.88, None), height=dp(260), auto_dismiss=True)
+        modal.background_color = (0, 0, 0, 0.82)
+        card = Factory.DialogCard()
+        card.padding = dp(14)
+        card.spacing = dp(8)
+
+        lbl_t = Label(
+            text=f"Send Attachment: {os.path.basename(local_path)}",
+            font_size="13sp", bold=True, color=get_color_from_hex("#F8FAFC"),
+            size_hint_y=None, height=dp(24), halign="left", valign="middle", shorten=True
+        )
+        lbl_t.bind(size=lbl_t.setter("text_size"))
+
+        btn_kind = Factory.SecondaryButton(text=f"Type: {sel_kind[0]}", size_hint_y=None, height=dp(34))
+        btn_kind.font_size = "11sp"
+        def _cycle_kind(*_):
+            idx = (kinds.index(sel_kind[0]) + 1) % len(kinds) if sel_kind[0] in kinds else 0
+            sel_kind[0] = kinds[idx]
+            btn_kind.text = f"Type: {sel_kind[0]}"
+        btn_kind.bind(on_release=_cycle_kind)
+
+        cap_input = Factory.ModernInput(size_hint_y=None, height=dp(40))
+        cap_input.font_size = "12sp"
+        cap_input.hint_text = "Caption (optional)..."
+        cap_input.text = self.input_msg.text.strip()
+
+        row_btns = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
+        btn_cancel = Factory.SecondaryButton(text="Cancel", size_hint=(0.4, 1))
+        btn_cancel.bind(on_release=lambda *_: modal.dismiss())
+        btn_go = Factory.PrimaryButton(text="Send Media", size_hint=(0.6, 1))
+        def _send_m(*_):
+            caption = cap_input.text.strip()
+            self.root.send("/send_media", self.current_jid, sel_kind[0], local_path, caption)
+            if caption and caption == self.input_msg.text.strip():
+                self.input_msg.text = ""
+            modal.dismiss()
+            Clock.schedule_once(lambda _dt: self.refresh(scroll_to_bottom=True), 0.3)
+        btn_go.bind(on_release=_send_m)
+        row_btns.add_widget(btn_cancel)
+        row_btns.add_widget(btn_go)
+
+        card.add_widget(lbl_t)
+        card.add_widget(btn_kind)
+        card.add_widget(cap_input)
+        card.add_widget(row_btns)
+        modal.add_widget(card)
+        modal.open()
+
+    def open_yt_modal(self):
+        if not self.current_jid:
+            return
+        name = str(self.chat_info.get("display_name") or _short_jid(self.current_jid))
+        vq = ["480p"]
+        bm = ["normal"]
+
+        modal = ModalView(size_hint=(0.90, None), height=dp(265), auto_dismiss=True)
+        modal.background_color = (0, 0, 0, 0.82)
+        card = Factory.DialogCard()
+        card.padding = dp(14)
+        card.spacing = dp(8)
+
+        lbl_t = Label(
+            text=f"YouTube Live Stream -> {name}",
+            font_size="14sp", bold=True, color=get_color_from_hex("#F8FAFC"),
+            size_hint_y=None, height=dp(24), halign="left", valign="middle", shorten=True
+        )
+        lbl_t.bind(size=lbl_t.setter("text_size"))
+
+        inp_q = Factory.ModernInput(size_hint_y=None, height=dp(40))
+        inp_q.font_size = "12sp"
+        inp_q.hint_text = "YouTube URL or song/video title..."
+
+        row_opts = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(8))
+        btn_vq = Factory.SecondaryButton(text="Quality: 480p", size_hint=(0.5, 1))
+        btn_vq.font_size = "11sp"
+        btn_vq.bind(on_release=lambda *_: (
+            vq.__setitem__(0, "360p" if vq[0] == "480p" else "480p"),
+            setattr(btn_vq, "text", f"Quality: {vq[0]}")
+        ))
+        btn_bm = Factory.SecondaryButton(text="Buffer: normal", size_hint=(0.5, 1))
+        btn_bm.font_size = "11sp"
+        modes = ["normal", "slow", "fast"]
+        btn_bm.bind(on_release=lambda *_: (
+            bm.__setitem__(0, modes[(modes.index(bm[0]) + 1) % len(modes)]),
+            setattr(btn_bm, "text", f"Buffer: {bm[0]}")
+        ))
+        row_opts.add_widget(btn_vq)
+        row_opts.add_widget(btn_bm)
+
+        row_go = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
+        btn_voice = Factory.PrimaryButton(text="Live Voice", size_hint=(0.5, 1))
+        btn_voice.font_size = "11sp"
+        btn_video = Factory.SecondaryButton(text="Live Video", size_hint=(0.5, 1))
+        btn_video.font_size = "11sp"
+
+        def _launch(is_vid: int):
+            q_txt = inp_q.text.strip()
+            if not q_txt:
+                return
+            self.root.send("/yt_call_stream", self.current_jid, q_txt, is_vid, vq[0], bm[0])
+            modal.dismiss()
+
+        btn_voice.bind(on_release=lambda *_: _launch(0))
+        btn_video.bind(on_release=lambda *_: _launch(1))
+        row_go.add_widget(btn_voice)
+        row_go.add_widget(btn_video)
+
+        btn_cls = Factory.SecondaryButton(text="Cancel", size_hint_y=None, height=dp(32))
+        btn_cls.bind(on_release=lambda *_: modal.dismiss())
+
+        card.add_widget(lbl_t)
+        card.add_widget(inp_q)
+        card.add_widget(row_opts)
+        card.add_widget(row_go)
+        card.add_widget(btn_cls)
+        modal.add_widget(card)
+        modal.open()
+
+
+class ContactsScreen(Screen):
+    """Contacts & Groups directory with live number verification and 1-tap Chat/Voice/Video."""
+
+    FILTERS = [(None, "All"), (False, "People"), (True, "Groups")]
+
+    def __init__(self, app_root, **kw):
+        super().__init__(name="contacts", **kw)
+        self.root = app_root
+        self.groups_only = None
+        self.render_limit = 120
+        self._refresh_ev = None
+        self.filter_btns = {}
+        self._checked_jid = ""
+
+        layout = BoxLayout(orientation="vertical", padding=[dp(12), dp(8), dp(12), dp(8)], spacing=dp(8))
+
+        # Search + Resync row
+        top_row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(6))
+        self.search_input = Factory.ModernInput(size_hint_x=1, height=dp(38))
+        self.search_input.font_size = "12sp"
+        self.search_input.hint_text = "Search contacts, numbers, groups..."
+        self.search_input.bind(text=lambda *_: self.schedule_refresh(0.08))
+
+        btn_resync = Factory.SecondaryButton(text="Resync", size_hint=(None, None), size=(dp(72), dp(38)))
+        btn_resync.font_size = "11sp"
+        btn_resync.bind(on_release=lambda *_: (self.root.send("/resync_contacts"), self.root.on_log("Resyncing contacts...")))
+
+        top_row.add_widget(self.search_input)
+        top_row.add_widget(btn_resync)
+        layout.add_widget(top_row)
+
+        # Filter pills: All | People | Groups
+        filter_row = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
+        for g_opt, flabel in self.FILTERS:
+            btn = FilterPill(text=flabel, size_hint=(1, None), height=dp(30))
+            btn.bind(on_release=lambda _, opt=g_opt: self.set_filter(opt))
+            self.filter_btns[g_opt] = btn
+            filter_row.add_widget(btn)
+        layout.add_widget(filter_row)
+
+        # Check Number Bar
+        chk_row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(6))
+        self.input_check = Factory.ModernInput(size_hint_x=1, height=dp(38))
+        self.input_check.font_size = "12sp"
+        self.input_check.hint_text = "Check phone on WhatsApp (e.g. 9198xxxxxxxx)"
+        btn_check = Factory.SecondaryButton(text="Check", size_hint=(None, None), size=(dp(68), dp(38)))
+        btn_check.font_size = "11sp"
+        btn_check.bind(on_release=self.on_check_number)
+        chk_row.add_widget(self.input_check)
+        chk_row.add_widget(btn_check)
+        layout.add_widget(chk_row)
+
+        # Check Number Result Banner (collapsible)
+        self.chk_banner = BoxLayout(size_hint_y=None, height=0, opacity=0, padding=[dp(10), dp(4), dp(10), dp(4)], spacing=dp(8))
+        with self.chk_banner.canvas.before:
+            Color(*get_color_from_hex("#0F172A"))
+            self._chk_bg = RoundedRectangle(pos=self.chk_banner.pos, size=self.chk_banner.size, radius=[dp(8)])
+        self.chk_banner.bind(
+            pos=lambda w, *_: setattr(self._chk_bg, "pos", w.pos),
+            size=lambda w, *_: setattr(self._chk_bg, "size", w.size),
+        )
+        self.lbl_chk_res = Label(
+            text="", font_size="11sp", color=get_color_from_hex("#CBD5E1"),
+            halign="left", valign="middle", shorten=True
+        )
+        self.lbl_chk_res.bind(size=self.lbl_chk_res.setter("text_size"))
+        self.btn_chk_chat = Factory.PrimaryButton(text="Chat", size_hint=(None, None), size=(dp(56), dp(28)))
+        self.btn_chk_chat.font_size = "10sp"
+        self.btn_chk_chat.bind(on_release=lambda *_: (self.root.open_chat(self._checked_jid) if self._checked_jid else None))
+        btn_chk_hide = Factory.SecondaryButton(text=ICON_CLOSE, size_hint=(None, None), size=(dp(28), dp(28)))
+        btn_chk_hide.font_size = "10sp"
+        btn_chk_hide.bind(on_release=lambda *_: self._hide_check_banner())
+        self.chk_banner.add_widget(self.lbl_chk_res)
+        self.chk_banner.add_widget(self.btn_chk_chat)
+        self.chk_banner.add_widget(btn_chk_hide)
+        layout.add_widget(self.chk_banner)
+
+        # Contacts list
+        self.scroll = ScrollView(size_hint=(1, 1))
+        self.list_box = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None)
+        self.list_box.bind(minimum_height=self.list_box.setter("height"))
+        self.scroll.add_widget(self.list_box)
+        layout.add_widget(self.scroll)
+
+        self.add_widget(layout)
+        self._update_filter_pills()
+
+    def _update_filter_pills(self):
+        for opt, btn in self.filter_btns.items():
+            btn.active = (opt is self.groups_only)
+
+    def set_filter(self, groups_only):
+        self.groups_only = groups_only
+        self.render_limit = 120
+        self._update_filter_pills()
+        self.refresh(immediate=True)
+
+    def _hide_check_banner(self):
+        self.chk_banner.height = 0
+        self.chk_banner.opacity = 0
+        self._checked_jid = ""
+
+    def on_check_number(self, *_):
+        phone = self.input_check.text.strip().lstrip("+")
+        if not phone:
+            return
+        self._checked_jid = ""
+        self.btn_chk_chat.width = 0
+        self.btn_chk_chat.opacity = 0
+        self.btn_chk_chat.disabled = True
+        self.lbl_chk_res.text = f"Checking +{phone}..."
+        self.lbl_chk_res.color = get_color_from_hex("#38BDF8")
+        self.chk_banner.height = dp(38)
+        self.chk_banner.opacity = 1
+        self.root.send("/check_number", phone)
+
+    def on_check_number_result(self, payload_args):
+        raw = payload_args[0] if payload_args else ""
+        registered = False
+        jid = ""
+        phone = ""
+        err = ""
+        try:
+            if isinstance(raw, str) and raw.strip().startswith("{"):
+                d = json.loads(raw)
+                registered = bool(d.get("registered") or d.get("is_in") or d.get("exists"))
+                jid = normalize_jid(d.get("jid") or "")
+                phone = str(d.get("phone") or d.get("query") or "")
+                err = str(d.get("error") or "")
+            else:
+                txt = str(raw)
+                registered = ("true" in txt.lower() or "registered" in txt.lower()) and "not" not in txt.lower()
+                if len(payload_args) > 1:
+                    jid = normalize_jid(str(payload_args[1]))
+                phone = txt
+        except Exception:
+            err = str(raw)
+
+        self.chk_banner.height = dp(38)
+        self.chk_banner.opacity = 1
+        if err:
+            self._checked_jid = ""
+            self.lbl_chk_res.text = f"Check error: {err}"
+            self.lbl_chk_res.color = get_color_from_hex("#EF4444")
+            self.btn_chk_chat.width = 0
+            self.btn_chk_chat.opacity = 0
+            self.btn_chk_chat.disabled = True
+        elif registered and jid:
+            self._checked_jid = jid
+            self.lbl_chk_res.text = f"On WhatsApp: {phone or _short_jid(jid)}"
+            self.lbl_chk_res.color = get_color_from_hex("#10B981")
+            self.btn_chk_chat.width = dp(56)
+            self.btn_chk_chat.opacity = 1
+            self.btn_chk_chat.disabled = False
+        else:
+            self._checked_jid = ""
+            self.lbl_chk_res.text = f"Not registered on WhatsApp ({phone or 'unknown'})"
+            self.lbl_chk_res.color = get_color_from_hex("#F59E0B")
+            self.btn_chk_chat.width = 0
+            self.btn_chk_chat.opacity = 0
+            self.btn_chk_chat.disabled = True
+        self.schedule_refresh(0.15)
+
+    def schedule_refresh(self, delay: float = 0.12):
+        if self._refresh_ev is not None:
+            self._refresh_ev.cancel()
+        self._refresh_ev = Clock.schedule_once(lambda _dt: self.refresh(immediate=True), delay)
+
+    def refresh(self, *_args, immediate: bool = False):
+        if self._refresh_ev is not None:
+            self._refresh_ev.cancel()
+            self._refresh_ev = None
+        try:
+            db = ClientDB.get(private_dir())
+            q = self.search_input.text.strip()
+            rows = db.get_contacts(search=q, groups_only=self.groups_only, limit=self.render_limit + 1)
+        except Exception as e:
+            log_exception(f"ContactsScreen.refresh error: {e}")
+            rows = []
+
+        has_more = len(rows) > self.render_limit
+        contacts = rows[: self.render_limit]
+
+        self.list_box.clear_widgets()
+        if not contacts:
+            empty = Factory.Card()
+            lbl = Label(
+                text="No contacts found. Tap 'Resync' or verify a phone number above.",
+                font_size="12sp", color=get_color_from_hex("#94A3B8"),
+                size_hint_y=None, height=dp(44), halign="center", valign="middle"
+            )
+            lbl.bind(size=lbl.setter("text_size"))
+            empty.add_widget(lbl)
+            self.list_box.add_widget(empty)
+            return
+
+        for ct in contacts:
+            self.list_box.add_widget(self._build_contact_row(ct))
+
+        if has_more:
+            btn_more = Factory.SecondaryButton(text="Load More Contacts", size_hint_y=None, height=dp(36))
+            btn_more.font_size = "11sp"
+            btn_more.bind(on_release=lambda *_: (setattr(self, "render_limit", self.render_limit + 120), self.refresh(immediate=True)))
+            self.list_box.add_widget(btn_more)
+
+    def _build_contact_row(self, ct: dict) -> BoxLayout:
+        jid = ct.get("jid", "")
+        name = str(ct.get("display_name") or _short_jid(jid) or jid)
+        is_group = bool(ct.get("is_group")) or jid.endswith("@g.us")
+        sub = str(ct.get("about") or ct.get("phone") or _short_jid(jid)).replace("\n", " ").strip()
+
+        card = BoxLayout(size_hint_y=None, height=dp(62), padding=[dp(10), dp(6), dp(10), dp(6)], spacing=dp(8))
+        with card.canvas.before:
+            Color(*get_color_from_hex("#0F172A"))
+            bg = RoundedRectangle(pos=card.pos, size=card.size, radius=[dp(10)])
+            Color(*get_color_from_hex("#1E293B"))
+            ln = Line(rounded_rectangle=[card.x, card.y, card.width, card.height, dp(10)], width=dp(1))
+        card.bind(
+            pos=lambda w, *_: (
+                setattr(bg, "pos", w.pos),
+                setattr(ln, "rounded_rectangle", [w.x, w.y, w.width, w.height, dp(10)]),
+            ),
+            size=lambda w, *_: (
+                setattr(bg, "size", w.size),
+                setattr(ln, "rounded_rectangle", [w.x, w.y, w.width, w.height, dp(10)]),
+            ),
+        )
+
+        av_wrap = BoxLayout(orientation="vertical", size_hint=(None, 1), width=dp(42))
+        av_wrap.add_widget(Widget())
+        av_wrap.add_widget(AvatarBadge(text=_initials(name, jid), is_group=is_group, is_online=bool(ct.get("is_online"))))
+        av_wrap.add_widget(Widget())
+
+        mid = BoxLayout(orientation="vertical", spacing=dp(2))
+        lbl_n = Label(
+            text=name, font_size="13sp", bold=True, color=get_color_from_hex("#F8FAFC"),
+            halign="left", valign="middle", shorten=True, shorten_from="right"
+        )
+        lbl_n.bind(size=lbl_n.setter("text_size"))
+        lbl_s = Label(
+            text=sub, font_size="10sp", color=get_color_from_hex("#94A3B8"),
+            halign="left", valign="middle", shorten=True, shorten_from="right"
+        )
+        lbl_s.bind(size=lbl_s.setter("text_size"))
+        mid.add_widget(lbl_n)
+        mid.add_widget(lbl_s)
+
+        btn_chat = Factory.PrimaryButton(text="Chat", size_hint=(None, None), size=(dp(48), dp(32)))
+        btn_chat.font_size = "10sp"
+        btn_chat.bind(on_release=lambda _b, j=jid: self.root.open_chat(j))
+
+        btn_voice = Factory.SecondaryButton(text="Voice", size_hint=(None, None), size=(dp(44), dp(32)))
+        btn_voice.font_size = "10sp"
+        btn_voice.bind(on_release=lambda _b, j=jid: self.root.send("/call_place", j, 0))
+
+        btn_video = Factory.SecondaryButton(text="Video", size_hint=(None, None), size=(dp(44), dp(32)))
+        btn_video.font_size = "10sp"
+        btn_video.bind(on_release=lambda _b, j=jid: self.root.send("/call_place", j, 1))
+
+        def _vwrap(btn):
+            vb = BoxLayout(orientation="vertical", size_hint=(None, 1), width=btn.width)
+            vb.add_widget(Widget())
+            vb.add_widget(btn)
+            vb.add_widget(Widget())
+            return vb
+
+        card.add_widget(av_wrap)
+        card.add_widget(mid)
+        card.add_widget(_vwrap(btn_chat))
+        card.add_widget(_vwrap(btn_voice))
+        card.add_widget(_vwrap(btn_video))
+        return card
+
+
 class CallsScreen(Screen):
     """Voice & Video Call Controller, In-Call Music/Video DJ Deck, Auto-Policy, and Call History."""
 
     VOICE_MODES = ["off", "music", "reject", "vip"]
     VIDEO_MODES = ["same", "music", "reject", "off"]
+    YT_QUALITIES = ["480p", "360p"]
+    YT_BUFFERS = ["normal", "slow", "fast"]
 
     def __init__(self, app_root, **kw):
         super().__init__(name="calls", **kw)
@@ -1770,6 +3413,8 @@ class CallsScreen(Screen):
         self.tracks = {"audio": [], "video": []}
         self.voice_mode = "off"
         self.video_mode = "same"
+        self.yt_vquality = "480p"
+        self.yt_buffer_mode = "normal"
 
         scroll = ScrollView(size_hint=(1, 1))
         content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(12), size_hint_y=None)
@@ -1872,7 +3517,62 @@ class CallsScreen(Screen):
         card_live.add_widget(row_trk)
         card_live.add_widget(row_player)
 
-        # ------------------------------------------------ Card 2: Place Voice / Video Call
+        # ------------------------------------------------ Card 2: YouTube Live Stream Deck
+        card_yt = Factory.Card()
+        card_yt.padding = [dp(14), dp(12), dp(14), dp(12)]
+        card_yt.spacing = dp(8)
+
+        lbl_yt_title = Label(
+            text="YouTube Live Stream Deck", font_size="14sp", bold=True,
+            color=get_color_from_hex("#F8FAFC"), size_hint_y=None, height=dp(24), halign="left"
+        )
+        lbl_yt_title.bind(size=lbl_yt_title.setter("text_size"))
+
+        self.input_yt_query = Factory.ModernInput()
+        self.input_yt_query.hint_text = "YouTube URL or song/video search..."
+
+        self.input_yt_target = Factory.ModernInput()
+        self.input_yt_target.hint_text = "Target number (blank = active call)"
+
+        row_yt_opts = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        self.btn_yt_vquality = Factory.SecondaryButton(text="Video Quality: 480p", size_hint=(0.5, 1))
+        self.btn_yt_vquality.font_size = "11sp"
+        self.btn_yt_vquality.bind(on_release=self.cycle_yt_vquality)
+
+        self.btn_yt_buffer = Factory.SecondaryButton(text="Buffer: normal", size_hint=(0.5, 1))
+        self.btn_yt_buffer.font_size = "11sp"
+        self.btn_yt_buffer.bind(on_release=self.cycle_yt_buffer)
+
+        row_yt_opts.add_widget(self.btn_yt_vquality)
+        row_yt_opts.add_widget(self.btn_yt_buffer)
+
+        row_yt_btns = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
+        btn_yt_voice = Factory.PrimaryButton(text="Live Voice Stream", size_hint=(0.5, 1))
+        btn_yt_voice.font_size = "11sp"
+        btn_yt_voice.bind(on_release=lambda *_: self.start_yt_stream(is_video=0))
+
+        btn_yt_video = Factory.SecondaryButton(text="Live Video Stream", size_hint=(0.5, 1))
+        btn_yt_video.font_size = "11sp"
+        btn_yt_video.bind(on_release=lambda *_: self.start_yt_stream(is_video=1))
+
+        row_yt_btns.add_widget(btn_yt_voice)
+        row_yt_btns.add_widget(btn_yt_video)
+
+        self.lbl_yt_status = Label(
+            text="Idle. Ready to stream YouTube audio/video.",
+            font_size="11sp", color=get_color_from_hex("#94A3B8"),
+            size_hint_y=None, height=dp(26), halign="left", valign="middle"
+        )
+        self.lbl_yt_status.bind(size=self.lbl_yt_status.setter("text_size"))
+
+        card_yt.add_widget(lbl_yt_title)
+        card_yt.add_widget(self.input_yt_query)
+        card_yt.add_widget(self.input_yt_target)
+        card_yt.add_widget(row_yt_opts)
+        card_yt.add_widget(row_yt_btns)
+        card_yt.add_widget(self.lbl_yt_status)
+
+        # ------------------------------------------------ Card 3: Place Voice / Video Call
         card_dial = Factory.Card()
         card_dial.padding = [dp(14), dp(12), dp(14), dp(12)]
         card_dial.spacing = dp(8)
@@ -1980,6 +3680,7 @@ class CallsScreen(Screen):
         card_hist.add_widget(self.hist_box)
 
         content.add_widget(card_live)
+        content.add_widget(card_yt)
         content.add_widget(card_dial)
         content.add_widget(card_policy)
         content.add_widget(card_hist)
@@ -2204,6 +3905,68 @@ class CallsScreen(Screen):
                 self.tracks = data
         except Exception:
             pass
+
+    def cycle_yt_vquality(self, *_):
+        idx = (self.YT_QUALITIES.index(self.yt_vquality) + 1) % len(self.YT_QUALITIES) if self.yt_vquality in self.YT_QUALITIES else 0
+        self.yt_vquality = self.YT_QUALITIES[idx]
+        self.btn_yt_vquality.text = f"Video Quality: {self.yt_vquality}"
+
+    def cycle_yt_buffer(self, *_):
+        idx = (self.YT_BUFFERS.index(self.yt_buffer_mode) + 1) % len(self.YT_BUFFERS) if self.yt_buffer_mode in self.YT_BUFFERS else 0
+        self.yt_buffer_mode = self.YT_BUFFERS[idx]
+        self.btn_yt_buffer.text = f"Buffer: {self.yt_buffer_mode}"
+
+    def start_yt_stream(self, is_video: int = 0):
+        query = self.input_yt_query.text.strip()
+        if not query:
+            InfoDialog("YouTube Query Required", "Enter a YouTube URL or song/video title.").open()
+            return
+        target = self.input_yt_target.text.strip()
+        if not target:
+            if self.selected_call_id:
+                target = self.selected_call_id
+            elif self.active_calls:
+                target = str(self.active_calls[-1].get("call_id") or "")
+            else:
+                target = self.input_call_target.text.strip()
+        self.lbl_yt_status.text = f"Starting {'Video' if is_video else 'Voice'} stream for '{query}'..."
+        self.lbl_yt_status.color = get_color_from_hex("#38BDF8")
+        self.root.send("/yt_call_stream", target, query, 1 if is_video else 0, self.yt_vquality, self.yt_buffer_mode)
+
+    def on_yt_stream_status(self, payload_str: str):
+        txt = str(payload_str or "").strip()
+        if not txt:
+            return
+        color = "#10B981"
+        try:
+            if txt.startswith("{"):
+                d = json.loads(txt)
+                err = str(d.get("error") or "").strip()
+                title = str(d.get("title") or "").strip()
+                state = str(d.get("status") or d.get("state") or "").strip()
+                msg = str(d.get("message") or "").strip()
+                if err:
+                    txt = f"Error: {err}"
+                    color = "#EF4444"
+                else:
+                    parts = [p for p in (state, title, msg) if p]
+                    txt = " • ".join(parts) if parts else txt
+                    if any(w in state.lower() for w in ("stop", "idle", "end")):
+                        color = "#94A3B8"
+                    elif any(w in state.lower() for w in ("load", "fetch", "buffer", "resolv", "start")):
+                        color = "#38BDF8"
+            else:
+                low = txt.lower()
+                if "error" in low or "fail" in low:
+                    color = "#EF4444"
+                elif any(w in low for w in ("fetch", "resolv", "buffer", "start")):
+                    color = "#38BDF8"
+                elif any(w in low for w in ("stop", "idle", "end")):
+                    color = "#94A3B8"
+        except Exception:
+            pass
+        self.lbl_yt_status.text = txt
+        self.lbl_yt_status.color = get_color_from_hex(color)
 
 
 class QuickSendScreen(Screen):
@@ -2480,20 +4243,22 @@ def copy_content_uri_to_folder(activity, uri, dest_dir: str, fallback_name: str 
 
 
 class SettingsScreen(Screen):
-    """Configuration, Ghost Mode, Auto-Wipe, Service Shutdown, and Session Import/Export."""
+    """Configuration, Ghost Mode, Auto-Wipe, Service Shutdown, Sync & Session Import/Export."""
 
     def __init__(self, app_root, **kw):
         super().__init__(name="settings", **kw)
         self.root = app_root
-        self.auto_wipe_active = True
-        self.stealth_read_active = True
-        self.auto_forward_active = True
+        self.ghost_cfg = getattr(app_root, "ghost_config", None) or GhostConfig.load(private_dir())
+        self.auto_wipe_active = self.ghost_cfg.auto_wipe
+        self.stealth_read_active = self.ghost_cfg.ghost_read
+        self.auto_forward_active = self.ghost_cfg.anti_delete_relay
+        self._privacy_btns = {}
 
         scroll = ScrollView(size_hint=(1, 1))
         content = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(12), size_hint_y=None)
         content.bind(minimum_height=content.setter("height"))
 
-        # ---------------------------------------------------- Card 1: Privacy & Stealth
+        # ---------------------------------------------------- Card 1: Privacy & Stealth (Ghost Mode)
         card_privacy = Factory.Card()
         card_privacy.padding = [dp(14), dp(12), dp(14), dp(12)]
         card_privacy.spacing = dp(8)
@@ -2505,53 +4270,47 @@ class SettingsScreen(Screen):
         lbl_p_title.bind(size=lbl_p_title.setter('text_size'))
 
         lbl_p_sub = Label(
-            text="Local message interception, stealth receipts, and memory cache hygiene.",
+            text="Wire-level Ghost Mode controls, receipt suppression, and cache hygiene.",
             font_size="11sp", color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(20), halign="left"
         )
         lbl_p_sub.bind(size=lbl_p_sub.setter('text_size'))
 
-        # Row 1: Stealth Read Mode
-        row_stealth = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
-        lbl_stealth = Label(text="Stealth Mode (Suppress read receipts)", font_size="13sp",
-                            color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle")
-        lbl_stealth.bind(size=lbl_stealth.setter('text_size'))
-        self.btn_stealth = SwitchBtn(text="ON", is_active=True)
-        self.btn_stealth.bind(on_release=self.toggle_stealth)
-        row_stealth.add_widget(lbl_stealth)
-        row_stealth.add_widget(self.btn_stealth)
+        card_privacy.add_widget(lbl_p_title)
+        card_privacy.add_widget(lbl_p_sub)
 
-        # Row 2: Auto-Wipe RAM Cache
-        row_wipe = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
-        lbl_wipe = Label(text="Auto-Wipe RAM Cache (24h retention)", font_size="13sp",
-                         color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle")
-        lbl_wipe.bind(size=lbl_wipe.setter('text_size'))
-        self.btn_auto_wipe = SwitchBtn(text="ON", is_active=True)
-        self.btn_auto_wipe.bind(on_release=self.toggle_auto_wipe)
-        row_wipe.add_widget(lbl_wipe)
-        row_wipe.add_widget(self.btn_auto_wipe)
+        privacy_rows = [
+            ("ghost_read", "Ghost Read (Hide blue ticks)"),
+            ("ghost_presence", "Ghost Presence (Hide online status)"),
+            ("ghost_typing", "Ghost Typing (Hide typing indicator)"),
+            ("ghost_viewonce_inline", "View-Once Ghost (Save silently)"),
+            ("auto_wipe", "Auto-Wipe RAM Cache (24h retention)"),
+            ("anti_delete_relay", "Anti-Delete Relay to Saved Messages"),
+        ]
+        for cfg_key, label_txt in privacy_rows:
+            row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+            lbl = Label(
+                text=label_txt, font_size="12sp",
+                color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle"
+            )
+            lbl.bind(size=lbl.setter('text_size'))
+            val = bool(getattr(self.ghost_cfg, cfg_key, False))
+            sw = SwitchBtn(text="ON" if val else "OFF", is_active=val)
+            sw.bind(on_release=lambda _b, k=cfg_key: self._toggle_privacy(k))
+            self._privacy_btns[cfg_key] = sw
+            row.add_widget(lbl)
+            row.add_widget(sw)
+            card_privacy.add_widget(row)
 
-        # Row 3: Auto-Forward Deleted Messages to Self
-        row_forward = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
-        lbl_forward = Label(text="Anti-Delete Relay to Saved Messages", font_size="13sp",
-                            color=get_color_from_hex("#F8FAFC"), halign="left", valign="middle")
-        lbl_forward.bind(size=lbl_forward.setter('text_size'))
-        self.btn_forward = SwitchBtn(text="ON", is_active=True)
-        self.btn_forward.bind(on_release=self.toggle_forward)
-        row_forward.add_widget(lbl_forward)
-        row_forward.add_widget(self.btn_forward)
+        self.btn_stealth = self._privacy_btns["ghost_read"]
+        self.btn_auto_wipe = self._privacy_btns["auto_wipe"]
+        self.btn_forward = self._privacy_btns["anti_delete_relay"]
 
         # Action: Flush cache
         btn_flush = Factory.SecondaryButton(text="Flush Intercepted Message Cache Now")
         btn_flush.bind(on_release=self.on_flush_cache)
-
-        card_privacy.add_widget(lbl_p_title)
-        card_privacy.add_widget(lbl_p_sub)
-        card_privacy.add_widget(row_stealth)
-        card_privacy.add_widget(row_wipe)
-        card_privacy.add_widget(row_forward)
         card_privacy.add_widget(btn_flush)
 
-        # ---------------------------------------------------- Card 2: Session Backup & Transfer
+        # ---------------------------------------------------- Card 2: Session Backup & Sync
         card_session = Factory.Card()
         card_session.padding = [dp(14), dp(12), dp(14), dp(12)]
         card_session.spacing = dp(8)
@@ -2591,6 +4350,31 @@ class SettingsScreen(Screen):
         btn_perm = Factory.SecondaryButton(text="Manage Storage Permissions")
         btn_perm.bind(on_release=lambda *_: ask_all_files_permission())
 
+        # WhatsApp Sync & Recovery subsection
+        lbl_sync_head = Label(
+            text="WhatsApp Sync & Recovery", font_size="12sp", bold=True,
+            color=get_color_from_hex("#CBD5E1"), size_hint_y=None, height=dp(22), halign="left"
+        )
+        lbl_sync_head.bind(size=lbl_sync_head.setter('text_size'))
+
+        self.lbl_sync_info = Label(
+            text="Sync Status: Idle", font_size="10sp",
+            color=get_color_from_hex("#64748B"), size_hint_y=None, height=dp(18), halign="left"
+        )
+        self.lbl_sync_info.bind(size=self.lbl_sync_info.setter('text_size'))
+
+        row_sync_btns = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
+        btn_resync_cg = Factory.SecondaryButton(text="Resync Contacts & Groups", size_hint=(0.5, 1))
+        btn_resync_cg.font_size = "11sp"
+        btn_resync_cg.bind(on_release=lambda *_: (self.root.send("/resync_contacts"), self.root.on_log("Requested contacts & groups resync...")))
+
+        btn_hist_sync = Factory.SecondaryButton(text="Trigger History Resync", size_hint=(0.5, 1))
+        btn_hist_sync.font_size = "11sp"
+        btn_hist_sync.bind(on_release=lambda *_: (self.root.send("/history_sync"), self.root.on_log("Triggered WhatsApp history resync...")))
+
+        row_sync_btns.add_widget(btn_resync_cg)
+        row_sync_btns.add_widget(btn_hist_sync)
+
         card_session.add_widget(lbl_s_title)
         card_session.add_widget(lbl_s_sub)
         card_session.add_widget(btn_pick)
@@ -2598,6 +4382,9 @@ class SettingsScreen(Screen):
         card_session.add_widget(lbl_manual)
         card_session.add_widget(row_manual)
         card_session.add_widget(btn_perm)
+        card_session.add_widget(lbl_sync_head)
+        card_session.add_widget(self.lbl_sync_info)
+        card_session.add_widget(row_sync_btns)
 
         # ---------------------------------------------------- Card 3: Service & Power
         card_engine = Factory.Card()
@@ -2708,23 +4495,48 @@ class SettingsScreen(Screen):
         scroll.add_widget(content)
         self.add_widget(scroll)
 
+    def _refresh_privacy_ui(self):
+        for k, sw in self._privacy_btns.items():
+            val = bool(getattr(self.ghost_cfg, k, False))
+            sw.is_active = val
+            sw.text = "ON" if val else "OFF"
+        self.auto_wipe_active = bool(self.ghost_cfg.auto_wipe)
+        self.stealth_read_active = bool(self.ghost_cfg.ghost_read)
+        self.auto_forward_active = bool(self.ghost_cfg.anti_delete_relay)
+
+    def _toggle_privacy(self, key: str):
+        cur = bool(getattr(self.ghost_cfg, key, False))
+        new_val = not cur
+        setattr(self.ghost_cfg, key, new_val)
+        self.root.ghost_config = self.ghost_cfg
+        self._refresh_privacy_ui()
+        self.root.send("/privacy_update", json.dumps(self.ghost_cfg.to_dict()))
+        self.root.on_log(f"Privacy '{key}' {'enabled' if new_val else 'disabled'}.")
+        if key == "ghost_read":
+            if hasattr(self.root, "screen_chats"):
+                self.root.screen_chats.schedule_refresh(0.05)
+            if hasattr(self.root, "screen_chatroom") and self.root.sm.current == "chatroom":
+                self.root.screen_chatroom._update_header_meta()
+
+    def apply_privacy_state(self, state_dict: dict):
+        if not isinstance(state_dict, dict):
+            return
+        self.ghost_cfg.update_from_dict(state_dict)
+        self.root.ghost_config = self.ghost_cfg
+        self._refresh_privacy_ui()
+
+    def on_sync_state(self, detail: str):
+        if hasattr(self, "lbl_sync_info"):
+            self.lbl_sync_info.text = f"Sync Status: {detail}" if detail else "Sync Status: Idle"
+
     def toggle_auto_wipe(self, *_):
-        self.auto_wipe_active = not self.auto_wipe_active
-        self.btn_auto_wipe.is_active = self.auto_wipe_active
-        self.btn_auto_wipe.text = "ON" if self.auto_wipe_active else "OFF"
-        self.root.on_log(f"Auto-wipe {'enabled' if self.auto_wipe_active else 'disabled'}.")
+        self._toggle_privacy("auto_wipe")
 
     def toggle_stealth(self, *_):
-        self.stealth_read_active = not self.stealth_read_active
-        self.btn_stealth.is_active = self.stealth_read_active
-        self.btn_stealth.text = "ON" if self.stealth_read_active else "OFF"
-        self.root.on_log(f"Stealth Read Mode {'enabled' if self.stealth_read_active else 'disabled'}.")
+        self._toggle_privacy("ghost_read")
 
     def toggle_forward(self, *_):
-        self.auto_forward_active = not self.auto_forward_active
-        self.btn_forward.is_active = self.auto_forward_active
-        self.btn_forward.text = "ON" if self.auto_forward_active else "OFF"
-        self.root.on_log(f"Anti-Delete relay {'enabled' if self.auto_forward_active else 'disabled'}.")
+        self._toggle_privacy("anti_delete_relay")
 
     def on_flush_cache(self, *_):
         self.root.send("/wipe_cache")
@@ -2918,6 +4730,9 @@ class Root(BoxLayout):
             self.engine_state = "running"
             self.is_connected = False
             self.tabs = {}
+            self.ghost_config = GhostConfig.load(private_dir())
+            self._base_pill_text = f"{ICON_DOT_ON} CONNECTING"
+            self._base_pill_color = "#F59E0B"
 
             # Top Bar
             top_bar = BoxLayout(size_hint_y=None, height=dp(56), padding=[dp(12), dp(6), dp(12), dp(6)], spacing=dp(8))
@@ -2930,8 +4745,8 @@ class Root(BoxLayout):
 
             # Live Status Pill
             self.status_pill = Factory.StatusPill()
-            self.lbl_pill = Label(text=f"{ICON_DOT_ON} CONNECTING", font_size="11sp", bold=True,
-                                  color=get_color_from_hex("#F59E0B"))
+            self.lbl_pill = Label(text=self._base_pill_text, font_size="11sp", bold=True,
+                                  color=get_color_from_hex(self._base_pill_color))
             self.status_pill.add_widget(self.lbl_pill)
 
             # Master Header Quick Start/Stop Toggle Button with crisp symbols
@@ -2950,17 +4765,22 @@ class Root(BoxLayout):
             # Screen Manager
             self.sm = ScreenManager(transition=FadeTransition(duration=0.15))
             self.screen_connect = ConnectScreen(self)
-            self.screen_plugins = PluginsScreen(self)
+            self.screen_chats = ChatsScreen(self)
+            self.screen_chatroom = ChatRoomScreen(self)
+            self.screen_contacts = ContactsScreen(self)
             self.screen_calls = CallsScreen(self)
+            self.screen_plugins = PluginsScreen(self)
             self.screen_send = QuickSendScreen(self)
             self.screen_console = ConsoleScreen(self)
+            self.screen_power = PowerScreen(self)
             self.screen_settings = SettingsScreen(self)
 
             self.sm.add_widget(self.screen_connect)
-            self.sm.add_widget(self.screen_plugins)
+            self.sm.add_widget(self.screen_chats)
+            self.sm.add_widget(self.screen_chatroom)
+            self.sm.add_widget(self.screen_contacts)
             self.sm.add_widget(self.screen_calls)
-            self.sm.add_widget(self.screen_send)
-            self.sm.add_widget(self.screen_console)
+            self.sm.add_widget(self.screen_power)
             self.sm.add_widget(self.screen_settings)
             self.add_widget(self.sm)
 
@@ -2992,6 +4812,13 @@ class Root(BoxLayout):
             self.server.bind(b"/call_event", ui(self.on_call_event))
             self.server.bind(b"/call_history", ui(self.on_call_history))
             self.server.bind(b"/call_tracks", ui(self.on_call_tracks))
+            self.server.bind(b"/sync_state", ui(self.on_sync_state))
+            self.server.bind(b"/chat_updated", ui(self.on_chat_updated))
+            self.server.bind(b"/contact_updated", ui(self.on_contact_updated))
+            self.server.bind(b"/presence_update", ui(self.on_presence_update))
+            self.server.bind(b"/privacy_state", ui(self.on_privacy_state))
+            self.server.bind(b"/check_number_result", ui(self.on_check_number_result))
+            self.server.bind(b"/yt_stream_status", ui(self.on_yt_stream_status))
 
             Clock.schedule_once(lambda dt: self.send("/hello"), 1.2)
         except Exception as e:
@@ -2999,26 +4826,24 @@ class Root(BoxLayout):
             raise
 
     def update_tab_bar(self):
-        """Dynamic tab bar: hides Connect tab once paired, shows Settings."""
+        """Dynamic tab bar: shows full WhatsApp client tabs once paired."""
         self.tab_bar.clear_widgets()
         self.tabs.clear()
 
         if self.is_connected:
             tab_defs = [
-                ("plugins", "Plugins"),
+                ("chats", "Chats"),
+                ("contacts", "Contacts"),
                 ("calls", "Calls"),
-                ("send", "Send"),
-                ("console", "Console"),
+                ("power", "Power"),
                 ("settings", "Settings"),
             ]
-            default_tab = "plugins"
+            default_tab = "chats"
         else:
             tab_defs = [
                 ("connect", "Connect"),
-                ("plugins", "Plugins"),
+                ("power", "Power"),
                 ("calls", "Calls"),
-                ("send", "Send"),
-                ("console", "Console"),
                 ("settings", "Settings"),
             ]
             default_tab = "connect"
@@ -3030,15 +4855,39 @@ class Root(BoxLayout):
             self.tab_bar.add_widget(btn)
 
         cur = self.sm.current
-        if cur not in self.tabs:
+        if cur == "chatroom" and self.is_connected:
+            for tid, btn in self.tabs.items():
+                btn.active = (tid == "chats")
+        elif cur not in self.tabs:
             self.switch_tab(default_tab)
         else:
             self.switch_tab(cur)
 
     def switch_tab(self, tab_id):
+        if tab_id in ("plugins", "send", "console"):
+            self.sm.current = "power"
+            self.screen_power.switch_subtab(tab_id)
+            for tid, btn in self.tabs.items():
+                btn.active = (tid == "power")
+            return
+
         self.sm.current = tab_id
         for tid, btn in self.tabs.items():
             btn.active = (tid == tab_id)
+
+        if tab_id == "chats":
+            self.screen_chats.refresh(immediate=True)
+        elif tab_id == "contacts":
+            self.screen_contacts.refresh(immediate=True)
+
+    def open_chat(self, jid: str):
+        nj = normalize_jid(jid)
+        if not nj:
+            return
+        self.screen_chatroom.load_chat(nj)
+        self.sm.current = "chatroom"
+        for tid, btn in self.tabs.items():
+            btn.active = (tid == "chats")
 
     def on_master_toggle(self, *_):
         if self.engine_state == "running":
@@ -3066,20 +4915,27 @@ class Root(BoxLayout):
 
         if "DISCONNECTED" in s_str or "STOPPED" in s_str:
             self.is_connected = False
-            self.lbl_pill.text = f"{ICON_DOT_OFF} OFFLINE"
-            self.lbl_pill.color = get_color_from_hex("#EF4444")
+            self._base_pill_text = f"{ICON_DOT_OFF} OFFLINE"
+            self._base_pill_color = "#EF4444"
+        elif "READY_TO_PAIR" in s_str:
+            self.is_connected = False
+            self._base_pill_text = f"{ICON_DOT_ON} PAIRING"
+            self._base_pill_color = "#F59E0B"
         elif "CONNECTED" in s_str:
             self.is_connected = True
-            self.lbl_pill.text = f"{ICON_DOT_ON} CONNECTED"
-            self.lbl_pill.color = get_color_from_hex("#10B981")
+            self._base_pill_text = f"{ICON_DOT_ON} CONNECTED"
+            self._base_pill_color = "#10B981"
         elif "PAIR" in s_str:
             self.is_connected = True
-            self.lbl_pill.text = f"{ICON_DOT_ON} PAIRED"
-            self.lbl_pill.color = get_color_from_hex("#10B981")
+            self._base_pill_text = f"{ICON_DOT_ON} PAIRED"
+            self._base_pill_color = "#10B981"
         else:
             self.is_connected = False
-            self.lbl_pill.text = f"{ICON_DOT_ON} {s_str[:12]}"
-            self.lbl_pill.color = get_color_from_hex("#F59E0B")
+            self._base_pill_text = f"{ICON_DOT_ON} {s_str[:12]}"
+            self._base_pill_color = "#F59E0B"
+
+        self.lbl_pill.text = self._base_pill_text
+        self.lbl_pill.color = get_color_from_hex(self._base_pill_color)
 
         if old_connected != self.is_connected:
             self.update_tab_bar()
@@ -3112,6 +4968,101 @@ class Root(BoxLayout):
         d = data[0] if data else "{}"
         self.screen_calls.on_call_tracks(str(d))
 
+    def on_sync_state(self, *data):
+        raw = str(data[0]) if data else ""
+        state_str = raw
+        detail = raw
+        try:
+            if raw.strip().startswith("{"):
+                d = json.loads(raw)
+                state_str = str(d.get("state") or d.get("status") or "")
+                detail = str(d.get("detail") or d.get("message") or state_str or raw)
+        except Exception:
+            pass
+        low = state_str.lower()
+        is_syncing = ("sync" in low or "progress" in low or "fetch" in low) and not any(
+            w in low for w in ("done", "complete", "idle", "ready", "finish")
+        )
+        if is_syncing:
+            self.lbl_pill.text = f"{ICON_REFRESH} SYNCING"
+            self.lbl_pill.color = get_color_from_hex("#38BDF8")
+        else:
+            self.lbl_pill.text = self._base_pill_text
+            self.lbl_pill.color = get_color_from_hex(self._base_pill_color)
+
+        self.screen_settings.on_sync_state(detail)
+        self.screen_chats.schedule_refresh(0.15)
+        self.screen_contacts.schedule_refresh(0.15)
+
+    def on_chat_updated(self, *data):
+        raw = str(data[0]) if data else ""
+        jid = ""
+        try:
+            if raw.strip().startswith("{"):
+                d = json.loads(raw)
+                jid = normalize_jid(str(d.get("chat_id") or d.get("jid") or ""))
+            elif raw.strip().lower() not in ("", "all", "sync", "*"):
+                jid = normalize_jid(raw)
+        except Exception:
+            jid = ""
+        self.screen_chats.schedule_refresh(0.1)
+        if self.sm.current == "chatroom":
+            self.screen_chatroom.on_chat_updated(jid)
+
+    def on_contact_updated(self, *data):
+        self.screen_contacts.schedule_refresh(0.15)
+        self.screen_chats.schedule_refresh(0.15)
+        if self.sm.current == "chatroom":
+            self.screen_chatroom._update_header_meta()
+
+    def on_presence_update(self, *data):
+        jid = ""
+        payload = {}
+        try:
+            raw = str(data[0]) if data else ""
+            if raw.strip().startswith("{"):
+                d = json.loads(raw)
+                jid = normalize_jid(str(d.get("jid") or d.get("chat_id") or ""))
+                if "online" in d or "is_online" in d:
+                    payload["is_online"] = d.get("is_online", d.get("online"))
+                if "typing" in d or "is_typing" in d:
+                    payload["is_typing"] = d.get("is_typing", d.get("typing"))
+                if "last_seen" in d or "last_seen_ts" in d:
+                    payload["last_seen_ts"] = d.get("last_seen_ts", d.get("last_seen"))
+            else:
+                jid = normalize_jid(raw)
+                if len(data) > 1:
+                    st = str(data[1]).lower()
+                    payload = {
+                        "is_online": ("online" in st or "available" in st),
+                        "is_typing": ("typing" in st or "composing" in st),
+                    }
+        except Exception:
+            pass
+        self.screen_chats.schedule_refresh(0.15)
+        if self.sm.current == "chatroom":
+            self.screen_chatroom.on_presence_update(jid, payload)
+
+    def on_privacy_state(self, *data):
+        raw = str(data[0]) if data else ""
+        try:
+            if raw.strip().startswith("{"):
+                d = json.loads(raw)
+                self.screen_settings.apply_privacy_state(d)
+                if self.sm.current == "chatroom":
+                    self.screen_chatroom._update_header_meta()
+        except Exception as e:
+            self.on_log(f"Privacy state parse error: {e}")
+
+    def on_check_number_result(self, *data):
+        self.screen_contacts.on_check_number_result(data)
+
+    def on_yt_stream_status(self, *data):
+        d = data[0] if data else ""
+        self.screen_calls.on_yt_stream_status(str(d))
+        if str(d).strip():
+            self.on_log(f"[YT Stream] {d}")
+
     def send(self, addr, *vals):
         try:
             self.client.send_message(addr.encode(), list(vals) or [""])
@@ -3134,11 +5085,11 @@ class Root(BoxLayout):
                     for name, code in b_dict.items():
                         dst = os.path.join(target_dir, f"{name}.py")
                         should_write = not os.path.exists(dst)
-                        if not should_write and name == "ytcall" and "play_call_url" in code:
+                        if not should_write and name == "ytcall" and "play_call_av_url" in code:
                             try:
                                 with open(dst, "r", encoding="utf-8", errors="ignore") as cur_fp:
                                     cur_src = cur_fp.read()
-                                if "sanatani-hackers/ytstream" in cur_src and "play_call_url" not in cur_src:
+                                if "sanatani-hackers/ytstream" in cur_src and "play_call_av_url" not in cur_src:
                                     should_write = True
                             except Exception:
                                 pass
@@ -3268,7 +5219,8 @@ class WaApp(App):
             configure_status_bar()
         except Exception as e:
             log_exception(f"configure_status_bar failed: {e}")
-        return Root()
+        self._root = Root()
+        return self._root
 
     def on_start(self):
         try:
@@ -3281,8 +5233,24 @@ class WaApp(App):
             configure_status_bar()
         except Exception:
             pass
+        try:
+            root_w = getattr(self, "root", None) or getattr(self, "_root", None)
+            if root_w:
+                root_w.send("/app_lifecycle", "foreground")
+                if root_w.sm.current == "chats":
+                    root_w.screen_chats.schedule_refresh(0.05)
+                elif root_w.sm.current == "chatroom":
+                    root_w.screen_chatroom.schedule_refresh(0.05)
+        except Exception:
+            pass
 
     def on_pause(self):
+        try:
+            root_w = getattr(self, "root", None) or getattr(self, "_root", None)
+            if root_w:
+                root_w.send("/app_lifecycle", "background")
+        except Exception:
+            pass
         return True
 
 

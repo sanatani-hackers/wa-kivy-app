@@ -1,9 +1,9 @@
-"""ytcall — True Live YouTube Audio PCMStream & Video DJ Plugin for WA Core Calls.
+"""ytcall — True Live YouTube Audio PCMStream & Video AVStream DJ Plugin for WA Core Calls.
 
-Streams YouTube audio directly in real time (zero full-file download) via
+Streams YouTube audio and video directly in real time (zero full-file download) via
 Android MediaExtractor+MediaCodec over loopback TCP into Go meowcaller's
-PCMStream 60ms ring buffer, powered by an embedded pure-Python InnerTube client
-(sanatani-hackers/ytstream). Video calls fall back cleanly to <=480p 15fps MP4.
+9s audio jitter buffer and live H.264 Annex-B video pump, powered by an embedded pure-Python
+InnerTube client (sanatani-hackers/ytstream).
 
 Commands (prefix !yt or !ytcall):
   !yt help                           Show this guide
@@ -12,7 +12,7 @@ Commands (prefix !yt or !ytcall):
   !yt play <url|id|query|#N>         Stream/switch YouTube audio live in call
   !yt dial <num|me|here> <song|url>  Dial number & start live YT stream on pickup
   !yt playcall <song|url|#N>         Call this chat & stream YT audio on pickup
-  !yt vcall <num|me|here> <vid|url>  Video call with YouTube MP4 (H.264 + audio)
+  !yt vcall <num|me|here> <vid|url>  Video call with live YT H.264+PCM (<=480p)
   !yt queue <url|id|query|#N>        Add YT track to live call DJ queue
   !yt q                              View active call's YT queue
   !yt skip                           Skip to next YT track in queue
@@ -20,9 +20,11 @@ Commands (prefix !yt or !ytcall):
   !yt info <url|id|query|#N>         Show metadata & stream details without playing
   !yt pause / resume / stop / hangup Quick call & playback controls
   !yt status / clearcache            Status & cache management
-  !yt mode <stream|cache>            stream = zero-download live PCM, cache = WAV
+  !yt mode <stream|cache>            stream = zero-download live AV/PCM, cache = disk
   !yt loop <on|off>                  Loop single-track playback (default OFF)
-  !yt quality <hq|fast>              Audio bitrate mode (hq=130kbps, fast=~50kbps)
+  !yt quality <hq|fast>              Audio bitrate mode (hq=160kbps, fast=<=80kbps)
+  !yt vquality <360p|480p>           Live video resolution cap (default 480p)
+  !yt buffer <fast|normal|slow>      Jitter prebuffer (4 / 8 / 14 frames)
   !yt maxmins <N>                    Max track length in minutes (default 60, 0=off)
   !yt public <on|off>                Allow non-owners to queue/play YT tracks
 """
@@ -53,6 +55,8 @@ DEFAULT_CFG = {
     "video_max_minutes": 10,
     "max_cache_mb": 150,
     "max_kbps": 160,
+    "vquality": "480p",
+    "buffer_mode": "normal",
     "owners": [],
 }
 
@@ -986,6 +990,15 @@ def _resolve_target_ref(chat_id: str, raw_arg: str, max_mins: int) -> Tuple[str,
     return hits[0]["id"], f"🔎 Matched: *{hits[0]['title']}*"
 
 
+def _prebuf_frames(buffer_mode: Optional[str] = None) -> int:
+    mode = (buffer_mode or _cfg.get("buffer_mode", "normal") or "normal").strip().lower()
+    if mode in ("fast", "low"):
+        return 4
+    if mode in ("slow", "high", "safe"):
+        return 14
+    return 8
+
+
 def _resolve_live_stream_sync(chat_id: str, query_or_url: str) -> dict:
     """Resolve YouTube video & direct audio stream URL cleanly without downloading to disk."""
     yt = _yt()
@@ -1018,6 +1031,101 @@ def _resolve_live_stream_sync(chat_id: str, query_or_url: str) -> dict:
         "url": stream.url,
         "headers": dict(stream.headers),
         "mode": "stream",
+    }
+
+
+def _resolve_live_av_sync(chat_id: str, query_or_url: str, vquality: Optional[str] = None) -> dict:
+    """Resolve adaptive H.264/AVC + M4A audio pair (or muxed <=max_h MP4 fallback) for live AV streaming."""
+    yt = _yt()
+    vq_raw = (vquality or _cfg.get("vquality", "480p") or "480p").strip().lower()
+    max_h = 360 if vq_raw in ("360", "360p", "low", "fast") else 480
+    vq_label = "360p" if max_h <= 360 else "480p"
+
+    max_mins = int(_cfg.get("video_max_minutes", 10))
+    max_kbps = int(_cfg.get("max_kbps", 160))
+    vid, _ = _resolve_target_ref(chat_id, query_or_url, max_mins)
+    info = yt.extract(vid, max_kbps=max_kbps)
+    if info.is_live:
+        raise YTError(f"'{info.title}' is a live stream without direct finite video segments.")
+    if max_mins > 0 and info.duration > max_mins * 60:
+        mins = info.duration // 60
+        raise YTError(
+            f"'{info.title}' is {mins}m long (video limit is {max_mins}m)."
+        )
+
+    def _is_avc_adaptive(s: _Stream) -> bool:
+        if not (s.has_video and not s.has_audio):
+            return False
+        mime_base = s.mime_type.split(";")[0].strip().lower()
+        if mime_base != "video/mp4":
+            return False
+        codecs_low = (s.codecs or "").lower()
+        if "avc1" not in codecs_low and s.itag not in (133, 134, 135, 160):
+            return False
+        return 0 < s.height <= max_h
+
+    avc_cands = [s for s in info.streams if _is_avc_adaptive(s)]
+    v_stream: Optional[_Stream] = None
+    if avc_cands:
+        if max_h <= 360:
+            v_stream = next((s for s in avc_cands if s.itag == 134), None)
+        else:
+            v_stream = next((s for s in avc_cands if s.itag == 135), None)
+            if v_stream is None:
+                v_stream = next((s for s in avc_cands if s.itag == 134), None)
+        if v_stream is None:
+            v_stream = max(avc_cands, key=lambda s: (s.height, s.bitrate))
+
+    a_stream: Optional[_Stream] = None
+    if v_stream is not None:
+        s140 = next(
+            (s for s in info.streams if s.itag == 140 and s.audio_only and (not max_kbps or s.bitrate <= max_kbps * 1000)),
+            None,
+        )
+        a_stream = s140 or info.select("m4a/webm/bestaudio", max_kbps)
+
+    if v_stream is None or a_stream is None:
+        muxed = [s for s in info.streams if s.muxed and (s.height <= 0 or s.height <= max_h)]
+        m_stream = next((s for s in muxed if s.itag == 18), None)
+        if m_stream is None and muxed:
+            m_stream = max(muxed, key=lambda s: (s.height, s.bitrate))
+        if m_stream is not None:
+            v_stream = m_stream
+            a_stream = None
+        else:
+            any_v = [s for s in info.streams if s.has_video and (s.height <= 0 or s.height <= max_h)]
+            if any_v:
+                a_stream = a_stream or info.select("m4a/webm/bestaudio", max_kbps)
+                if a_stream is not None:
+                    v_stream = max(any_v, key=lambda s: (s.height, s.bitrate))
+            if v_stream is None:
+                have = ", ".join(f"{s.itag}({s.ext} {s.height}p)" for s in info.streams) or "none"
+                raise YTError(f"No video stream <= {max_h}p available (have: {have})")
+
+    v_len = int(v_stream.content_length or 0)
+    a_len = int((a_stream.content_length if a_stream else v_stream.content_length) or 0)
+    total_bytes = v_len + (int(a_stream.content_length or 0) if a_stream else 0)
+    return {
+        "video_id": vid,
+        "title": info.title or vid,
+        "author": info.author or "YouTube",
+        "duration": info.duration,
+        "client": v_stream.client,
+        "ext": v_stream.ext,
+        "v_itag": v_stream.itag,
+        "a_itag": a_stream.itag if a_stream else v_stream.itag,
+        "height": v_stream.height or max_h,
+        "fps": 15,
+        "v_len": v_len,
+        "a_len": a_len,
+        "size_mb": round(total_bytes / _MIB, 2),
+        "video_url": v_stream.url,
+        "audio_url": a_stream.url if a_stream else "",
+        "headers": dict(v_stream.headers or (a_stream.headers if a_stream else {})),
+        "max_dim": max_h,
+        "bitrate": 450000 if max_h <= 360 else 650000,
+        "vquality": vq_label,
+        "mode": "av_stream",
     }
 
 
@@ -1067,7 +1175,23 @@ def _supports_live_pcm(ctx) -> bool:
     )
 
 
-async def _play_yt_audio_entry(ctx, cid: str, chat_id: str, meta_or_query, *, track_for_loop: bool = True) -> dict:
+def _supports_live_av(ctx) -> bool:
+    return bool(
+        _cfg.get("stream_mode", True)
+        and hasattr(ctx, "play_call_av_url")
+        and hasattr(ctx.calls, "play_av_stream")
+    )
+
+
+async def _play_yt_audio_entry(
+    ctx,
+    cid: str,
+    chat_id: str,
+    meta_or_query,
+    *,
+    track_for_loop: bool = True,
+    buffer_mode: Optional[str] = None,
+) -> dict:
     """Play YouTube audio via live zero-download PCMStream (with automatic client failover & cache fallback)."""
     meta = (
         dict(meta_or_query)
@@ -1083,6 +1207,7 @@ async def _play_yt_audio_entry(ctx, cid: str, chat_id: str, meta_or_query, *, tr
         vid = meta["video_id"]
         max_mins = int(_cfg.get("max_minutes", 60))
         max_secs = max_mins * 60 if max_mins > 0 else 0
+        prebuf = _prebuf_frames(buffer_mode)
         last_err = ""
         for attempt in range(3):
             if cid not in ctx.calls._active:
@@ -1097,6 +1222,7 @@ async def _play_yt_audio_entry(ctx, cid: str, chat_id: str, meta_or_query, *, tr
                 content_length=int(meta.get("content_length") or 0),
                 label=label,
                 max_seconds=max_secs,
+                prebuf_frames=prebuf,
             )
             if res.get("ok"):
                 if track_for_loop:
@@ -1126,6 +1252,169 @@ async def _play_yt_audio_entry(ctx, cid: str, chat_id: str, meta_or_query, *, tr
     if res.get("ok"):
         return {"ok": True, "meta": meta, "live": False}
     return {"ok": False, "error": res.get("error")}
+
+
+async def _play_yt_video_entry(
+    ctx,
+    cid: str,
+    chat_id: str,
+    meta_or_query,
+    *,
+    vquality: Optional[str] = None,
+    buffer_mode: Optional[str] = None,
+) -> dict:
+    """Play YouTube video+audio via live zero-download AVStream (with client failover & cached MP4 fallback)."""
+    if isinstance(meta_or_query, dict):
+        meta = dict(meta_or_query)
+    elif _supports_live_av(ctx):
+        meta = await asyncio.to_thread(_resolve_live_av_sync, chat_id, str(meta_or_query), vquality)
+    else:
+        meta = await asyncio.to_thread(_prepare_yt_media_sync, chat_id, str(meta_or_query), "video")
+
+    if meta.get("mode") == "av_stream" and _supports_live_av(ctx):
+        vid = meta["video_id"]
+        max_mins = int(_cfg.get("video_max_minutes", 10))
+        max_secs = max_mins * 60 if max_mins > 0 else 0
+        prebuf = _prebuf_frames(buffer_mode)
+        last_err = ""
+        for attempt in range(3):
+            if cid not in ctx.calls._active:
+                return {"ok": False, "error": "Call ended"}
+            if attempt > 0:
+                meta = await asyncio.to_thread(_resolve_live_av_sync, chat_id, vid, vquality)
+            label = f"{meta['title']} [{vid}]"
+            res = await ctx.play_call_av_url(
+                cid,
+                meta["video_url"],
+                audio_url=meta.get("audio_url", ""),
+                headers=meta.get("headers"),
+                v_len=int(meta.get("v_len") or 0),
+                a_len=int(meta.get("a_len") or 0),
+                label=label,
+                fps=int(meta.get("fps") or 15),
+                max_dim=int(meta.get("max_dim") or 480),
+                bitrate=int(meta.get("bitrate") or 650000),
+                max_seconds=max_secs,
+                prebuf_frames=prebuf,
+            )
+            if res.get("ok"):
+                return {"ok": True, "meta": meta, "live": True}
+            last_err = str(res.get("error") or "AV stream failed")
+            if res.get("refused"):
+                _yt().report_refused(vid, meta.get("client", ""))
+                continue
+            if "does not export CallPlayAVStream" in last_err or "No live HTTP AV decoder" in last_err:
+                break
+            return {"ok": False, "error": last_err}
+
+        if "does not export" not in last_err and "No live HTTP AV decoder" not in last_err:
+            return {"ok": False, "error": last_err or "YouTube live AV stream refused by all clients"}
+
+    # Fallback: cached/local MP4 transcode playback
+    if not meta.get("path"):
+        meta = await asyncio.to_thread(
+            _prepare_yt_media_sync, chat_id, meta.get("video_id") or str(meta_or_query), "video"
+        )
+    res = await ctx.play_call_video(
+        cid,
+        meta["path"],
+        fps=15,
+        loop=bool(_cfg.get("loop", False)),
+        with_audio=True,
+    )
+    if res.get("ok"):
+        return {"ok": True, "meta": meta, "live": False}
+    return {"ok": False, "error": res.get("error")}
+
+
+async def start_ui_stream(
+    ctx,
+    target_or_callid: str,
+    query: str,
+    is_video: bool = False,
+    vquality: str = "",
+    buffer_mode: str = "",
+) -> dict:
+    """Trigger YouTube audio or live video streaming directly from the UI CallsScreen."""
+    ctx = ctx or _ctx
+    if ctx is None:
+        return {"ok": False, "error": "ytcall plugin not initialized"}
+
+    q_str = (query or "").strip()
+    if not q_str:
+        return {"ok": False, "error": "YouTube URL or search query required"}
+
+    target = (target_or_callid or "").strip()
+    vq = (vquality or _cfg.get("vquality", "480p") or "480p").strip().lower()
+    bm = (buffer_mode or _cfg.get("buffer_mode", "normal") or "normal").strip().lower()
+
+    active_cid: Optional[str] = None
+    if target and target in ctx.calls._active:
+        active_cid = target
+    elif not target:
+        active_cid = ctx.calls.latest_active_call_id()
+
+    if active_cid:
+        if is_video:
+            play_res = await _play_yt_video_entry(ctx, active_cid, "", q_str, vquality=vq, buffer_mode=bm)
+        else:
+            play_res = await _play_yt_audio_entry(
+                ctx, active_cid, "", q_str, track_for_loop=True, buffer_mode=bm
+            )
+        if not play_res.get("ok"):
+            return {"ok": False, "error": play_res.get("error") or "Stream failed"}
+        m = play_res.get("meta") or {}
+        return {
+            "ok": True,
+            "call_id": active_cid,
+            "pending": False,
+            "mode": "video" if is_video else "audio",
+            "live": bool(play_res.get("live")),
+            "title": m.get("title", q_str),
+            "duration": m.get("duration", 0),
+        }
+
+    if not target:
+        return {"ok": False, "error": "Target phone number or active call required"}
+
+    try:
+        if is_video:
+            if _supports_live_av(ctx):
+                meta = await asyncio.to_thread(_resolve_live_av_sync, "", q_str, vq)
+            else:
+                meta = await asyncio.to_thread(_prepare_yt_media_sync, "", q_str, "video")
+        else:
+            if _supports_live_pcm(ctx):
+                meta = await asyncio.to_thread(_resolve_live_stream_sync, "", q_str)
+            else:
+                meta = await asyncio.to_thread(_prepare_yt_media_sync, "", q_str, "audio")
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    dial_res = await ctx.call(target, video=bool(is_video))
+    if not dial_res.get("ok"):
+        return dial_res
+
+    cid = str(dial_res.get("call_id") or "")
+    _PENDING_PLAY[cid] = {
+        "kind": "video" if is_video else "audio",
+        "path": meta.get("path", ""),
+        "meta": meta,
+        "title": meta.get("title", q_str),
+        "duration": meta.get("duration", 0),
+        "loop": bool(_cfg.get("loop", False)),
+        "vquality": vq,
+        "buffer_mode": bm,
+        "notify_chat": "",
+    }
+    return {
+        "ok": True,
+        "call_id": cid,
+        "pending": True,
+        "mode": "video" if is_video else "audio",
+        "title": meta.get("title", q_str),
+        "duration": meta.get("duration", 0),
+    }
 
 
 def _parse_dial_args(cmd: str, rest: str, msg) -> Tuple[str, str]:
@@ -1223,20 +1512,30 @@ async def on_call(ctx, call_ev):
             kind = spec.get("kind", "audio")
             notify = spec.get("notify_chat")
             if kind == "video":
-                res = await ctx.play_call_video(
-                    cid, spec.get("path", ""), fps=15, loop=bool(spec.get("loop", _cfg.get("loop", False))), with_audio=True
-                )
+                try:
+                    play_res = await _play_yt_video_entry(
+                        ctx,
+                        cid,
+                        notify or "",
+                        spec.get("meta") or spec.get("path", ""),
+                        vquality=spec.get("vquality"),
+                        buffer_mode=spec.get("buffer_mode"),
+                    )
+                except Exception as e:
+                    play_res = {"ok": False, "error": str(e)}
                 if notify:
-                    if res.get("ok"):
+                    if play_res.get("ok"):
+                        m = play_res.get("meta") or {}
+                        badge = "📡 Live H.264+PCM" if play_res.get("live") else "🎬 Cached MP4"
                         await ctx.send(
                             notify,
-                            f"📺 *YouTube Video Live!*\n"
-                            f"▶️ *Title:* {spec.get('title', 'YouTube Video')}\n"
-                            f"⏱️ *Length:* `{_fmt_dur(spec.get('duration', 0))}`\n"
+                            f"📺 *YouTube Video Live!* ({badge})\n"
+                            f"▶️ *Title:* {m.get('title', spec.get('title', 'YouTube Video'))}\n"
+                            f"⏱️ *Length:* `{_fmt_dur(m.get('duration', spec.get('duration', 0)))}`\n"
                             f"Controls: `!yt stop` | `!yt hangup`"
                         )
                     else:
-                        await ctx.send(notify, f"⚠️ Call connected, but YT video failed: {res.get('error')}")
+                        await ctx.send(notify, f"⚠️ Call connected, but YT video failed: {play_res.get('error')}")
                 return
 
             meta = spec.get("meta")
@@ -1244,7 +1543,12 @@ async def on_call(ctx, call_ev):
                 return
             try:
                 play_res = await _play_yt_audio_entry(
-                    ctx, cid, notify or "", meta, track_for_loop=True
+                    ctx,
+                    cid,
+                    notify or "",
+                    meta,
+                    track_for_loop=True,
+                    buffer_mode=spec.get("buffer_mode"),
                 )
             except Exception as e:
                 play_res = {"ok": False, "error": str(e)}
@@ -1301,7 +1605,8 @@ async def on_message(ctx, msg):
     known_cmds = {
         "", "help", "search", "s", "info", "play", "dial", "playcall", "vcall",
         "queue", "q", "skip", "pause", "resume", "stop", "hangup", "save",
-        "status", "clearcache", "mode", "loop", "quality", "maxmins", "public",
+        "status", "clearcache", "mode", "loop", "quality", "vquality", "buffer",
+        "maxmins", "public",
     }
     if cmd not in known_cmds:
         rest = raw_arg
@@ -1314,21 +1619,22 @@ async def on_message(ctx, msg):
     if cmd in ("", "help"):
         return await ctx.reply(
             msg,
-            "📺 *YouTube Call PCMStream Guide*\n\n"
-            "*Play on Calls (Zero-Download Live Audio):*\n"
+            "📺 *YouTube Call PCMStream & AVStream Guide*\n\n"
+            "*Play on Calls (Zero-Download Live Streaming):*\n"
             "• `!yt <url or song name>` — Stream live if in call, or search\n"
             "• `!yt play <url|song|#N>` — Stream/switch audio live in active call\n"
             "• `!yt playcall <url|song|#N>` — Call this chat & stream on pickup\n"
             "• `!yt dial <num|me> <url|song>` — Call number & stream on pickup\n"
-            "• `!yt vcall <num|me> <url|vid>` — Video call with YT MP4\n\n"
+            "• `!yt vcall <num|me> <url|vid>` — Video call with live YT H.264+PCM\n\n"
             "*Search, Queue & Library:*\n"
             "• `!yt search <query>` — Top 5 results (`#1`..`#5`)\n"
             "• `!yt queue <url|song|#N>` — Queue track in live call DJ\n"
             "• `!yt q` | `skip` | `pause` | `resume` | `stop` | `hangup`\n"
             "• `!yt save <url|song|#N>` — Save offline WAV to `!call tracks`\n\n"
             "*Settings (Owner):*\n"
-            "• `!yt mode <stream|cache>` | `quality <hq|fast>` | `loop <on|off>`\n"
-            "• `!yt maxmins <N>` | `public <on|off>` | `status` | `clearcache`"
+            "• `!yt mode <stream|cache>` | `quality <hq|fast>` | `vquality <360p|480p>`\n"
+            "• `!yt buffer <fast|normal|slow>` | `loop <on|off>` | `maxmins <N>`\n"
+            "• `!yt public <on|off>` | `status` | `clearcache`"
         )
 
     if cmd == "status":
@@ -1342,15 +1648,19 @@ async def on_message(ctx, msg):
         except Exception:
             ytdlp_ok = "Not installed (InnerTube active)"
         q_label = "fast (<=80k)" if int(_cfg.get("max_kbps", 160)) <= 80 else "hq (<=160k)"
-        m_label = "Live PCMStream ⚡" if _supports_live_pcm(ctx) else "Local Cache (WAV)"
+        vq_label = str(_cfg.get("vquality", "480p"))
+        bm_label = f"{_cfg.get('buffer_mode', 'normal')} ({_prebuf_frames()} frames)"
+        m_label = "Live AV+PCMStream ⚡" if _supports_live_av(ctx) else (
+            "Live PCMStream ⚡" if _supports_live_pcm(ctx) else "Local Cache (WAV)"
+        )
         return await ctx.reply(
             msg,
             "📺 *YouTube Call Plugin Status*\n"
             f"• ⚙️ *VoIP Engine:* {'Ready ✅' if ctx.calls.is_supported() else 'Missing .so ❌'}\n"
             f"• 📡 *Playback Mode:* `{m_label}`\n"
             f"• 📞 *Active Calls:* `{len(active)}` | *Jobs:* `{len(_BG_TASKS)}`\n"
-            f"• 🎛️ *Quality:* `{q_label}` | 🔁 *Loop:* `{'ON' if _cfg.get('loop') else 'OFF'}`\n"
-            f"• ⏱️ *Max Audio:* `{_cfg.get('max_minutes')}m` | *Max Video:* `{_cfg.get('video_max_minutes')}m`\n"
+            f"• 🎛️ *Audio:* `{q_label}` | 🎬 *Video:* `{vq_label}` | 🛡️ *Buffer:* `{bm_label}`\n"
+            f"• 🔁 *Loop:* `{'ON' if _cfg.get('loop') else 'OFF'}` | ⏱️ *Max:* `{_cfg.get('max_minutes')}m` / `{_cfg.get('video_max_minutes')}m`\n"
             f"• 💾 *Saved Cache:* `{len(cfiles)} files ({cbytes / _MIB:.1f} / {_cfg.get('max_cache_mb')} MB)`\n"
             f"• 🧩 *yt-dlp Fallback:* {ytdlp_ok}"
         )
@@ -1453,22 +1763,34 @@ async def on_message(ctx, msg):
         except YTError as e:
             return await ctx.reply(msg, f"⚠️ {e}")
 
-        use_live = (mode == "audio") and _supports_live_pcm(ctx)
+        use_live = _supports_live_av(ctx) if mode == "video" else _supports_live_pcm(ctx)
         await ctx.reply(
             msg,
-            f"⏳ Resolving YouTube stream (`{song_q}`)..."
+            f"⏳ Resolving YouTube {'live AV' if mode == 'video' else 'stream'} (`{song_q}`)..."
             if use_live
             else f"⏳ Fetching & preparing YouTube {'video' if mode == 'video' else 'audio'} (`{song_q}`)..."
         )
 
         async def _job_dial():
             try:
-                if use_live:
-                    meta = await asyncio.to_thread(_resolve_live_stream_sync, msg.chat_id, song_q)
-                    sz_note = f"live ~{meta['size_mb']} MB" if meta["size_mb"] else "live PCM"
+                if mode == "video":
+                    if use_live:
+                        meta = await asyncio.to_thread(_resolve_live_av_sync, msg.chat_id, song_q)
+                        sz_note = (
+                            f"live {meta['vquality']} ~{meta['size_mb']} MB"
+                            if meta["size_mb"]
+                            else f"live {meta['vquality']} AV"
+                        )
+                    else:
+                        meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, song_q, "video")
+                        sz_note = f"{meta['size_mb']} MB cached"
                 else:
-                    meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, song_q, mode)
-                    sz_note = f"{meta['size_mb']} MB cached"
+                    if use_live:
+                        meta = await asyncio.to_thread(_resolve_live_stream_sync, msg.chat_id, song_q)
+                        sz_note = f"live ~{meta['size_mb']} MB" if meta["size_mb"] else "live PCM"
+                    else:
+                        meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, song_q, "audio")
+                        sz_note = f"{meta['size_mb']} MB cached"
             except Exception as e:
                 log.exception("yt %s prepare failed", cmd)
                 return await ctx.reply(msg, f"❌ YouTube prepare failed: {e}")
@@ -1490,6 +1812,8 @@ async def on_message(ctx, msg):
                 "title": meta["title"],
                 "duration": meta["duration"],
                 "loop": bool(_cfg.get("loop", False)),
+                "vquality": str(_cfg.get("vquality", "480p")),
+                "buffer_mode": str(_cfg.get("buffer_mode", "normal")),
                 "notify_chat": msg.chat_id,
             }
 
@@ -1717,6 +2041,34 @@ async def on_message(ctx, msg):
             _save()
             return await ctx.reply(msg, "🎧 Audio quality set to *HQ* (`<=160 kbps`).")
         return await ctx.reply(msg, "⚠️ Usage: `!yt quality <hq|fast>`")
+
+    if cmd == "vquality":
+        m = rest.lower()
+        if m in ("360", "360p", "low", "fast"):
+            _cfg["vquality"] = "360p"
+            _save()
+            return await ctx.reply(msg, "🎬 Live video quality set to *360p* (lower data, smoother on slow links).")
+        if m in ("480", "480p", "hq", "high"):
+            _cfg["vquality"] = "480p"
+            _save()
+            return await ctx.reply(msg, "🎬 Live video quality set to *480p* (crisp default).")
+        return await ctx.reply(msg, "⚠️ Usage: `!yt vquality <360p|480p>`")
+
+    if cmd == "buffer":
+        m = rest.lower()
+        if m in ("fast", "low"):
+            _cfg["buffer_mode"] = "fast"
+            _save()
+            return await ctx.reply(msg, "🛡️ Jitter buffer set to *FAST* (`4` frames = ~240ms startup).")
+        if m in ("normal", "med", "medium", "balanced"):
+            _cfg["buffer_mode"] = "normal"
+            _save()
+            return await ctx.reply(msg, "🛡️ Jitter buffer set to *NORMAL* (`8` frames = ~480ms balanced).")
+        if m in ("slow", "high", "safe"):
+            _cfg["buffer_mode"] = "slow"
+            _save()
+            return await ctx.reply(msg, "🛡️ Jitter buffer set to *SLOW* (`14` frames = ~840ms max smoothness).")
+        return await ctx.reply(msg, "⚠️ Usage: `!yt buffer <fast|normal|slow>`")
 
     if cmd == "maxmins":
         try:

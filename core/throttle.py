@@ -23,10 +23,10 @@ class Job:
 class OutboundQueue:
     """Single choke point for ALL outgoing messages. Plugins can never bypass it."""
 
-    def __init__(self, send, typing=None, *, min_delay=0.3, max_delay=1.0, per_char=0.015,
+    def __init__(self, send, typing=None, *, ready_check=None, min_delay=0.3, max_delay=1.0, per_char=0.015,
                  max_typing=2.0, per_chat_gap=1.5, max_per_min=30,
                  max_queued=100, max_queued_per_plugin=20):
-        self._send, self._typing = send, typing
+        self._send, self._typing, self._ready_check = send, typing, ready_check
         self.min_delay, self.max_delay = min_delay, max_delay
         self.per_char, self.max_typing = per_char, max_typing
         self.per_chat_gap, self.max_per_min = per_chat_gap, max_per_min
@@ -53,6 +53,8 @@ class OutboundQueue:
         while True:
             job = await self._q.get()          # sleeps with zero CPU when idle
             try:
+                if self._ready_check:
+                    await self._ready_check()
                 await self._pace(job)
                 await self._send(job)
             except asyncio.CancelledError:

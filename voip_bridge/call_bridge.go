@@ -48,6 +48,7 @@ type callHandle struct {
 	audioLoop    bool
 	audioGen     uint64
 	audioState   string // idle | playing | paused
+	audioCancel  context.CancelFunc
 	audioRec     meowcaller.AudioSink
 	audioRecPath string
 	videoRec     meowcaller.VideoSink
@@ -307,6 +308,8 @@ func (h *callHandle) cleanup(reason string) {
 	h.audioState = "idle"
 	vCancel := h.videoCancel
 	h.videoCancel = nil
+	aCancel := h.audioCancel
+	h.audioCancel = nil
 	aRec := h.audioRec
 	h.audioRec = nil
 	vRec := h.videoRec
@@ -315,6 +318,9 @@ func (h *callHandle) cleanup(reason string) {
 
 	if vCancel != nil {
 		vCancel()
+	}
+	if aCancel != nil {
+		aCancel()
 	}
 	if h.player != nil {
 		h.player.OnFinish(nil)
@@ -389,8 +395,14 @@ func openAudioSource(path string) (meowcaller.AudioSource, error) {
 
 const (
 	livePCMFrameBytes = meowcaller.FrameSamples * 2 // 960 * 2 = 1920 bytes (60ms @ 16kHz mono s16le)
-	livePCMBufferCap  = 50                          // 50 frames = 3.0s jitter buffer
+	livePCMBufferCap  = 150                         // 150 frames = 9.0s jitter buffer
 	livePCMMinPrebuf  = 4                           // 4 frames = 240ms initial prebuffer
+	livePCMMaxPrebuf  = 30                          // 30 frames = 1.8s max initial prebuffer
+
+	liveVideoBufferCap  = 45              // 45 frames = 3.0s @ 15fps
+	liveVideoMinPrebuf  = 4               // 4 frames default video prebuffer
+	liveVideoMaxPrebuf  = 15              // 15 frames = 1.0s @ 15fps max prebuffer
+	liveVideoMaxAUBytes = 4 * 1024 * 1024 // 4 MiB max single Annex-B AU
 )
 
 // livePCMSource reads raw 16kHz mono s16le PCM over a 127.0.0.1 loopback TCP socket
@@ -423,8 +435,8 @@ func newLivePCMSource(prebufFrames int) (*livePCMSource, error) {
 	}
 	if prebufFrames < 1 {
 		prebufFrames = livePCMMinPrebuf
-	} else if prebufFrames > 25 {
-		prebufFrames = 25
+	} else if prebufFrames > livePCMMaxPrebuf {
+		prebufFrames = livePCMMaxPrebuf
 	}
 	s := &livePCMSource{
 		ln:       ln,
@@ -473,9 +485,9 @@ func (s *livePCMSource) acceptAndPump() {
 		_ = conn.Close()
 	}()
 
-	// Bound kernel TCP receive window so backpressure engages promptly around the 3s frame buffer
+	// Bound kernel TCP receive window (~69 KiB) so backpressure engages smoothly around the 9s jitter buffer
 	if tc, ok := conn.(*net.TCPConn); ok {
-		_ = tc.SetReadBuffer(livePCMFrameBytes * 12)
+		_ = tc.SetReadBuffer(livePCMFrameBytes * 36)
 	}
 
 	raw := make([]byte, livePCMFrameBytes)
@@ -552,6 +564,250 @@ func (s *livePCMSource) Close() error {
 	return nil
 }
 
+// liveVideoSource reads length-prefixed ([4B big-endian len][Annex-B AU]) H.264 access units
+// over a 127.0.0.1 loopback TCP socket into a bounded channel for live video calls.
+type liveVideoSource struct {
+	ln        net.Listener
+	port      int
+	prebuf    int
+	aus       chan []byte
+	stopCh    chan struct{}
+	closedCh  chan struct{}
+	closeOnce sync.Once
+	started   atomic.Bool
+	sawData   atomic.Bool
+
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+func newLiveVideoSource(prebufFrames int) (*liveVideoSource, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = ln.Close()
+		return nil, errors.New("unexpected listener addr type")
+	}
+	if prebufFrames < 1 {
+		prebufFrames = liveVideoMinPrebuf
+	} else if prebufFrames > liveVideoMaxPrebuf {
+		prebufFrames = liveVideoMaxPrebuf
+	}
+	s := &liveVideoSource{
+		ln:       ln,
+		port:     tcpAddr.Port,
+		prebuf:   prebufFrames,
+		aus:      make(chan []byte, liveVideoBufferCap),
+		stopCh:   make(chan struct{}),
+		closedCh: make(chan struct{}),
+	}
+	go s.acceptAndPump()
+	return s, nil
+}
+
+func (s *liveVideoSource) acceptAndPump() {
+	defer func() {
+		close(s.aus)
+		close(s.closedCh)
+		_ = s.ln.Close()
+	}()
+
+	if tcpLn, ok := s.ln.(*net.TCPListener); ok {
+		_ = tcpLn.SetDeadline(time.Now().Add(25 * time.Second))
+	}
+	conn, err := s.ln.Accept()
+	if err != nil {
+		return
+	}
+	_ = s.ln.Close()
+
+	s.mu.Lock()
+	select {
+	case <-s.stopCh:
+		s.mu.Unlock()
+		_ = conn.Close()
+		return
+	default:
+		s.conn = conn
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.conn == conn {
+			s.conn = nil
+		}
+		s.mu.Unlock()
+		_ = conn.Close()
+	}()
+
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetReadBuffer(512 * 1024)
+	}
+
+	var sps, pps []byte
+	var sentFirst bool
+	var lenBuf [4]byte
+
+	for {
+		if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+			return
+		}
+		n := binary.BigEndian.Uint32(lenBuf[:])
+		if n == 0 || n > liveVideoMaxAUBytes {
+			return
+		}
+		raw := make([]byte, n)
+		if _, err := io.ReadFull(conn, raw); err != nil {
+			return
+		}
+		au, ok := normalizeVideoAU(raw, &sps, &pps, &sentFirst)
+		if !ok {
+			continue
+		}
+		s.sawData.Store(true)
+		select {
+		case s.aus <- au:
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+func (s *liveVideoSource) ReadAU(ctx context.Context) ([]byte, error) {
+	select {
+	case <-s.stopCh:
+		return nil, io.EOF
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	if !s.started.Load() {
+		ticker := time.NewTicker(15 * time.Millisecond)
+		defer ticker.Stop()
+		for !s.started.Load() {
+			if len(s.aus) >= s.prebuf {
+				s.started.Store(true)
+				break
+			}
+			select {
+			case <-s.closedCh:
+				s.started.Store(true)
+			case <-s.stopCh:
+				return nil, io.EOF
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-ticker.C:
+			}
+		}
+	}
+
+	select {
+	case au, ok := <-s.aus:
+		if !ok {
+			return nil, io.EOF
+		}
+		return au, nil
+	case <-s.stopCh:
+		return nil, io.EOF
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *liveVideoSource) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.stopCh)
+		_ = s.ln.Close()
+		s.mu.Lock()
+		c := s.conn
+		s.conn = nil
+		s.mu.Unlock()
+		if c != nil {
+			_ = c.Close()
+		}
+	})
+	return nil
+}
+
+func ensureH264Params(au [][]byte, sps, pps []byte) [][]byte {
+	if sps == nil && pps == nil {
+		return au
+	}
+	var hasSPS, hasPPS bool
+	for _, n := range au {
+		if len(n) == 0 {
+			continue
+		}
+		switch n[0] & 0x1F {
+		case 7:
+			hasSPS = true
+		case 8:
+			hasPPS = true
+		}
+	}
+	var prefix [][]byte
+	if !hasSPS && sps != nil {
+		prefix = append(prefix, sps)
+	}
+	if !hasPPS && pps != nil {
+		prefix = append(prefix, pps)
+	}
+	if len(prefix) == 0 {
+		return au
+	}
+	return append(prefix, au...)
+}
+
+func joinAnnexBNALUs(items [][]byte) []byte {
+	var buf bytes.Buffer
+	for _, n := range items {
+		buf.Write([]byte{0x00, 0x00, 0x00, 0x01})
+		buf.Write(n)
+	}
+	return buf.Bytes()
+}
+
+func normalizeVideoAU(raw []byte, sps, pps *[]byte, sentFirst *bool) ([]byte, bool) {
+	nalus := rtp.SplitAnnexB(raw)
+	if len(nalus) == 0 {
+		return nil, false
+	}
+	var hasIDR, hasVCL bool
+	filtered := make([][]byte, 0, len(nalus))
+	for _, n := range nalus {
+		if len(n) == 0 {
+			continue
+		}
+		naluType := n[0] & 0x1F
+		switch naluType {
+		case 7:
+			*sps = append([]byte(nil), n...)
+		case 8:
+			*pps = append([]byte(nil), n...)
+		case 5:
+			hasIDR = true
+			hasVCL = true
+		case 1, 2, 3, 4:
+			hasVCL = true
+		}
+		filtered = append(filtered, n)
+	}
+	if !hasVCL {
+		return nil, false
+	}
+	if hasIDR || (sentFirst != nil && !*sentFirst) {
+		filtered = ensureH264Params(filtered, *sps, *pps)
+	}
+	if sentFirst != nil {
+		*sentFirst = true
+	}
+	return joinAnnexBNALUs(filtered), true
+}
+
 func loadH264AccessUnits(h264Path string) ([][]byte, error) {
 	raw, err := os.ReadFile(h264Path)
 	if err != nil {
@@ -565,44 +821,6 @@ func loadH264AccessUnits(h264Path string) ([][]byte, error) {
 	var sps, pps []byte
 	var aus [][]byte
 	var pending [][]byte
-
-	ensureParams := func(au [][]byte) [][]byte {
-		if sps == nil && pps == nil {
-			return au
-		}
-		var hasSPS, hasPPS bool
-		for _, n := range au {
-			if len(n) == 0 {
-				continue
-			}
-			switch n[0] & 0x1F {
-			case 7:
-				hasSPS = true
-			case 8:
-				hasPPS = true
-			}
-		}
-		var prefix [][]byte
-		if !hasSPS && sps != nil {
-			prefix = append(prefix, sps)
-		}
-		if !hasPPS && pps != nil {
-			prefix = append(prefix, pps)
-		}
-		if len(prefix) == 0 {
-			return au
-		}
-		return append(prefix, au...)
-	}
-
-	joinAnnexB := func(items [][]byte) []byte {
-		var buf bytes.Buffer
-		for _, n := range items {
-			buf.Write([]byte{0x00, 0x00, 0x00, 0x01})
-			buf.Write(n)
-		}
-		return buf.Bytes()
-	}
 
 	for _, n := range nalus {
 		if len(n) == 0 {
@@ -618,14 +836,14 @@ func loadH264AccessUnits(h264Path string) ([][]byte, error) {
 		pending = append(pending, n)
 		if naluType == 1 || naluType == 5 {
 			if naluType == 5 {
-				pending = ensureParams(pending)
+				pending = ensureH264Params(pending, sps, pps)
 			}
-			aus = append(aus, joinAnnexB(pending))
+			aus = append(aus, joinAnnexBNALUs(pending))
 			pending = nil
 		}
 	}
 	if len(pending) > 0 {
-		aus = append(aus, joinAnnexB(pending))
+		aus = append(aus, joinAnnexBNALUs(pending))
 	}
 	if len(aus) == 0 {
 		return nil, fmt.Errorf("no H.264 access units built from %s", h264Path)
@@ -731,12 +949,17 @@ func CallPlayAudio(id *C.char, callID *C.char, path *C.char, loop C.int) *C.char
 		_ = src.Close()
 		return callJSONErr("call already ended")
 	}
+	oldACancel := h.audioCancel
+	h.audioCancel = nil
 	h.audioGen++
 	myGen := h.audioGen
 	h.audioPath = filePath
 	h.audioLoop = loop != 0
 	h.audioState = "playing"
 	h.mu.Unlock()
+	if oldACancel != nil {
+		oldACancel()
+	}
 
 	var attachFinish func(gen uint64)
 	attachFinish = func(gen uint64) {
@@ -822,15 +1045,21 @@ func CallPlayPCMStream(id *C.char, callID *C.char, label *C.char, prebufFrames C
 		_ = src.Close()
 		return callJSONErr("call already ended")
 	}
+	oldACancel := h.audioCancel
+	h.audioCancel = func() { _ = src.Close() }
 	h.audioGen++
 	myGen := h.audioGen
 	h.audioPath = lbl
 	h.audioLoop = false
 	h.audioState = "playing"
 	h.mu.Unlock()
+	if oldACancel != nil {
+		oldACancel()
+	}
 
 	h.player.OnFinish(func() {
 		go func() {
+			_ = src.Close()
 			h.mu.Lock()
 			stillMine := !h.ended && h.audioGen == myGen
 			if stillMine {
@@ -900,11 +1129,16 @@ func CallStopAudio(id *C.char, callID *C.char) *C.char {
 		return callJSONErr(err.Error())
 	}
 	h.mu.Lock()
+	aCancel := h.audioCancel
+	h.audioCancel = nil
 	h.audioLoop = false
 	h.audioGen++
 	h.audioState = "idle"
 	h.audioPath = ""
 	h.mu.Unlock()
+	if aCancel != nil {
+		aCancel()
+	}
 	h.player.OnFinish(nil)
 	h.player.Stop()
 	return callJSONOK(map[string]any{"call_id": h.id, "audio_state": "idle"})
@@ -970,8 +1204,11 @@ func CallPlayAV(id *C.char, callID *C.char, h264Path *C.char, audioPath *C.char,
 	h.videoCancel = cancel
 	h.videoPath = vPath
 	h.videoLoop = loop != 0
+	var oldACancel context.CancelFunc
 	var myAudioGen uint64
 	if firstAudioSrc != nil {
+		oldACancel = h.audioCancel
+		h.audioCancel = nil
 		h.audioGen++
 		myAudioGen = h.audioGen
 		h.audioPath = aPath
@@ -982,6 +1219,9 @@ func CallPlayAV(id *C.char, callID *C.char, h264Path *C.char, audioPath *C.char,
 
 	if oldCancel != nil {
 		oldCancel()
+	}
+	if oldACancel != nil {
+		oldACancel()
 	}
 
 	frameDur := time.Second / time.Duration(fpsInt)
@@ -1108,6 +1348,205 @@ func CallPlayAV(id *C.char, callID *C.char, h264Path *C.char, audioPath *C.char,
 		"frames":     len(aus),
 		"fps":        fpsInt,
 		"loop":       shouldLoop,
+	})
+}
+
+//export CallPlayAVStream
+func CallPlayAVStream(id *C.char, callID *C.char, label *C.char, fps C.int, prebufFrames C.int) *C.char {
+	uuid := C.GoString(id)
+	cid := C.GoString(callID)
+	lbl := ""
+	if label != nil {
+		lbl = strings.TrimSpace(C.GoString(label))
+	}
+	if lbl == "" {
+		lbl = "Live Video Stream"
+	}
+
+	fpsInt := int(fps)
+	if fpsInt <= 0 || fpsInt > 30 {
+		fpsInt = 15
+	}
+	prebufV := int(prebufFrames)
+	if prebufV < 1 {
+		prebufV = liveVideoMinPrebuf
+	} else if prebufV > liveVideoMaxPrebuf {
+		prebufV = liveVideoMaxPrebuf
+	}
+
+	_, h, err := getCallHandle(uuid, cid)
+	if err != nil {
+		return callJSONErr(err.Error())
+	}
+
+	aSrc, err := newLivePCMSource(int(prebufFrames))
+	if err != nil {
+		return callJSONErr(fmt.Sprintf("failed starting AV audio stream socket: %v", err))
+	}
+	vSrc, err := newLiveVideoSource(prebufV)
+	if err != nil {
+		_ = aSrc.Close()
+		return callJSONErr(fmt.Sprintf("failed starting AV video stream socket: %v", err))
+	}
+
+	rawCtx, rawCancel := context.WithCancel(context.Background())
+	var closeOnce sync.Once
+	cancel := func() {
+		closeOnce.Do(func() {
+			rawCancel()
+			_ = aSrc.Close()
+			_ = vSrc.Close()
+		})
+	}
+
+	h.mu.Lock()
+	if h.ended {
+		h.mu.Unlock()
+		cancel()
+		return callJSONErr("call already ended")
+	}
+	oldVCancel := h.videoCancel
+	oldACancel := h.audioCancel
+	h.videoCancel = cancel
+	h.audioCancel = cancel
+	h.videoPath = lbl
+	h.videoLoop = false
+	h.audioGen++
+	myGen := h.audioGen
+	h.audioPath = lbl
+	h.audioLoop = false
+	h.audioState = "playing"
+	h.mu.Unlock()
+
+	if oldVCancel != nil {
+		oldVCancel()
+	}
+	if oldACancel != nil {
+		oldACancel()
+	}
+
+	frameDur := time.Second / time.Duration(fpsInt)
+
+	go func() {
+		defer cancel()
+		for i := 0; i < 1500; i++ {
+			if rawCtx.Err() != nil {
+				return
+			}
+			st := h.call.State()
+			if st == meowcaller.CallPhaseActive {
+				break
+			}
+			if st == meowcaller.CallPhaseEnded {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if rawCtx.Err() != nil || h.call.State() != meowcaller.CallPhaseActive {
+			return
+		}
+
+		h.mu.Lock()
+		valid := !h.ended && h.audioGen == myGen
+		h.mu.Unlock()
+		if !valid {
+			return
+		}
+
+		h.player.OnFinish(func() {
+			go func() {
+				defer cancel()
+				h.mu.Lock()
+				stillMine := !h.ended && h.audioGen == myGen
+				if stillMine {
+					h.audioState = "idle"
+				}
+				h.mu.Unlock()
+				if !stillMine {
+					return
+				}
+				if !aSrc.sawData.Load() {
+					emitCallEvent(uuid, map[string]any{
+						"event":   "audio_error",
+						"call_id": cid,
+						"path":    lbl,
+						"error":   "AV audio stream closed before receiving any PCM frames",
+					})
+					return
+				}
+				emitCallEvent(uuid, map[string]any{
+					"event":   "audio_finish",
+					"call_id": cid,
+					"path":    lbl,
+				})
+			}()
+		})
+
+		h.player.Play(aSrc)
+
+		var startTime time.Time
+		var sentCount int64
+		firstFrame := true
+
+		for {
+			au, err := vSrc.ReadAU(rawCtx)
+			if err != nil {
+				if err == io.EOF && rawCtx.Err() == nil && h.call.State() != meowcaller.CallPhaseEnded {
+					emitCallEvent(uuid, map[string]any{
+						"event":   "video_finish",
+						"call_id": cid,
+						"path":    lbl,
+					})
+					if aSrc.sawData.Load() {
+						select {
+						case <-rawCtx.Done():
+						case <-time.After(10 * time.Second):
+						}
+					}
+				}
+				return
+			}
+			if rawCtx.Err() != nil || h.call.State() == meowcaller.CallPhaseEnded {
+				return
+			}
+			if sentCount == 0 {
+				startTime = time.Now()
+			}
+			if err := h.call.SendVideoWithDuration(au, frameDur); err != nil {
+				if firstFrame {
+					emitCallEvent(uuid, map[string]any{
+						"event":   "video_error",
+						"call_id": cid,
+						"error":   err.Error(),
+					})
+				}
+				if h.call.State() == meowcaller.CallPhaseEnded {
+					return
+				}
+			}
+			firstFrame = false
+			sentCount++
+			targetAt := startTime.Add(time.Duration(sentCount) * frameDur)
+			if waitDur := time.Until(targetAt); waitDur > 0 {
+				select {
+				case <-rawCtx.Done():
+					return
+				case <-time.After(waitDur):
+				}
+			} else if waitDur < -500*time.Millisecond {
+				startTime = time.Now()
+				sentCount = 0
+			}
+		}
+	}()
+
+	return callJSONOK(map[string]any{
+		"call_id":    cid,
+		"audio_port": aSrc.port,
+		"video_port": vSrc.port,
+		"fps":        fpsInt,
+		"label":      lbl,
+		"gen":        myGen,
 	})
 }
 

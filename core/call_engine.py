@@ -44,6 +44,82 @@ def _clean_peer_number(peer: str) -> str:
     return (peer or "").split("@")[0].split(":")[0]
 
 
+def _iter_annexb_access_units(read_chunk_fn):
+    """Yield complete H.264 Annex-B Access Units from a chunked byte stream.
+
+    Ensures SPS (NAL type 7) and PPS (NAL type 8) are prepended to every IDR (NAL type 5)
+    when observed in the stream, handling 3-byte and 4-byte start codes across chunk splits.
+    """
+    buf = bytearray()
+    sps: Optional[bytes] = None
+    pps: Optional[bytes] = None
+    pending: list[bytes] = []
+    eof = False
+
+    def _has_param(items: list[bytes], nalu_type: int) -> bool:
+        for item in items:
+            if item and (item[0] & 0x1F) == nalu_type:
+                return True
+        return False
+
+    def _flush_nal(nal: bytes) -> Optional[bytes]:
+        nonlocal sps, pps
+        if not nal:
+            return None
+        ntype = nal[0] & 0x1F
+        if ntype == 7:
+            sps = bytes(nal)
+        elif ntype == 8:
+            pps = bytes(nal)
+        pending.append(bytes(nal))
+        if ntype in (1, 5):
+            if ntype == 5:
+                prefix: list[bytes] = []
+                if sps and not _has_param(pending, 7):
+                    prefix.append(sps)
+                if pps and not _has_param(pending, 8):
+                    prefix.append(pps)
+                if prefix:
+                    pending[:0] = prefix
+            au = b"".join(b"\x00\x00\x00\x01" + n for n in pending)
+            pending.clear()
+            return au
+        return None
+
+    in_nal = False
+    while not eof:
+        chunk = read_chunk_fn()
+        if not chunk:
+            eof = True
+        else:
+            buf.extend(chunk)
+
+        pos = 0
+        limit = len(buf) if eof else max(0, len(buf) - 4)
+        while pos < limit:
+            idx = buf.find(b"\x00\x00\x01", pos)
+            if idx < 0 or (not eof and idx > len(buf) - 4):
+                break
+            sc_start = idx - 1 if (idx > pos and buf[idx - 1] == 0) else idx
+            if in_nal and sc_start > pos:
+                au = _flush_nal(bytes(buf[pos:sc_start]))
+                if au:
+                    yield au
+            in_nal = True
+            pos = idx + 3
+
+        if pos > 0:
+            del buf[:pos]
+        if eof:
+            if in_nal and len(buf) > 0:
+                au = _flush_nal(bytes(buf))
+                if au:
+                    yield au
+            if pending and any((n[0] & 0x1F) in (1, 5) for n in pending if n):
+                yield b"".join(b"\x00\x00\x00\x01" + n for n in pending)
+            break
+
+
 def _on_go_call_event(uuid_ptr: int, payload_ptr: int):
     try:
         uuid_str = ctypes.string_at(uuid_ptr).decode("utf-8", "ignore") if uuid_ptr else ""
@@ -332,6 +408,10 @@ class CallEngine:
 
     # ---- High-level async VoIP actions
     async def place_call(self, target: str, is_video: bool = False) -> dict:
+        if hasattr(self.core, "wait_until_ready"):
+            ready = await self.core.wait_until_ready(timeout=6.0)
+            if not ready:
+                log.warning("Placing call before session sync settled")
         res = await self._call_ffi("CallPlace", target, 1 if is_video else 0)
         if res.get("ok"):
             cid = str(res.get("call_id") or "")
@@ -459,16 +539,16 @@ class CallEngine:
                 return f"No live HTTP audio decoder available ({android_exc})"
 
         # Desktop/Termux fallback: FFmpeg decodes URL chunks live -> s16le PCM pipe -> TCP socket
+        is_http = str(url or "").lower().startswith(("http://", "https://"))
         hdr_lines = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items() if v)
         cmd = [ff, "-hide_banner", "-loglevel", "error"]
-        if hdr_lines:
-            cmd.extend(["-headers", hdr_lines])
+        if is_http:
+            if hdr_lines:
+                cmd.extend(["-headers", hdr_lines])
+            cmd.extend(["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"])
         if max_seconds and max_seconds > 0:
             cmd.extend(["-t", str(int(max_seconds))])
-        cmd.extend([
-            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
-            "-i", url, "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1",
-        ])
+        cmd.extend(["-i", url, "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1"])
 
         proc = None
         sock = None
@@ -509,6 +589,12 @@ class CallEngine:
             except Exception:
                 pass
             if proc is not None:
+                for pipe in (proc.stdout, proc.stderr):
+                    if pipe is not None:
+                        try:
+                            pipe.close()
+                        except Exception:
+                            pass
                 try:
                     proc.terminate()
                     proc.wait(timeout=2)
@@ -605,6 +691,269 @@ class CallEngine:
             asyncio.create_task(_watch_late_failure())
 
         return {"ok": True, "call_id": call_id, "port": port, "label": label, "gen": gen}
+
+    @staticmethod
+    def _stream_av_worker_sync(
+        video_url: str,
+        audio_url: str,
+        headers: Optional[dict],
+        v_len: int,
+        a_len: int,
+        video_port: int,
+        audio_port: int,
+        max_dim: int,
+        fps: int,
+        bitrate: int,
+        max_seconds: int,
+        started_ev=None,
+    ) -> str:
+        """Blocking worker: stream remote video+audio URLs into Go's live video+PCM sockets."""
+        headers_json = json.dumps(headers or {})
+        try:
+            from jnius import autoclass
+            Transcoder = autoclass("org.sanatani.waapp.WaMediaTranscoder")
+            return str(
+                Transcoder.streamAvUrlsToSockets(
+                    str(video_url),
+                    str(audio_url or ""),
+                    headers_json,
+                    int(v_len or 0),
+                    int(a_len or 0),
+                    int(video_port),
+                    int(audio_port),
+                    int(max_dim or 480),
+                    int(fps or 15),
+                    int(bitrate or 650000),
+                    int(max_seconds or 0),
+                )
+                or ""
+            )
+        except Exception as android_exc:
+            ff = shutil.which("ffmpeg")
+            if not ff:
+                return f"No live HTTP AV decoder available ({android_exc})"
+
+        import threading as _threading
+
+        eff_audio_url = audio_url or video_url
+        audio_started = _threading.Event()
+        audio_err_holder = [""]
+
+        def _audio_worker():
+            audio_err_holder[0] = CallEngine._stream_url_worker_sync(
+                eff_audio_url,
+                headers,
+                int(a_len or 0),
+                int(audio_port),
+                int(max_seconds or 0),
+                started_ev=audio_started,
+            )
+
+        a_thread = _threading.Thread(target=_audio_worker, name="WaFFmpegAudioStream", daemon=True)
+        a_thread.start()
+
+        fps_eff = max(1, min(30, int(fps or 15)))
+        dim_eff = max(160, int(max_dim or 480))
+        br_eff = max(100000, int(bitrate or 650000))
+        is_http = str(video_url or "").lower().startswith(("http://", "https://"))
+        hdr_lines = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items() if v)
+        vf = (
+            f"scale='min({dim_eff},iw)':'min({dim_eff},ih)':force_original_aspect_ratio=decrease,"
+            f"scale=trunc(iw/2)*2:trunc(ih/2)*2,fps={fps_eff}"
+        )
+        v_cmd = [ff, "-hide_banner", "-loglevel", "error"]
+        if is_http:
+            if hdr_lines:
+                v_cmd.extend(["-headers", hdr_lines])
+            v_cmd.extend(["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"])
+        if max_seconds and max_seconds > 0:
+            v_cmd.extend(["-t", str(int(max_seconds))])
+        v_cmd.extend([
+            "-i", video_url,
+            "-an", "-vf", vf,
+            "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1",
+            "-pix_fmt", "yuv420p", "-bf", "0",
+            "-g", str(fps_eff), "-keyint_min", str(fps_eff),
+            "-b:v", str(br_eff), "-maxrate", str(int(br_eff * 1.3)), "-bufsize", str(br_eff),
+            "-preset", "ultrafast", "-tune", "zerolatency",
+            "-f", "h264", "pipe:1",
+        ])
+
+        proc = None
+        v_sock = None
+        sent_aus = 0
+        try:
+            proc = subprocess.Popen(v_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            au_iter = _iter_annexb_access_units(lambda: proc.stdout.read(16384) if proc.stdout else b"")
+            first_au = next(au_iter, b"")
+            if not first_au:
+                err_txt = (proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else "").strip()
+                if "403" in err_txt or "410" in err_txt:
+                    return f"HTTP_REFUSED:{403 if '403' in err_txt else 410}"
+                if audio_err_holder[0]:
+                    return audio_err_holder[0]
+                return err_txt or "ffmpeg produced zero H.264 access units"
+
+            v_sock = socket.create_connection(("127.0.0.1", int(video_port)), timeout=5.0)
+            v_sock.settimeout(None)
+            v_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            v_sock.sendall(len(first_au).to_bytes(4, "big") + first_au)
+            sent_aus += 1
+            if started_ev is not None:
+                started_ev.set()
+
+            for au in au_iter:
+                if audio_err_holder[0]:
+                    break
+                if au:
+                    v_sock.sendall(len(au).to_bytes(4, "big") + au)
+                    sent_aus += 1
+
+            a_thread.join(timeout=5.0)
+            return audio_err_holder[0] or ""
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            a_thread.join(timeout=1.5)
+            if audio_err_holder[0]:
+                return audio_err_holder[0]
+            return "" if sent_aus > 0 else "AV video socket closed"
+        except Exception as e:
+            return f"ffmpeg AV stream failed: {e}"
+        finally:
+            try:
+                if v_sock is not None:
+                    v_sock.close()
+            except Exception:
+                pass
+            if proc is not None:
+                for pipe in (proc.stdout, proc.stderr):
+                    if pipe is not None:
+                        try:
+                            pipe.close()
+                        except Exception:
+                            pass
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+    async def play_av_stream(
+        self,
+        call_id: str,
+        video_url: str,
+        audio_url: str = "",
+        headers: Optional[dict] = None,
+        v_len: int = 0,
+        a_len: int = 0,
+        label: str = "Live Video Stream",
+        fps: int = 15,
+        max_dim: int = 480,
+        bitrate: int = 650000,
+        max_seconds: int = 600,
+        prebuf_frames: int = 8,
+    ) -> dict:
+        """Start true real-time zero-download video+audio streaming into an active call."""
+        res = await self._call_ffi("CallPlayAVStream", call_id, label, int(fps), int(prebuf_frames))
+        if not res.get("ok"):
+            return res
+
+        audio_port = int(res.get("audio_port") or 0)
+        video_port = int(res.get("video_port") or 0)
+        gen = res.get("gen", 0)
+        fps_eff = int(res.get("fps") or fps or 15)
+        if audio_port <= 0 or video_port <= 0:
+            await self._call_ffi("CallStopVideoStream", call_id)
+            await self._call_ffi("CallStopAudio", call_id)
+            return {"ok": False, "error": "Invalid AV stream ports from Go bridge"}
+
+        if call_id in self._active:
+            self._active[call_id]["audio_state"] = "playing"
+            self._active[call_id]["audio_path"] = label
+            self._active[call_id]["stream_gen"] = gen
+        self._upsert_call_db(call_id, track_played=label)
+        self.core.emit(
+            "/log",
+            f"🎬 Live AVStream active in call {call_id[:8]}: {label} (v={video_port}, a={audio_port})",
+        )
+
+        import threading as _threading
+        self._clear_java_stream_state(audio_port)
+        self._clear_java_stream_state(video_port)
+        started_ev = _threading.Event()
+        feeder_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._stream_av_worker_sync,
+                video_url,
+                audio_url,
+                headers,
+                int(v_len or 0),
+                int(a_len or 0),
+                video_port,
+                audio_port,
+                int(max_dim or 480),
+                fps_eff,
+                int(bitrate or 650000),
+                int(max_seconds or 0),
+                started_ev,
+            )
+        )
+
+        async def _watch_late_failure():
+            try:
+                err = await feeder_task
+                if err:
+                    cur = self._active.get(call_id)
+                    if cur and cur.get("stream_gen") == gen:
+                        log.warning("Live AV stream ended with error (%s): %s", label, err)
+                        self.core.emit("/log", f"⚠️ AV stream error ({label}): {err}")
+                        await self._call_ffi("CallStopVideoStream", call_id)
+                        await self._call_ffi("CallStopAudio", call_id)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.debug("AV stream watcher error: %s", e)
+
+        deadline = time.monotonic() + 15.0
+        while not feeder_task.done() and time.monotonic() < deadline:
+            if started_ev.is_set():
+                break
+            jst_a = self._get_java_stream_state(audio_port)
+            jst_v = self._get_java_stream_state(video_port)
+            if jst_a in ("streaming", "done") or jst_v in ("streaming", "done"):
+                break
+            await asyncio.sleep(0.05)
+
+        if feeder_task.done():
+            err = ""
+            try:
+                err = feeder_task.result() or ""
+            except Exception as exc:
+                err = str(exc)
+            if err:
+                cur = self._active.get(call_id)
+                if cur and cur.get("stream_gen") == gen:
+                    await self._call_ffi("CallStopVideoStream", call_id)
+                    await self._call_ffi("CallStopAudio", call_id)
+                return {
+                    "ok": False,
+                    "error": err,
+                    "refused": err.startswith("HTTP_REFUSED:"),
+                }
+        else:
+            asyncio.create_task(_watch_late_failure())
+
+        return {
+            "ok": True,
+            "call_id": call_id,
+            "audio_port": audio_port,
+            "video_port": video_port,
+            "fps": fps_eff,
+            "label": label,
+            "gen": gen,
+        }
 
     async def pause_audio(self, call_id: str) -> dict:
         res = await self._call_ffi("CallPauseAudio", call_id)

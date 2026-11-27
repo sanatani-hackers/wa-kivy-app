@@ -110,6 +110,7 @@ class PluginContext:
         content_length: int = 0,
         label: str = "Live Stream",
         max_seconds: int = 3600,
+        prebuf_frames: int = 4,
     ) -> dict:
         return await self._core.calls.play_url_stream(
             call_id,
@@ -118,6 +119,37 @@ class PluginContext:
             content_length=content_length,
             label=label,
             max_seconds=max_seconds,
+            prebuf_frames=prebuf_frames,
+        )
+
+    async def play_call_av_url(
+        self,
+        call_id: str,
+        video_url: str,
+        audio_url: str = "",
+        headers: dict = None,
+        v_len: int = 0,
+        a_len: int = 0,
+        label: str = "Live Video Stream",
+        fps: int = 15,
+        max_dim: int = 480,
+        bitrate: int = 650000,
+        max_seconds: int = 600,
+        prebuf_frames: int = 8,
+    ) -> dict:
+        return await self._core.calls.play_av_stream(
+            call_id,
+            video_url,
+            audio_url=audio_url,
+            headers=headers,
+            v_len=v_len,
+            a_len=a_len,
+            label=label,
+            fps=fps,
+            max_dim=max_dim,
+            bitrate=bitrate,
+            max_seconds=max_seconds,
+            prebuf_frames=prebuf_frames,
         )
 
     async def pause_call_audio(self, call_id: str) -> dict:
@@ -168,11 +200,16 @@ class PluginManager:
                 for name, code in b_dict.items():
                     dst_py = os.path.join(self.folder, f"{name}.py")
                     should_write = not os.path.exists(dst_py)
-                    if not should_write and name == "ytcall" and "play_call_url" in code:
+                    if not should_write and name == "ytcall" and (
+                        "play_call_url" in code or "play_call_av_url" in code
+                    ):
                         try:
                             with open(dst_py, "r", encoding="utf-8", errors="ignore") as cur_fp:
                                 cur_src = cur_fp.read()
-                            if "sanatani-hackers/ytstream" in cur_src and "play_call_url" not in cur_src:
+                            if (
+                                ("sanatani-hackers/ytstream" in cur_src and "play_call_url" not in cur_src)
+                                or ("play_call_av_url" in code and "play_call_av_url" not in cur_src)
+                            ):
                                 should_write = True
                         except Exception:
                             pass

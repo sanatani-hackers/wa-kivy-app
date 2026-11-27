@@ -24,6 +24,7 @@ import org.json.JSONObject;
 
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -38,10 +39,16 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Hardware-accelerated Android MediaCodec audio (16kHz mono WAV) and video
@@ -464,19 +471,22 @@ public final class WaMediaTranscoder {
     }
 
     /**
-     * Random-access MediaDataSource backed by ranged 256 KiB HTTP GETs with an 8-chunk LRU RAM cache,
-     * redirect tracking, and retries so YouTube direct streams start in ~1s without disk bloat.
+     * Random-access MediaDataSource backed by ranged 512 KiB HTTP GETs with a 12-chunk LRU RAM cache,
+     * 2-chunk asynchronous lookahead prefetcher, redirect tracking, and retries so YouTube direct
+     * streams start fast and glide smoothly over jitter without disk bloat.
      */
     private static final class RangedHttpMediaDataSource extends MediaDataSource {
-        private static final int CHUNK_SIZE = 256 * 1024;
-        private static final int MAX_CACHED_CHUNKS = 8;
+        private static final int CHUNK_SIZE = 512 * 1024;
+        private static final int MAX_CACHED_CHUNKS = 12;
 
-        private String streamUrl;
+        private volatile String streamUrl;
         private final Map<String, String> headers;
         private volatile long totalSize;
         private volatile boolean closed = false;
         volatile int refusedStatus = 0;
 
+        private final Object cacheLock = new Object();
+        private final Set<Long> inFlight = new HashSet<>();
         private final LinkedHashMap<Long, byte[]> chunkCache =
                 new LinkedHashMap<Long, byte[]>(16, 0.75f, true) {
                     @Override
@@ -484,44 +494,59 @@ public final class WaMediaTranscoder {
                         return size() > MAX_CACHED_CHUNKS;
                     }
                 };
+        private final ExecutorService prefetchExec = Executors.newFixedThreadPool(2, new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "WaHttpPrefetch");
+                t.setDaemon(true);
+                return t;
+            }
+        });
 
         RangedHttpMediaDataSource(String url, Map<String, String> headers, long knownSize) throws IOException {
             this.streamUrl = url;
             this.headers = headers != null ? headers : new HashMap<>();
             this.totalSize = knownSize > 0 ? knownSize : -1L;
-            // Pre-fetch chunk 0 immediately to fail fast on 403/410 and resolve totalSize
-            getChunk(0L);
+            // Pre-fetch chunk 0 immediately to fail fast on 403/410, resolve totalSize, and warm chunks 1..2
+            try {
+                getChunk(0L, true);
+            } catch (IOException ioe) {
+                close();
+                throw ioe;
+            }
         }
 
         @Override
-        public synchronized long getSize() {
+        public long getSize() {
             return totalSize;
         }
 
         @Override
-        public synchronized int readAt(long position, byte[] buffer, int offset, int size) throws IOException {
+        public int readAt(long position, byte[] buffer, int offset, int size) throws IOException {
             if (closed || position < 0 || size < 0) {
                 return -1;
             }
             if (size == 0) {
                 return 0;
             }
-            if (totalSize >= 0 && position >= totalSize) {
+            long curTotal = totalSize;
+            if (curTotal >= 0 && position >= curTotal) {
                 return -1;
             }
 
-            long remainingInFile = (totalSize >= 0) ? (totalSize - position) : size;
+            long remainingInFile = (curTotal >= 0) ? (curTotal - position) : size;
             int toRead = (int) Math.min(size, remainingInFile);
             int totalRead = 0;
 
             while (totalRead < toRead && !closed) {
                 long curPos = position + totalRead;
-                if (totalSize >= 0 && curPos >= totalSize) {
+                curTotal = totalSize;
+                if (curTotal >= 0 && curPos >= curTotal) {
                     break;
                 }
                 long chunkIdx = curPos / CHUNK_SIZE;
                 int chunkOff = (int) (curPos % CHUNK_SIZE);
-                byte[] chunk = getChunk(chunkIdx);
+                byte[] chunk = getChunk(chunkIdx, true);
                 if (chunk == null || chunkOff >= chunk.length) {
                     break;
                 }
@@ -534,21 +559,106 @@ public final class WaMediaTranscoder {
             return (totalRead > 0) ? totalRead : -1;
         }
 
-        private byte[] getChunk(long chunkIdx) throws IOException {
-            byte[] cached = chunkCache.get(chunkIdx);
-            if (cached != null) {
-                return cached;
+        private void schedulePrefetchLocked(long baseIdx) {
+            if (closed) {
+                return;
             }
-            long start = chunkIdx * CHUNK_SIZE;
-            if (totalSize >= 0 && start >= totalSize) {
+            long curTotal = totalSize;
+            for (long off = 1; off <= 2; off++) {
+                final long nextIdx = baseIdx + off;
+                long nextStart = nextIdx * (long) CHUNK_SIZE;
+                if (curTotal >= 0 && nextStart >= curTotal) {
+                    break;
+                }
+                if (chunkCache.containsKey(nextIdx) || inFlight.contains(nextIdx)) {
+                    continue;
+                }
+                try {
+                    prefetchExec.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                getChunk(nextIdx, false);
+                            } catch (Throwable ignored) {}
+                        }
+                    });
+                } catch (Throwable ignored) {
+                    // Executor already shut down
+                }
+            }
+        }
+
+        private byte[] getChunk(long chunkIdx, boolean triggerPrefetch) throws IOException {
+            if (closed) {
                 return new byte[0];
             }
-            long end = (totalSize > 0) ? Math.min(start + CHUNK_SIZE - 1, totalSize - 1) : (start + CHUNK_SIZE - 1);
-            byte[] data = fetchRangeWithRetry(start, end);
-            if (data.length > 0) {
-                chunkCache.put(chunkIdx, data);
+            long start = chunkIdx * (long) CHUNK_SIZE;
+            long knownTotal = totalSize;
+            if (knownTotal >= 0 && start >= knownTotal) {
+                return new byte[0];
             }
-            return data;
+
+            boolean weFetch = false;
+            synchronized (cacheLock) {
+                byte[] cached = chunkCache.get(chunkIdx);
+                if (cached != null) {
+                    if (triggerPrefetch) {
+                        schedulePrefetchLocked(chunkIdx);
+                    }
+                    return cached;
+                }
+                while (inFlight.contains(chunkIdx)) {
+                    if (closed) {
+                        return new byte[0];
+                    }
+                    try {
+                        cacheLock.wait(200);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Interrupted waiting for chunk " + chunkIdx, ie);
+                    }
+                    cached = chunkCache.get(chunkIdx);
+                    if (cached != null) {
+                        if (triggerPrefetch) {
+                            schedulePrefetchLocked(chunkIdx);
+                        }
+                        return cached;
+                    }
+                    if (refusedStatus > 0) {
+                        throw new HttpRefusedException(refusedStatus);
+                    }
+                }
+                if (closed) {
+                    return new byte[0];
+                }
+                inFlight.add(chunkIdx);
+                weFetch = true;
+            }
+
+            try {
+                long curTotal = totalSize;
+                if (curTotal >= 0 && start >= curTotal) {
+                    return new byte[0];
+                }
+                long end = (curTotal > 0) ? Math.min(start + CHUNK_SIZE - 1, curTotal - 1) : (start + CHUNK_SIZE - 1);
+                byte[] data = fetchRangeWithRetry(start, end);
+                synchronized (cacheLock) {
+                    if (data.length > 0 && !closed) {
+                        chunkCache.put(chunkIdx, data);
+                    }
+                    if (triggerPrefetch && data.length > 0 && !closed) {
+                        schedulePrefetchLocked(chunkIdx);
+                    }
+                }
+                return data;
+            } finally {
+                if (weFetch) {
+                    synchronized (cacheLock) {
+                        inFlight.remove(chunkIdx);
+                        cacheLock.notifyAll();
+                    }
+                }
+            }
         }
 
         private byte[] fetchRangeWithRetry(long start, long end) throws IOException {
@@ -571,7 +681,7 @@ public final class WaMediaTranscoder {
 
         private byte[] fetchRangeOnce(long start, long end) throws IOException {
             String target = this.streamUrl;
-            for (int hop = 0; hop < 6; hop++) {
+            for (int hop = 0; hop < 6 && !closed; hop++) {
                 HttpURLConnection conn = (HttpURLConnection) new URL(target).openConnection();
                 conn.setInstanceFollowRedirects(false);
                 conn.setConnectTimeout(6000);
@@ -622,7 +732,7 @@ public final class WaMediaTranscoder {
                     try (InputStream is = conn.getInputStream()) {
                         byte[] tmp = new byte[16384];
                         int r;
-                        while ((r = is.read(tmp)) != -1) {
+                        while (!closed && (r = is.read(tmp)) != -1) {
                             out.write(tmp, 0, r);
                             if (code == 200 && out.size() >= CHUNK_SIZE) {
                                 break;
@@ -634,7 +744,7 @@ public final class WaMediaTranscoder {
                     conn.disconnect();
                 }
             }
-            throw new IOException("Too many redirects");
+            throw closed ? new IOException("DataSource closed") : new IOException("Too many redirects");
         }
 
         private void parseTotalFromContentRange(String cr) {
@@ -649,9 +759,14 @@ public final class WaMediaTranscoder {
         }
 
         @Override
-        public synchronized void close() {
+        public void close() {
             closed = true;
-            chunkCache.clear();
+            prefetchExec.shutdownNow();
+            synchronized (cacheLock) {
+                chunkCache.clear();
+                inFlight.clear();
+                cacheLock.notifyAll();
+            }
         }
     }
 
@@ -660,6 +775,10 @@ public final class WaMediaTranscoder {
         if (v > 32767) return 32767;
         if (v < -32767) return -32767;
         return v;
+    }
+
+    private interface VideoAuConsumer {
+        void onAccessUnit(byte[] annexBAu) throws IOException, PcmSinkClosedException;
     }
 
     /**
@@ -676,6 +795,226 @@ public final class WaMediaTranscoder {
         if (bitrate <= 100000) bitrate = 700000;
 
         MediaExtractor extractor = new MediaExtractor();
+        BufferedOutputStream bos = null;
+        File tmpFile = new File(outH264Path + ".tmp");
+
+        try {
+            extractor.setDataSource(inputPath);
+            bos = new BufferedOutputStream(new FileOutputStream(tmpFile), 65536);
+            final BufferedOutputStream outStream = bos;
+            long[] outFrames = new long[1];
+
+            String err = transcodeVideoFromExtractor(
+                    extractor,
+                    maxDim,
+                    targetFps,
+                    bitrate,
+                    600_000_000L,
+                    null,
+                    outFrames,
+                    new VideoAuConsumer() {
+                        @Override
+                        public void onAccessUnit(byte[] annexBAu) throws IOException {
+                            outStream.write(annexBAu);
+                        }
+                    });
+            if (!err.isEmpty()) {
+                return err;
+            }
+
+            bos.flush();
+            bos.close();
+            bos = null;
+
+            if (outFrames[0] == 0 || !tmpFile.exists() || tmpFile.length() == 0) {
+                return "Hardware encoder produced 0 video frames";
+            }
+
+            File finalFile = new File(outH264Path);
+            if (finalFile.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                finalFile.delete();
+            }
+            if (!tmpFile.renameTo(finalFile)) {
+                return "Failed to rename transcoded H.264 file";
+            }
+            return "";
+        } catch (Throwable t) {
+            return "Java video transcode failed: " + t.getMessage();
+        } finally {
+            try { if (bos != null) bos.close(); } catch (Throwable ignored) {}
+            try { extractor.release(); } catch (Throwable ignored) {}
+            if (tmpFile.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                tmpFile.delete();
+            }
+        }
+    }
+
+    /**
+     * Stream remote YouTube/HTTP video + audio URLs directly into Go's loopback TCP sockets
+     * (length-prefixed Annex-B H.264 AUs on videoPort, raw 16kHz mono s16le PCM on audioPort)
+     * with zero full-file disk download.
+     *
+     * @return "" on normal EOF or caller-initiated socket stop; error description otherwise.
+     */
+    public static String streamAvUrlsToSockets(
+            String videoUrl,
+            String audioUrl,
+            String headersJson,
+            long videoContentLength,
+            long audioContentLength,
+            int videoPort,
+            int audioPort,
+            int maxDim,
+            int targetFps,
+            int bitrate,
+            int maxSeconds) {
+        if (maxDim < 160) maxDim = 480;
+        if (targetFps <= 0 || targetFps > 30) targetFps = 15;
+        if (bitrate <= 100000) bitrate = 650000;
+
+        final String effectiveAudioUrl = (audioUrl != null && !audioUrl.isEmpty()) ? audioUrl : videoUrl;
+        final AtomicBoolean cancelFlag = new AtomicBoolean(false);
+        final String[] audioErrHolder = new String[]{""};
+        Thread audioThread = null;
+
+        if (audioPort > 0 && effectiveAudioUrl != null && !effectiveAudioUrl.isEmpty()) {
+            audioThread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    String aErr = streamUrlToPcmSocket(
+                            effectiveAudioUrl,
+                            headersJson,
+                            audioContentLength,
+                            "127.0.0.1",
+                            audioPort,
+                            maxSeconds);
+                    audioErrHolder[0] = (aErr != null) ? aErr : "";
+                    String ast = STREAM_STATES.get(audioPort);
+                    if (!audioErrHolder[0].isEmpty() || "stopped".equals(ast)) {
+                        cancelFlag.set(true);
+                    }
+                }
+            }, "WaLiveAudioFeeder");
+            audioThread.setDaemon(true);
+            audioThread.start();
+        }
+
+        Map<String, String> headers = parseHeadersJson(headersJson);
+        RangedHttpMediaDataSource videoSource = null;
+        MediaExtractor extractor = new MediaExtractor();
+        Socket videoSocket = null;
+        DataOutputStream videoDos = null;
+        STREAM_STATES.put(videoPort, "connecting");
+        boolean cleanVideoExit = false;
+
+        try {
+            videoSource = new RangedHttpMediaDataSource(videoUrl, headers, videoContentLength);
+            extractor.setDataSource(videoSource);
+
+            videoSocket = new Socket();
+            videoSocket.connect(new InetSocketAddress("127.0.0.1", videoPort), 5000);
+            videoSocket.setTcpNoDelay(true);
+            videoSocket.setSoTimeout(0);
+            videoDos = new DataOutputStream(new BufferedOutputStream(videoSocket.getOutputStream(), 32768));
+
+            final DataOutputStream dosRef = videoDos;
+            final boolean[] markedStreaming = new boolean[1];
+            long[] outFrames = new long[1];
+            long maxPtsUs = (maxSeconds > 0) ? (maxSeconds * 1_000_000L) : Long.MAX_VALUE;
+
+            String err = transcodeVideoFromExtractor(
+                    extractor,
+                    maxDim,
+                    targetFps,
+                    bitrate,
+                    maxPtsUs,
+                    cancelFlag,
+                    outFrames,
+                    new VideoAuConsumer() {
+                        @Override
+                        public void onAccessUnit(byte[] annexBAu) throws PcmSinkClosedException {
+                            if (annexBAu == null || annexBAu.length == 0) {
+                                return;
+                            }
+                            try {
+                                dosRef.writeInt(annexBAu.length);
+                                dosRef.write(annexBAu);
+                                dosRef.flush();
+                                if (!markedStreaming[0]) {
+                                    markedStreaming[0] = true;
+                                    STREAM_STATES.put(videoPort, "streaming");
+                                }
+                            } catch (IOException ioe) {
+                                throw new PcmSinkClosedException(ioe);
+                            }
+                        }
+                    });
+
+            if (!err.isEmpty()) {
+                STREAM_STATES.put(videoPort, "error:" + err);
+                return err;
+            }
+            if (!audioErrHolder[0].isEmpty()) {
+                STREAM_STATES.put(videoPort, "error:" + audioErrHolder[0]);
+                return audioErrHolder[0];
+            }
+            if (outFrames[0] == 0 && !cancelFlag.get()) {
+                String zeroErr = "Hardware encoder produced 0 video frames";
+                STREAM_STATES.put(videoPort, "error:" + zeroErr);
+                return zeroErr;
+            }
+            videoDos.flush();
+            cleanVideoExit = true;
+            STREAM_STATES.put(videoPort, "done");
+            return "";
+        } catch (PcmSinkClosedException stopClosed) {
+            cancelFlag.set(true);
+            STREAM_STATES.put(videoPort, "stopped");
+            return !audioErrHolder[0].isEmpty() ? audioErrHolder[0] : "";
+        } catch (HttpRefusedException refused) {
+            cancelFlag.set(true);
+            String err = "HTTP_REFUSED:" + refused.statusCode;
+            STREAM_STATES.put(videoPort, "error:" + err);
+            return err;
+        } catch (Throwable t) {
+            cancelFlag.set(true);
+            if (videoSource != null && videoSource.refusedStatus > 0) {
+                String err = "HTTP_REFUSED:" + videoSource.refusedStatus;
+                STREAM_STATES.put(videoPort, "error:" + err);
+                return err;
+            }
+            if (!audioErrHolder[0].isEmpty()) {
+                STREAM_STATES.put(videoPort, "error:" + audioErrHolder[0]);
+                return audioErrHolder[0];
+            }
+            String msg = t.getMessage();
+            String err = "Live video stream failed: " + (msg != null ? msg : t.getClass().getSimpleName());
+            STREAM_STATES.put(videoPort, "error:" + err);
+            return err;
+        } finally {
+            try { if (videoDos != null) videoDos.close(); } catch (Throwable ignored) {}
+            try { if (videoSocket != null) videoSocket.close(); } catch (Throwable ignored) {}
+            try { extractor.release(); } catch (Throwable ignored) {}
+            try { if (videoSource != null) videoSource.close(); } catch (Throwable ignored) {}
+            if (audioThread != null) {
+                try {
+                    audioThread.join(cleanVideoExit && !cancelFlag.get() ? 15000L : 300L);
+                } catch (InterruptedException ignored) {}
+            }
+        }
+    }
+
+    private static String transcodeVideoFromExtractor(
+            MediaExtractor extractor,
+            int maxDim,
+            int targetFps,
+            int bitrate,
+            long maxPtsUs,
+            AtomicBoolean cancelFlag,
+            long[] outFrameCountRef,
+            VideoAuConsumer consumer) throws Exception {
         MediaCodec decoder = null;
         MediaCodec encoder = null;
         Surface decSurface = null;
@@ -685,11 +1024,8 @@ public final class WaMediaTranscoder {
         EGLDisplay eglDisplay = EGL14.EGL_NO_DISPLAY;
         EGLContext eglContext = EGL14.EGL_NO_CONTEXT;
         EGLSurface eglSurface = EGL14.EGL_NO_SURFACE;
-        BufferedOutputStream bos = null;
-        File tmpFile = new File(outH264Path + ".tmp");
 
         try {
-            extractor.setDataSource(inputPath);
             int trackIdx = -1;
             MediaFormat inFmt = null;
             String mime = "";
@@ -705,7 +1041,7 @@ public final class WaMediaTranscoder {
                 }
             }
             if (trackIdx < 0 || inFmt == null) {
-                return "No video track found in file";
+                return "No video track found in media";
             }
 
             extractor.selectTrack(trackIdx);
@@ -744,7 +1080,6 @@ public final class WaMediaTranscoder {
             try {
                 encoder.configure(encFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
             } catch (Throwable profileErr) {
-                // Retry with minimal compatible format if device rejects profile/level keys
                 MediaFormat fallbackFmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, encW, encH);
                 fallbackFmt.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
                 fallbackFmt.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
@@ -794,10 +1129,13 @@ public final class WaMediaTranscoder {
             surfaceTex = new SurfaceTexture(renderer.texId);
             final Object frameLock = new Object();
             final boolean[] frameReady = new boolean[1];
-            surfaceTex.setOnFrameAvailableListener(st -> {
-                synchronized (frameLock) {
-                    frameReady[0] = true;
-                    frameLock.notifyAll();
+            surfaceTex.setOnFrameAvailableListener(new SurfaceTexture.OnFrameAvailableListener() {
+                @Override
+                public void onFrameAvailable(SurfaceTexture st) {
+                    synchronized (frameLock) {
+                        frameReady[0] = true;
+                        frameLock.notifyAll();
+                    }
                 }
             }, cbHandler);
             decSurface = new Surface(surfaceTex);
@@ -806,24 +1144,27 @@ public final class WaMediaTranscoder {
             decoder.configure(inFmt, decSurface, null, 0);
             decoder.start();
 
-            bos = new BufferedOutputStream(new FileOutputStream(tmpFile), 65536);
-
             MediaCodec.BufferInfo decInfo = new MediaCodec.BufferInfo();
             MediaCodec.BufferInfo encInfo = new MediaCodec.BufferInfo();
             boolean inEos = false;
             boolean decEos = false;
             boolean encEos = false;
             boolean sentEndOfInput = false;
+            boolean sentFirstFrame = false;
 
             final long frameIntervalUs = 1_000_000L / targetFps;
             final long frameIntervalNs = 1_000_000_000L / targetFps;
-            final long maxPtsUs = 600_000_000L; // 10 min safety cap
             long nextCapturePtsUs = -1L;
             long outFrameIdx = 0;
             byte[] csdConfig = null;
             int encIdleTicks = 0;
+            ByteArrayOutputStream partialAu = new ByteArrayOutputStream();
+            boolean partialIsKey = false;
 
             while (!encEos) {
+                if (cancelFlag != null && cancelFlag.get()) {
+                    break;
+                }
                 if (decEos && ++encIdleTicks > 600) {
                     break;
                 }
@@ -833,7 +1174,7 @@ public final class WaMediaTranscoder {
                         ByteBuffer inBuf = decoder.getInputBuffer(inIdx);
                         int sz = inBuf != null ? extractor.readSampleData(inBuf, 0) : -1;
                         long pts = extractor.getSampleTime();
-                        if (sz < 0 || pts > maxPtsUs) {
+                        if (sz < 0 || (pts >= 0 && pts > maxPtsUs)) {
                             decoder.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
                             inEos = true;
                         } else {
@@ -891,8 +1232,11 @@ public final class WaMediaTranscoder {
                     }
                 }
 
-                // Drain encoded H.264 packets cleanly
+                // Drain encoded H.264 access units cleanly
                 while (true) {
+                    if (cancelFlag != null && cancelFlag.get()) {
+                        break;
+                    }
                     int encOut = encoder.dequeueOutputBuffer(encInfo, 2000);
                     if (encOut == MediaCodec.INFO_TRY_AGAIN_LATER) {
                         break;
@@ -901,9 +1245,7 @@ public final class WaMediaTranscoder {
                         byte[] sps = readCsd(of, "csd-0");
                         byte[] pps = readCsd(of, "csd-1");
                         if (sps != null && sps.length > 0) {
-                            byte[] comb = combineCsd(sps, pps);
-                            csdConfig = ensureAnnexB(comb);
-                            bos.write(csdConfig);
+                            csdConfig = ensureAnnexB(combineCsd(sps, pps));
                         }
                     } else if (encOut >= 0) {
                         encIdleTicks = 0;
@@ -917,12 +1259,25 @@ public final class WaMediaTranscoder {
 
                             if ((encInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
                                 csdConfig = annex;
-                                bos.write(annex);
                             } else {
-                                if ((encInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0 && csdConfig != null && !startsWithSps(annex)) {
-                                    bos.write(csdConfig);
+                                boolean isKey = (encInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
+                                boolean isPartial = (encInfo.flags & MediaCodec.BUFFER_FLAG_PARTIAL_FRAME) != 0;
+                                if (isPartial || partialAu.size() > 0) {
+                                    partialAu.write(annex);
+                                    partialIsKey |= isKey;
                                 }
-                                bos.write(annex);
+                                if (!isPartial) {
+                                    byte[] completeAu = (partialAu.size() > 0) ? partialAu.toByteArray() : annex;
+                                    boolean auKey = (partialAu.size() > 0) ? partialIsKey : isKey;
+                                    partialAu.reset();
+                                    partialIsKey = false;
+
+                                    if ((auKey || !sentFirstFrame) && csdConfig != null && !startsWithSps(completeAu)) {
+                                        completeAu = combineCsd(csdConfig, completeAu);
+                                    }
+                                    sentFirstFrame = true;
+                                    consumer.onAccessUnit(completeAu);
+                                }
                             }
                         }
                         encoder.releaseOutputBuffer(encOut, false);
@@ -934,27 +1289,11 @@ public final class WaMediaTranscoder {
                 }
             }
 
-            bos.flush();
-            bos.close();
-            bos = null;
-
-            if (outFrameIdx == 0 || !tmpFile.exists() || tmpFile.length() == 0) {
-                return "Hardware encoder produced 0 video frames";
-            }
-
-            File finalFile = new File(outH264Path);
-            if (finalFile.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                finalFile.delete();
-            }
-            if (!tmpFile.renameTo(finalFile)) {
-                return "Failed to rename transcoded H.264 file";
+            if (outFrameCountRef != null && outFrameCountRef.length > 0) {
+                outFrameCountRef[0] = outFrameIdx;
             }
             return "";
-        } catch (Throwable t) {
-            return "Java video transcode failed: " + t.getMessage();
         } finally {
-            try { if (bos != null) bos.close(); } catch (Throwable ignored) {}
             try { if (decoder != null) { decoder.stop(); decoder.release(); } } catch (Throwable ignored) {}
             try { if (encoder != null) { encoder.stop(); encoder.release(); } } catch (Throwable ignored) {}
             try { if (decSurface != null) decSurface.release(); } catch (Throwable ignored) {}
@@ -970,11 +1309,6 @@ public final class WaMediaTranscoder {
                 } catch (Throwable ignored) {}
             }
             try { if (encSurface != null) encSurface.release(); } catch (Throwable ignored) {}
-            try { extractor.release(); } catch (Throwable ignored) {}
-            if (tmpFile.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                tmpFile.delete();
-            }
         }
     }
 

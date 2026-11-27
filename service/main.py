@@ -53,8 +53,22 @@ def main():
             active_p = len(core.plugins.loaded) - len(core.plugins.disabled)
             tot_p = len(core.plugins.loaded)
             cur_st = str(getattr(core, "status", "disconnected")).lower()
+            sync_st = str(getattr(core, "sync_state", "stopped")).lower()
+            if sync_st == "ready":
+                sync_label = "ready"
+            elif sync_st in ("syncing_offline", "ws_connected"):
+                sync_label = "syncing"
+            elif sync_st == "connecting":
+                sync_label = "connecting"
+            else:
+                sync_label = "stopped"
+
             st_text = "Online" if is_run else "Paused"
-            if "connected" in cur_st or "paired" in cur_st:
+            if sync_label == "ready" and ("connected" in cur_st or "paired" in cur_st):
+                net_text = "Connected (Ready)"
+            elif sync_label == "syncing":
+                net_text = "Syncing..."
+            elif "connected" in cur_st or "paired" in cur_st:
                 net_text = "Connected"
             elif not is_run or "stopped" in cur_st:
                 net_text = "Offline"
@@ -71,12 +85,17 @@ def main():
                 big_t = (
                     f"Active Call: {c_peer} ({c_phase})\n"
                     f"Track: {c_track or 'Idle'}\n"
-                    f"Network: {net_text} | RAM: {ram} MB | Plugins: {active_p}/{tot_p}"
+                    f"Network: {net_text} | Sync: {sync_label} | RAM: {ram} MB | Plugins: {active_p}/{tot_p}"
                 )
                 update_service_notification(chip_title, short_t, is_running=is_run, stats_text=big_t)
             else:
                 short_t = f"{net_text} | RAM: {ram}MB | Plugins: {active_p}/{tot_p}"
-                big_t = f"State: {st_text}\nNetwork: {net_text}\nRAM Usage: {ram} MB\nActive Plugins: {active_p} / {tot_p}"
+                big_t = (
+                    f"State: {st_text}\n"
+                    f"Network: {net_text} ({sync_label})\n"
+                    f"RAM Usage: {ram} MB\n"
+                    f"Active Plugins: {active_p} / {tot_p}"
+                )
                 update_service_notification(f"WA Core • {st_text}", short_t, is_running=is_run, stats_text=big_t)
         except Exception as e:
             print(f"[SVC _update_notif error] {e}", flush=True)
@@ -88,7 +107,7 @@ def main():
             ui.send_message(addr.encode(), list(vals) or [""])
         except Exception:
             pass                                    # UI not running: fine
-        if addr in {"/status", "/engine_state", "/call_event"}:
+        if addr in {"/status", "/engine_state", "/call_event", "/sync_state"}:
             _update_notif()
 
     class UiLogHandler(logging.Handler):
@@ -294,6 +313,76 @@ def main():
         if not res.get("ok"):
             emit("/log", f"✗ Call {action} failed: {res.get('error')}")
 
+    # ---- Phase 1 & Phase 3 client / ghost / YT stream handlers
+    async def _privacy_update(raw_json):
+        try:
+            txt = _dec(raw_json).strip()
+            cfg = json.loads(txt) if txt else {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            updated = await core.update_privacy(cfg)
+            emit("/privacy_state", json.dumps(updated))
+        except Exception as e:
+            emit("/log", f"✗ Privacy update error: {e}")
+
+    async def _send_media(chat_jid, kind, path, caption):
+        ok, res = await core.send_media_message(_dec(chat_jid), _dec(kind), _dec(path), _dec(caption))
+        if not ok:
+            emit("/log", f"✗ Media send failed: {res}")
+
+    async def _resync_contacts():
+        cnt = await core.resync_contacts()
+        emit("/log", f"Contacts & groups synced ({cnt} records).")
+
+    async def _history_sync():
+        cnt = await core.resync_contacts()
+        if core.client and await core._is_client_connected():
+            if hasattr(core.client, "request_history_sync"):
+                try:
+                    maybe = core.client.request_history_sync()
+                    if asyncio.iscoroutine(maybe):
+                        await maybe
+                except Exception as e:
+                    logging.debug("request_history_sync failed: %s", e)
+            elif hasattr(core.client, "request_app_state_recovery"):
+                try:
+                    await core.client.request_app_state_recovery("regular")
+                except Exception as e:
+                    logging.debug("request_app_state_recovery note: %s", e)
+        emit("/log", f"Sync refresh completed ({cnt} contacts/groups).")
+
+    async def _check_number(phone):
+        res = await core.check_number_on_wa(_dec(phone))
+        emit("/check_number_result", json.dumps(res))
+
+    async def _download_msg_media(chat_id, msg_id):
+        ok, res = await core.download_message_media(_dec(chat_id), _dec(msg_id))
+        if not ok:
+            emit("/log", f"✗ Media download failed: {res}")
+
+    async def _send_reaction(chat_id, msg_id, emoji):
+        ok, res = await core.send_reaction_message(_dec(chat_id), _dec(msg_id), _dec(emoji))
+        if not ok:
+            emit("/log", f"✗ Reaction failed: {res}")
+
+    async def _yt_call_stream(target_or_callid, query, is_video, vquality, buffer_mode):
+        tgt = _dec(target_or_callid).strip()
+        q = _dec(query).strip()
+        vid = int(is_video) != 0 if str(is_video).lstrip("-").isdigit() else bool(is_video)
+        vq = _dec(vquality).strip() or "480p"
+        bm = _dec(buffer_mode).strip() or "normal"
+        p = core.plugins.loaded.get("ytcall")
+        if not p or not hasattr(p.get("mod"), "start_ui_stream"):
+            emit("/yt_stream_status", json.dumps({"ok": False, "error": "ytcall UI stream handler unavailable"}))
+            return
+        try:
+            res = await p["mod"].start_ui_stream(p["ctx"], tgt, q, vid, vq, bm)
+            if not isinstance(res, dict):
+                res = {"ok": bool(res), "result": str(res)}
+        except Exception as e:
+            res = {"ok": False, "error": str(e)}
+        emit("/yt_stream_status", json.dumps(res))
+
     # Periodic background stats updater (every 8 seconds)
     async def _periodic_notif_loop():
         while True:
@@ -325,6 +414,49 @@ def main():
     server.bind(b"/call_react", lambda *a: run(_call_simple("react", a[0] if len(a) > 0 else "", a[1] if len(a) > 1 else "🎵")))
     server.bind(b"/call_refresh", lambda *a: run(_call_refresh()))
     server.bind(b"/call_clear_history", lambda *a: (core.calls.clear_history(), run(_call_refresh())))
+
+    # Client / Ghost / Media / YT Stream OSC bindings
+    server.bind(b"/app_lifecycle", lambda *a: run(core.set_app_lifecycle(_dec(a[0] if a else ""))))
+    server.bind(b"/privacy_update", lambda *a: run(_privacy_update(a[0] if a else "{}")))
+    server.bind(b"/mark_read", lambda *a: run(core.mark_chat_read(
+        _dec(a[0] if a else ""),
+        force=(int(_dec(a[1])) != 0 if len(a) > 1 and str(_dec(a[1])).lstrip("-").isdigit() else True),
+    )))
+    server.bind(b"/send_chat", lambda *a: run(core.send_chat_message(
+        _dec(a[0] if len(a) > 0 else ""),
+        _dec(a[1] if len(a) > 1 else ""),
+        _dec(a[2] if len(a) > 2 else ""),
+    )))
+    server.bind(b"/send_media", lambda *a: run(_send_media(
+        a[0] if len(a) > 0 else "",
+        a[1] if len(a) > 1 else "document",
+        a[2] if len(a) > 2 else "",
+        a[3] if len(a) > 3 else "",
+    )))
+    server.bind(b"/resync_contacts", lambda *a: run(_resync_contacts()))
+    server.bind(b"/history_sync", lambda *a: run(_history_sync()))
+    server.bind(b"/subscribe_presence", lambda *a: run(core.subscribe_chat_presence(_dec(a[0] if a else ""))))
+    server.bind(b"/check_number", lambda *a: run(_check_number(a[0] if a else "")))
+    server.bind(b"/chat_action", lambda *a: run(core.chat_flag_action(
+        _dec(a[0] if len(a) > 0 else ""),
+        _dec(a[1] if len(a) > 1 else ""),
+    )))
+    server.bind(b"/download_msg_media", lambda *a: run(_download_msg_media(
+        a[0] if len(a) > 0 else "",
+        a[1] if len(a) > 1 else "",
+    )))
+    server.bind(b"/send_reaction", lambda *a: run(_send_reaction(
+        a[0] if len(a) > 0 else "",
+        a[1] if len(a) > 1 else "",
+        a[2] if len(a) > 2 else "",
+    )))
+    server.bind(b"/yt_call_stream", lambda *a: run(_yt_call_stream(
+        a[0] if len(a) > 0 else "",
+        a[1] if len(a) > 1 else "",
+        a[2] if len(a) > 2 else 0,
+        a[3] if len(a) > 3 else "480p",
+        a[4] if len(a) > 4 else "normal",
+    )))
 
     loop.create_task(core.start())
     loop.create_task(_periodic_notif_loop())
