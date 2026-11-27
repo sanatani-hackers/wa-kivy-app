@@ -29,6 +29,18 @@
       "changelog": "Initial release powered by meowcaller Go VoIP + MLow codec."
     },
     {
+      "id": "ytcall",
+      "name": "YouTube Live PCMStream DJ",
+      "version": "2.0.0",
+      "author": "Sanatani Hackers",
+      "category": "Media & Fun",
+      "description": "Zero-download true live YouTube audio PCMStream + video call streaming with InnerTube search & DJ queue.",
+      "download_url": "https://raw.githubusercontent.com/sanatani-hackers/wa-kivy-app/main/plugins/ytcall.py",
+      "requires": [],
+      "verified": true,
+      "changelog": "Added true zero-download live PCMStream via Go loopback socket + Android MediaCodec."
+    },
+    {
       "id": "antiviewonce",
       "name": "Anti-ViewOnce Media Saver",
       "version": "1.1.0",

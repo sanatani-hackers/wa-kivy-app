@@ -4,6 +4,7 @@ import android.graphics.SurfaceTexture;
 import android.media.AudioFormat;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
+import android.media.MediaDataSource;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.opengl.EGL14;
@@ -19,13 +20,28 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.view.Surface;
 
+import org.json.JSONObject;
+
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Hardware-accelerated Android MediaCodec audio (16kHz mono WAV) and video
@@ -45,12 +61,190 @@ public final class WaMediaTranscoder {
      */
     public static String extractAudioToWav16k(String inputPath, String outWavPath) {
         MediaExtractor extractor = new MediaExtractor();
-        MediaCodec codec = null;
         BufferedOutputStream bos = null;
         File tmpFile = new File(outWavPath + ".tmp");
 
         try {
             extractor.setDataSource(inputPath);
+            bos = new BufferedOutputStream(new FileOutputStream(tmpFile), 32768);
+            bos.write(new byte[44]);
+
+            long[] outBytes = new long[1];
+            String err = decodeAudioTrackToPcm16k(extractor, bos, 600_000_000L, outBytes, false);
+            if (!err.isEmpty()) {
+                return err;
+            }
+            bos.flush();
+            bos.close();
+            bos = null;
+
+            long totalOutBytes = outBytes[0];
+            if (totalOutBytes == 0) {
+                return "Decoded zero audio PCM bytes";
+            }
+
+            // Write true RIFF/WAVE header (16kHz, 1 channel, 16-bit)
+            try (RandomAccessFile raf = new RandomAccessFile(tmpFile, "rw")) {
+                raf.seek(0);
+                byte[] hdr = new byte[44];
+                ByteBuffer hb = ByteBuffer.wrap(hdr).order(ByteOrder.LITTLE_ENDIAN);
+                hb.put("RIFF".getBytes("US-ASCII"));
+                hb.putInt((int) (36 + totalOutBytes));
+                hb.put("WAVE".getBytes("US-ASCII"));
+                hb.put("fmt ".getBytes("US-ASCII"));
+                hb.putInt(16);          // Subchunk1Size (PCM)
+                hb.putShort((short) 1); // AudioFormat = 1 (PCM)
+                hb.putShort((short) 1); // NumChannels = 1 (Mono)
+                hb.putInt(16000);       // SampleRate = 16000
+                hb.putInt(16000 * 2);   // ByteRate = SampleRate * 2
+                hb.putShort((short) 2); // BlockAlign = 2
+                hb.putShort((short) 16);// BitsPerSample = 16
+                hb.put("data".getBytes("US-ASCII"));
+                hb.putInt((int) totalOutBytes);
+                raf.write(hdr);
+            }
+
+            File finalFile = new File(outWavPath);
+            if (finalFile.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                finalFile.delete();
+            }
+            if (!tmpFile.renameTo(finalFile)) {
+                return "Failed to move output WAV file";
+            }
+            return "";
+        } catch (Throwable t) {
+            return "Java audio transcode failed: " + t.getMessage();
+        } finally {
+            try { if (bos != null) bos.close(); } catch (Throwable ignored) {}
+            try { extractor.release(); } catch (Throwable ignored) {}
+            if (tmpFile.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                tmpFile.delete();
+            }
+        }
+    }
+
+    private static final ConcurrentHashMap<Integer, String> STREAM_STATES = new ConcurrentHashMap<>();
+
+    public static String getStreamState(int pcmPort) {
+        String st = STREAM_STATES.get(pcmPort);
+        return st != null ? st : "";
+    }
+
+    public static void clearStreamState(int pcmPort) {
+        STREAM_STATES.remove(pcmPort);
+    }
+
+    /**
+     * Stream an HTTP/HTTPS audio URL (e.g. YouTube direct M4A/WebM stream) directly through
+     * Android MediaExtractor + MediaCodec and emit live 16kHz mono s16le PCM to Go's loopback
+     * TCP socket with zero full-file disk download.
+     *
+     * @return "" on normal EOF or caller-initiated socket stop; error description otherwise.
+     */
+    public static String streamUrlToPcmSocket(
+            String streamUrl,
+            String headersJson,
+            long contentLength,
+            String pcmHost,
+            int pcmPort,
+            int maxSeconds) {
+        Map<String, String> headers = parseHeadersJson(headersJson);
+        RangedHttpMediaDataSource dataSource = null;
+        MediaExtractor extractor = new MediaExtractor();
+        Socket socket = null;
+        OutputStream pcmOut = null;
+        STREAM_STATES.put(pcmPort, "connecting");
+
+        try {
+            dataSource = new RangedHttpMediaDataSource(streamUrl, headers, contentLength);
+            extractor.setDataSource(dataSource);
+
+            long maxPtsUs = (maxSeconds > 0) ? (maxSeconds * 1_000_000L) : Long.MAX_VALUE;
+            socket = new Socket();
+            socket.connect(new InetSocketAddress(pcmHost, pcmPort), 5000);
+            socket.setTcpNoDelay(true);
+            socket.setSoTimeout(0);
+            final OutputStream rawOut = new BufferedOutputStream(socket.getOutputStream(), 4096);
+            final boolean[] markedStreaming = new boolean[1];
+            pcmOut = new OutputStream() {
+                @Override
+                public void write(int b) throws IOException {
+                    rawOut.write(b);
+                    if (!markedStreaming[0]) {
+                        markedStreaming[0] = true;
+                        STREAM_STATES.put(pcmPort, "streaming");
+                    }
+                }
+
+                @Override
+                public void write(byte[] b, int off, int len) throws IOException {
+                    rawOut.write(b, off, len);
+                    if (!markedStreaming[0] && len > 0) {
+                        markedStreaming[0] = true;
+                        STREAM_STATES.put(pcmPort, "streaming");
+                    }
+                }
+
+                @Override
+                public void flush() throws IOException {
+                    rawOut.flush();
+                }
+
+                @Override
+                public void close() throws IOException {
+                    rawOut.close();
+                }
+            };
+
+            long[] outBytes = new long[1];
+            String err = decodeAudioTrackToPcm16k(extractor, pcmOut, maxPtsUs, outBytes, true);
+            if (!err.isEmpty()) {
+                STREAM_STATES.put(pcmPort, "error:" + err);
+                return err;
+            }
+            pcmOut.flush();
+            if (outBytes[0] <= 0) {
+                STREAM_STATES.put(pcmPort, "error:Decoded zero audio PCM bytes");
+                return "Decoded zero audio PCM bytes from stream";
+            }
+            STREAM_STATES.put(pcmPort, "done");
+            return "";
+        } catch (PcmSinkClosedException stopClosed) {
+            // Peer (Go CallStopAudio / call ended) intentionally closed PCM socket -> normal stop
+            STREAM_STATES.put(pcmPort, "stopped");
+            return "";
+        } catch (HttpRefusedException refused) {
+            String err = "HTTP_REFUSED:" + refused.statusCode;
+            STREAM_STATES.put(pcmPort, "error:" + err);
+            return err;
+        } catch (Throwable t) {
+            if (dataSource != null && dataSource.refusedStatus > 0) {
+                String err = "HTTP_REFUSED:" + dataSource.refusedStatus;
+                STREAM_STATES.put(pcmPort, "error:" + err);
+                return err;
+            }
+            String msg = t.getMessage();
+            String err = "Stream decode failed: " + (msg != null ? msg : t.getClass().getSimpleName());
+            STREAM_STATES.put(pcmPort, "error:" + err);
+            return err;
+        } finally {
+            try { if (pcmOut != null) pcmOut.close(); } catch (Throwable ignored) {}
+            try { if (socket != null) socket.close(); } catch (Throwable ignored) {}
+            try { extractor.release(); } catch (Throwable ignored) {}
+            try { if (dataSource != null) dataSource.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private static String decodeAudioTrackToPcm16k(
+            MediaExtractor extractor,
+            OutputStream pcmOut,
+            long maxPtsUs,
+            long[] totalOutBytesRef,
+            boolean flushEachBuffer) throws IOException, PcmSinkClosedException {
+        MediaCodec codec = null;
+        try {
             int trackIdx = -1;
             MediaFormat inFmt = null;
             String mime = "";
@@ -66,7 +260,7 @@ public final class WaMediaTranscoder {
                 }
             }
             if (trackIdx < 0 || inFmt == null) {
-                return "No audio track found in media file";
+                return "No audio track found in media";
             }
 
             extractor.selectTrack(trackIdx);
@@ -81,25 +275,18 @@ public final class WaMediaTranscoder {
             codec.configure(inFmt, null, null, 0);
             codec.start();
 
-            bos = new BufferedOutputStream(new FileOutputStream(tmpFile), 32768);
-            byte[] emptyHdr = new byte[44];
-            bos.write(emptyHdr);
-
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             boolean inEos = false;
             boolean outEos = false;
             long totalOutBytes = 0;
 
-            // Stateful linear resampler across output buffers -> exact 16000 Hz mono
             final double targetRate = 16000.0;
             double pos = 0.0;
             float prevMono = 0.0f;
             boolean havePrev = false;
             byte[] rawScratch = new byte[65536];
-            byte[] outPair = new byte[2];
-
-            // Cap audio decode to 10 minutes (same as video cap)
-            final long maxPtsUs = 600_000_000L;
+            byte[] outChunk = new byte[16384];
+            int outChunkPos = 0;
 
             while (!outEos) {
                 if (!inEos) {
@@ -108,7 +295,7 @@ public final class WaMediaTranscoder {
                         ByteBuffer inBuf = codec.getInputBuffer(inIdx);
                         int sz = inBuf != null ? extractor.readSampleData(inBuf, 0) : -1;
                         long pts = extractor.getSampleTime();
-                        if (sz < 0 || pts > maxPtsUs) {
+                        if (sz < 0 || (pts >= 0 && pts > maxPtsUs)) {
                             codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
                             inEos = true;
                         } else {
@@ -164,10 +351,13 @@ public final class WaMediaTranscoder {
                             if (curRate == 16000) {
                                 for (int f = 0; f < frames; f++) {
                                     int s16 = clampS16(mono[f]);
-                                    outPair[0] = (byte) (s16 & 0xFF);
-                                    outPair[1] = (byte) ((s16 >> 8) & 0xFF);
-                                    bos.write(outPair, 0, 2);
-                                    totalOutBytes += 2;
+                                    if (outChunkPos + 2 > outChunk.length) {
+                                        writePcmOrThrow(pcmOut, outChunk, outChunkPos, false);
+                                        totalOutBytes += outChunkPos;
+                                        outChunkPos = 0;
+                                    }
+                                    outChunk[outChunkPos++] = (byte) (s16 & 0xFF);
+                                    outChunk[outChunkPos++] = (byte) ((s16 >> 8) & 0xFF);
                                 }
                             } else {
                                 double step = curRate / targetRate;
@@ -183,17 +373,25 @@ public final class WaMediaTranscoder {
                                     float s0 = (havePrev && i0 == 0) ? prevMono : mono[havePrev ? (i0 - 1) : i0];
                                     int i1 = i0 + 1;
                                     float s1 = (havePrev && i1 == 0) ? prevMono : mono[havePrev ? (i1 - 1) : i1];
-                                    float sample = (float) (s0 * (1.0 - frac) + s1 * frac);
-                                    int s16 = clampS16(sample);
-                                    outPair[0] = (byte) (s16 & 0xFF);
-                                    outPair[1] = (byte) ((s16 >> 8) & 0xFF);
-                                    bos.write(outPair, 0, 2);
-                                    totalOutBytes += 2;
+                                    int s16 = clampS16((float) (s0 * (1.0 - frac) + s1 * frac));
+                                    if (outChunkPos + 2 > outChunk.length) {
+                                        writePcmOrThrow(pcmOut, outChunk, outChunkPos, false);
+                                        totalOutBytes += outChunkPos;
+                                        outChunkPos = 0;
+                                    }
+                                    outChunk[outChunkPos++] = (byte) (s16 & 0xFF);
+                                    outChunk[outChunkPos++] = (byte) ((s16 >> 8) & 0xFF);
                                     pos += step;
                                 }
                                 pos -= frames;
                                 prevMono = mono[frames - 1];
                                 havePrev = true;
+                            }
+
+                            if (flushEachBuffer && outChunkPos > 0) {
+                                writePcmOrThrow(pcmOut, outChunk, outChunkPos, true);
+                                totalOutBytes += outChunkPos;
+                                outChunkPos = 0;
                             }
                         }
                     }
@@ -204,54 +402,256 @@ public final class WaMediaTranscoder {
                 }
             }
 
-            bos.flush();
-            bos.close();
-            bos = null;
-
-            if (totalOutBytes == 0) {
-                return "Decoded zero audio PCM bytes";
+            if (outChunkPos > 0) {
+                writePcmOrThrow(pcmOut, outChunk, outChunkPos, flushEachBuffer);
+                totalOutBytes += outChunkPos;
             }
-
-            // Write true RIFF/WAVE header (16kHz, 1 channel, 16-bit)
-            try (RandomAccessFile raf = new RandomAccessFile(tmpFile, "rw")) {
-                raf.seek(0);
-                byte[] hdr = new byte[44];
-                ByteBuffer hb = ByteBuffer.wrap(hdr).order(ByteOrder.LITTLE_ENDIAN);
-                hb.put("RIFF".getBytes("US-ASCII"));
-                hb.putInt((int) (36 + totalOutBytes));
-                hb.put("WAVE".getBytes("US-ASCII"));
-                hb.put("fmt ".getBytes("US-ASCII"));
-                hb.putInt(16);          // Subchunk1Size (PCM)
-                hb.putShort((short) 1); // AudioFormat = 1 (PCM)
-                hb.putShort((short) 1); // NumChannels = 1 (Mono)
-                hb.putInt(16000);       // SampleRate = 16000
-                hb.putInt(16000 * 2);   // ByteRate = SampleRate * 2
-                hb.putShort((short) 2); // BlockAlign = 2
-                hb.putShort((short) 16);// BitsPerSample = 16
-                hb.put("data".getBytes("US-ASCII"));
-                hb.putInt((int) totalOutBytes);
-                raf.write(hdr);
-            }
-
-            File finalFile = new File(outWavPath);
-            if (finalFile.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                finalFile.delete();
-            }
-            if (!tmpFile.renameTo(finalFile)) {
-                return "Failed to move output WAV file";
+            if (totalOutBytesRef != null && totalOutBytesRef.length > 0) {
+                totalOutBytesRef[0] = totalOutBytes;
             }
             return "";
-        } catch (Throwable t) {
-            return "Java audio transcode failed: " + t.getMessage();
         } finally {
-            try { if (bos != null) bos.close(); } catch (Throwable ignored) {}
-            try { if (codec != null) { codec.stop(); codec.release(); } } catch (Throwable ignored) {}
-            try { extractor.release(); } catch (Throwable ignored) {}
-            if (tmpFile.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                tmpFile.delete();
+            try {
+                if (codec != null) {
+                    codec.stop();
+                    codec.release();
+                }
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    private static void writePcmOrThrow(OutputStream out, byte[] data, int len, boolean flush)
+            throws PcmSinkClosedException {
+        try {
+            out.write(data, 0, len);
+            if (flush) {
+                out.flush();
             }
+        } catch (IOException ioe) {
+            throw new PcmSinkClosedException(ioe);
+        }
+    }
+
+    private static Map<String, String> parseHeadersJson(String headersJson) {
+        Map<String, String> map = new HashMap<>();
+        if (headersJson == null || headersJson.trim().isEmpty()) {
+            return map;
+        }
+        try {
+            JSONObject obj = new JSONObject(headersJson);
+            Iterator<String> keys = obj.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                String v = obj.optString(k, "");
+                if (k != null && !v.isEmpty()) {
+                    map.put(k, v);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return map;
+    }
+
+    private static final class PcmSinkClosedException extends Exception {
+        PcmSinkClosedException(Throwable cause) { super(cause); }
+    }
+
+    private static final class HttpRefusedException extends IOException {
+        final int statusCode;
+        HttpRefusedException(int statusCode) {
+            super("HTTP refused (" + statusCode + ")");
+            this.statusCode = statusCode;
+        }
+    }
+
+    /**
+     * Random-access MediaDataSource backed by ranged 256 KiB HTTP GETs with an 8-chunk LRU RAM cache,
+     * redirect tracking, and retries so YouTube direct streams start in ~1s without disk bloat.
+     */
+    private static final class RangedHttpMediaDataSource extends MediaDataSource {
+        private static final int CHUNK_SIZE = 256 * 1024;
+        private static final int MAX_CACHED_CHUNKS = 8;
+
+        private String streamUrl;
+        private final Map<String, String> headers;
+        private volatile long totalSize;
+        private volatile boolean closed = false;
+        volatile int refusedStatus = 0;
+
+        private final LinkedHashMap<Long, byte[]> chunkCache =
+                new LinkedHashMap<Long, byte[]>(16, 0.75f, true) {
+                    @Override
+                    protected boolean removeEldestEntry(Map.Entry<Long, byte[]> eldest) {
+                        return size() > MAX_CACHED_CHUNKS;
+                    }
+                };
+
+        RangedHttpMediaDataSource(String url, Map<String, String> headers, long knownSize) throws IOException {
+            this.streamUrl = url;
+            this.headers = headers != null ? headers : new HashMap<>();
+            this.totalSize = knownSize > 0 ? knownSize : -1L;
+            // Pre-fetch chunk 0 immediately to fail fast on 403/410 and resolve totalSize
+            getChunk(0L);
+        }
+
+        @Override
+        public synchronized long getSize() {
+            return totalSize;
+        }
+
+        @Override
+        public synchronized int readAt(long position, byte[] buffer, int offset, int size) throws IOException {
+            if (closed || position < 0 || size < 0) {
+                return -1;
+            }
+            if (size == 0) {
+                return 0;
+            }
+            if (totalSize >= 0 && position >= totalSize) {
+                return -1;
+            }
+
+            long remainingInFile = (totalSize >= 0) ? (totalSize - position) : size;
+            int toRead = (int) Math.min(size, remainingInFile);
+            int totalRead = 0;
+
+            while (totalRead < toRead && !closed) {
+                long curPos = position + totalRead;
+                if (totalSize >= 0 && curPos >= totalSize) {
+                    break;
+                }
+                long chunkIdx = curPos / CHUNK_SIZE;
+                int chunkOff = (int) (curPos % CHUNK_SIZE);
+                byte[] chunk = getChunk(chunkIdx);
+                if (chunk == null || chunkOff >= chunk.length) {
+                    break;
+                }
+                int avail = chunk.length - chunkOff;
+                int copy = Math.min(avail, toRead - totalRead);
+                System.arraycopy(chunk, chunkOff, buffer, offset + totalRead, copy);
+                totalRead += copy;
+            }
+
+            return (totalRead > 0) ? totalRead : -1;
+        }
+
+        private byte[] getChunk(long chunkIdx) throws IOException {
+            byte[] cached = chunkCache.get(chunkIdx);
+            if (cached != null) {
+                return cached;
+            }
+            long start = chunkIdx * CHUNK_SIZE;
+            if (totalSize >= 0 && start >= totalSize) {
+                return new byte[0];
+            }
+            long end = (totalSize > 0) ? Math.min(start + CHUNK_SIZE - 1, totalSize - 1) : (start + CHUNK_SIZE - 1);
+            byte[] data = fetchRangeWithRetry(start, end);
+            if (data.length > 0) {
+                chunkCache.put(chunkIdx, data);
+            }
+            return data;
+        }
+
+        private byte[] fetchRangeWithRetry(long start, long end) throws IOException {
+            IOException lastErr = null;
+            for (int attempt = 0; attempt < 3 && !closed; attempt++) {
+                try {
+                    return fetchRangeOnce(start, end);
+                } catch (HttpRefusedException refused) {
+                    this.refusedStatus = refused.statusCode;
+                    throw refused;
+                } catch (IOException ioe) {
+                    lastErr = ioe;
+                    if (attempt < 2 && !closed) {
+                        try { Thread.sleep(250L * (attempt + 1)); } catch (InterruptedException ignored) {}
+                    }
+                }
+            }
+            throw (lastErr != null) ? lastErr : new IOException("Range request failed at " + start);
+        }
+
+        private byte[] fetchRangeOnce(long start, long end) throws IOException {
+            String target = this.streamUrl;
+            for (int hop = 0; hop < 6; hop++) {
+                HttpURLConnection conn = (HttpURLConnection) new URL(target).openConnection();
+                conn.setInstanceFollowRedirects(false);
+                conn.setConnectTimeout(6000);
+                conn.setReadTimeout(12000);
+                conn.setRequestMethod("GET");
+                for (Map.Entry<String, String> e : headers.entrySet()) {
+                    conn.setRequestProperty(e.getKey(), e.getValue());
+                }
+                conn.setRequestProperty("Range", "bytes=" + start + "-" + end);
+
+                try {
+                    int code = conn.getResponseCode();
+                    if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                        String loc = conn.getHeaderField("Location");
+                        if (loc == null || loc.isEmpty()) {
+                            throw new IOException("Redirect without Location header");
+                        }
+                        target = new URL(new URL(target), loc).toString();
+                        this.streamUrl = target;
+                        continue;
+                    }
+                    if (code == 416) {
+                        String cr = conn.getHeaderField("Content-Range");
+                        parseTotalFromContentRange(cr);
+                        return new byte[0];
+                    }
+                    if (code == 400 || code == 401 || code == 403 || code == 404 || code == 410) {
+                        throw new HttpRefusedException(code);
+                    }
+                    if (code < 200 || code >= 300) {
+                        throw new IOException("Unexpected HTTP " + code);
+                    }
+
+                    if (code == 206) {
+                        parseTotalFromContentRange(conn.getHeaderField("Content-Range"));
+                    } else if (code == 200) {
+                        long cl = conn.getContentLengthLong();
+                        if (cl > 0 && this.totalSize <= 0) {
+                            this.totalSize = cl;
+                        }
+                        if (start > 0) {
+                            throw new IOException("Server ignored Range header");
+                        }
+                    }
+
+                    int expectedMax = (int) Math.min(CHUNK_SIZE, (end - start + 1));
+                    ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(4096, expectedMax));
+                    try (InputStream is = conn.getInputStream()) {
+                        byte[] tmp = new byte[16384];
+                        int r;
+                        while ((r = is.read(tmp)) != -1) {
+                            out.write(tmp, 0, r);
+                            if (code == 200 && out.size() >= CHUNK_SIZE) {
+                                break;
+                            }
+                        }
+                    }
+                    return out.toByteArray();
+                } finally {
+                    conn.disconnect();
+                }
+            }
+            throw new IOException("Too many redirects");
+        }
+
+        private void parseTotalFromContentRange(String cr) {
+            if (cr == null) return;
+            int slash = cr.lastIndexOf('/');
+            if (slash < 0 || slash + 1 >= cr.length()) return;
+            String tail = cr.substring(slash + 1).trim();
+            try {
+                long t = Long.parseLong(tail);
+                if (t > 0) this.totalSize = t;
+            } catch (NumberFormatException ignored) {}
+        }
+
+        @Override
+        public synchronized void close() {
+            closed = true;
+            chunkCache.clear();
         }
     }
 

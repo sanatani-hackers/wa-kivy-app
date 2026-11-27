@@ -1,27 +1,29 @@
-"""ytcall — YouTube Audio & Video Playback Plugin for WA Core Calls.
+"""ytcall — True Live YouTube Audio PCMStream & Video DJ Plugin for WA Core Calls.
 
-Powered by an embedded pure-Python InnerTube resolver/downloader modeled on
-sanatani-hackers/ytstream (with Android certifi / requests TLS support) and
-WA Core's existing call_media / meowcaller VoIP bridge. No core APK edits needed.
+Streams YouTube audio directly in real time (zero full-file download) via
+Android MediaExtractor+MediaCodec over loopback TCP into Go meowcaller's
+PCMStream 60ms ring buffer, powered by an embedded pure-Python InnerTube client
+(sanatani-hackers/ytstream). Video calls fall back cleanly to <=480p 15fps MP4.
 
 Commands (prefix !yt or !ytcall):
   !yt help                           Show this guide
-  !yt <url|id|query|#N>              Play in active call, or inspect/search tracks
+  !yt <url|id|query|#N>              Stream live in active call, or search tracks
   !yt search <query>                 Search YouTube & pick results with #1..#5
-  !yt play <url|id|query|#N>         Download & play YouTube audio in active call
-  !yt dial <num|me|here> <song|url>  Prepare YT audio, dial number & play on pickup
-  !yt playcall <song|url|#N>         Call current chat target & play YT audio
-  !yt vcall <num|me|here> <vid|url>  Video call & play YouTube MP4 (H.264 + audio)
-  !yt queue <url|id|query|#N>        Add YT track to call DJ queue (pre-fetches!)
+  !yt play <url|id|query|#N>         Stream/switch YouTube audio live in call
+  !yt dial <num|me|here> <song|url>  Dial number & start live YT stream on pickup
+  !yt playcall <song|url|#N>         Call this chat & stream YT audio on pickup
+  !yt vcall <num|me|here> <vid|url>  Video call with YouTube MP4 (H.264 + audio)
+  !yt queue <url|id|query|#N>        Add YT track to live call DJ queue
   !yt q                              View active call's YT queue
   !yt skip                           Skip to next YT track in queue
-  !yt save <url|id|query|#N>         Save track permanently into CallMusic library
+  !yt save <url|id|query|#N>         Download & save permanently to !call tracks
   !yt info <url|id|query|#N>         Show metadata & stream details without playing
   !yt pause / resume / stop / hangup Quick call & playback controls
   !yt status / clearcache            Status & cache management
+  !yt mode <stream|cache>            stream = zero-download live PCM, cache = WAV
   !yt loop <on|off>                  Loop single-track playback (default OFF)
   !yt quality <hq|fast>              Audio bitrate mode (hq=130kbps, fast=~50kbps)
-  !yt maxmins <N>                    Max video duration in minutes (default 20, 0=off)
+  !yt maxmins <N>                    Max track length in minutes (default 60, 0=off)
   !yt public <on|off>                Allow non-owners to queue/play YT tracks
 """
 import asyncio
@@ -44,9 +46,10 @@ log = logging.getLogger("plugin.ytcall")
 PREFIXES = ("!yt", "!ytcall")
 
 DEFAULT_CFG = {
+    "stream_mode": True,
     "loop": False,
     "public_dj": False,
-    "max_minutes": 20,
+    "max_minutes": 60,
     "video_max_minutes": 10,
     "max_cache_mb": 150,
     "max_kbps": 160,
@@ -58,6 +61,7 @@ _ctx = None
 _yt_client = None
 _PENDING_PLAY: Dict[str, dict] = {}
 _YT_QUEUES: Dict[str, List[dict]] = {}
+_ACTIVE_LIVE_TRACK: Dict[str, dict] = {}
 _LAST_SEARCH: Dict[str, List[dict]] = {}
 _BG_TASKS: set = set()
 _CACHE_LOCK = threading.Lock()
@@ -982,12 +986,47 @@ def _resolve_target_ref(chat_id: str, raw_arg: str, max_mins: int) -> Tuple[str,
     return hits[0]["id"], f"🔎 Matched: *{hits[0]['title']}*"
 
 
+def _resolve_live_stream_sync(chat_id: str, query_or_url: str) -> dict:
+    """Resolve YouTube video & direct audio stream URL cleanly without downloading to disk."""
+    yt = _yt()
+    max_mins = int(_cfg.get("max_minutes", 60))
+    max_kbps = int(_cfg.get("max_kbps", 160))
+    vid, _ = _resolve_target_ref(chat_id, query_or_url, max_mins)
+    info = yt.extract(vid, max_kbps=max_kbps)
+    if info.is_live:
+        raise YTError(f"'{info.title}' is a live stream without direct finite audio segments.")
+    if max_mins > 0 and info.duration > max_mins * 60:
+        mins = info.duration // 60
+        raise YTError(
+            f"'{info.title}' is {mins}m long (limit is {max_mins}m). "
+            f"Raise via `!yt maxmins {mins + 10}` if needed."
+        )
+    stream = info.select("m4a/webm/bestaudio", max_kbps)
+    if stream is None:
+        have = ", ".join(f"{s.itag}({s.ext})" for s in info.streams) or "none"
+        raise YTError(f"No audio stream available (have: {have})")
+    return {
+        "video_id": vid,
+        "title": info.title or vid,
+        "author": info.author or "YouTube",
+        "duration": info.duration,
+        "client": stream.client,
+        "ext": stream.ext,
+        "kbps": stream.kbps,
+        "content_length": stream.content_length,
+        "size_mb": round((stream.content_length or 0) / _MIB, 2),
+        "url": stream.url,
+        "headers": dict(stream.headers),
+        "mode": "stream",
+    }
+
+
 def _prepare_yt_media_sync(chat_id: str, query_or_url: str, mode: str = "audio") -> dict:
-    """Resolve, download, and transcode YouTube audio or video for WA Core calls."""
+    """Resolve, download, and transcode YouTube audio (cache mode) or video for WA Core calls."""
     from core import call_media
 
     yt = _yt()
-    max_mins = int(_cfg.get("video_max_minutes", 10) if mode == "video" else _cfg.get("max_minutes", 20))
+    max_mins = int(_cfg.get("video_max_minutes", 10) if mode == "video" else _cfg.get("max_minutes", 60))
     vid, _ = _resolve_target_ref(chat_id, query_or_url, max_mins)
 
     selector = "best/18" if mode == "video" else "m4a/webm/bestaudio"
@@ -1018,6 +1057,75 @@ def _prepare_yt_media_sync(chat_id: str, query_or_url: str, mode: str = "audio")
         "path": local_path,
         "mode": mode,
     }
+
+
+def _supports_live_pcm(ctx) -> bool:
+    return bool(
+        _cfg.get("stream_mode", True)
+        and hasattr(ctx, "play_call_url")
+        and hasattr(ctx.calls, "play_url_stream")
+    )
+
+
+async def _play_yt_audio_entry(ctx, cid: str, chat_id: str, meta_or_query, *, track_for_loop: bool = True) -> dict:
+    """Play YouTube audio via live zero-download PCMStream (with automatic client failover & cache fallback)."""
+    meta = (
+        dict(meta_or_query)
+        if isinstance(meta_or_query, dict)
+        else await asyncio.to_thread(
+            _resolve_live_stream_sync if _supports_live_pcm(ctx) else _prepare_yt_media_sync,
+            chat_id,
+            str(meta_or_query),
+        )
+    )
+
+    if meta.get("mode") == "stream" and _supports_live_pcm(ctx):
+        vid = meta["video_id"]
+        max_mins = int(_cfg.get("max_minutes", 60))
+        max_secs = max_mins * 60 if max_mins > 0 else 0
+        last_err = ""
+        for attempt in range(3):
+            if cid not in ctx.calls._active:
+                return {"ok": False, "error": "Call ended"}
+            if attempt > 0:
+                meta = await asyncio.to_thread(_resolve_live_stream_sync, chat_id, vid)
+            label = f"{meta['title']} [{vid}]"
+            res = await ctx.play_call_url(
+                cid,
+                meta["url"],
+                headers=meta.get("headers"),
+                content_length=int(meta.get("content_length") or 0),
+                label=label,
+                max_seconds=max_secs,
+            )
+            if res.get("ok"):
+                if track_for_loop:
+                    _ACTIVE_LIVE_TRACK[cid] = {
+                        "video_id": vid,
+                        "chat_id": chat_id,
+                        "title": meta["title"],
+                        "duration": meta["duration"],
+                    }
+                return {"ok": True, "meta": meta, "live": True}
+            last_err = str(res.get("error") or "stream failed")
+            if res.get("refused"):
+                _yt().report_refused(vid, meta.get("client", ""))
+                continue
+            if "does not export CallPlayPCMStream" in last_err or "No live HTTP audio decoder" in last_err:
+                break
+            return {"ok": False, "error": last_err}
+
+        if "does not export" not in last_err and "No live HTTP audio decoder" not in last_err:
+            return {"ok": False, "error": last_err or "YouTube live stream refused by all clients"}
+
+    # Fallback: cached/local file playback (`!yt mode cache` or older `.so`/no decoder)
+    _ACTIVE_LIVE_TRACK.pop(cid, None)
+    if not meta.get("path"):
+        meta = await asyncio.to_thread(_prepare_yt_media_sync, chat_id, meta.get("video_id") or str(meta_or_query), "audio")
+    res = await ctx.play_call_audio(cid, meta["path"], loop=bool(track_for_loop and _cfg.get("loop", False)))
+    if res.get("ok"):
+        return {"ok": True, "meta": meta, "live": False}
+    return {"ok": False, "error": res.get("error")}
 
 
 def _parse_dial_args(cmd: str, rest: str, msg) -> Tuple[str, str]:
@@ -1055,6 +1163,7 @@ async def teardown(ctx):
     _BG_TASKS.clear()
     _PENDING_PLAY.clear()
     _YT_QUEUES.clear()
+    _ACTIVE_LIVE_TRACK.clear()
 
 
 async def _advance_queue(ctx, cid: str):
@@ -1073,16 +1182,32 @@ async def _advance_queue(ctx, cid: str):
                     f"⚠️ Skipped failed queued track `{nxt.get('query')}`: {nxt['error']}",
                 )
             continue
-        res = await ctx.play_call_audio(cid, nxt["path"], loop=False)
-        if res.get("ok"):
-            if nxt.get("notify_chat"):
+        chat_id = nxt.get("notify_chat") or ""
+        try:
+            play_res = await _play_yt_audio_entry(
+                ctx, cid, chat_id, nxt.get("meta") or nxt["query"], track_for_loop=False
+            )
+        except Exception as e:
+            play_res = {"ok": False, "error": str(e)}
+        if play_res.get("ok"):
+            meta = play_res["meta"]
+            tag = "📡 Live" if play_res.get("live") else "🎵 Cached"
+            if chat_id:
                 await ctx.send(
-                    nxt["notify_chat"],
-                    f"⏭️ *Now Playing from YT Queue:* {nxt['title']} (`{_fmt_dur(nxt['duration'])}`)",
+                    chat_id,
+                    f"⏭️ *Now Playing from YT Queue ({tag}):* {meta['title']} (`{_fmt_dur(meta['duration'])}`)",
                 )
             return
-        if nxt.get("notify_chat"):
-            await ctx.send(nxt["notify_chat"], f"⚠️ Next track playback error: {res.get('error')}")
+        if chat_id:
+            await ctx.send(chat_id, f"⚠️ Next track playback error: {play_res.get('error')}")
+
+    # Queue is empty: loop current live track if loop=ON
+    loop_spec = _ACTIVE_LIVE_TRACK.get(cid)
+    if loop_spec and _cfg.get("loop", False) and cid in ctx.calls._active:
+        try:
+            await _play_yt_audio_entry(ctx, cid, loop_spec["chat_id"], loop_spec["video_id"], track_for_loop=True)
+        except Exception as e:
+            log.debug("live loop replay failed: %s", e)
 
 
 async def on_call(ctx, call_ev):
@@ -1096,36 +1221,62 @@ async def on_call(ctx, call_ev):
 
         async def _start_ready():
             kind = spec.get("kind", "audio")
-            path = spec.get("path", "")
-            title = spec.get("title", "YouTube Track")
-            loop = bool(spec.get("loop", _cfg.get("loop", False)))
             notify = spec.get("notify_chat")
             if kind == "video":
-                res = await ctx.play_call_video(cid, path, fps=15, loop=loop, with_audio=True)
-            else:
-                res = await ctx.play_call_audio(cid, path, loop=loop)
+                res = await ctx.play_call_video(
+                    cid, spec.get("path", ""), fps=15, loop=bool(spec.get("loop", _cfg.get("loop", False))), with_audio=True
+                )
+                if notify:
+                    if res.get("ok"):
+                        await ctx.send(
+                            notify,
+                            f"📺 *YouTube Video Live!*\n"
+                            f"▶️ *Title:* {spec.get('title', 'YouTube Video')}\n"
+                            f"⏱️ *Length:* `{_fmt_dur(spec.get('duration', 0))}`\n"
+                            f"Controls: `!yt stop` | `!yt hangup`"
+                        )
+                    else:
+                        await ctx.send(notify, f"⚠️ Call connected, but YT video failed: {res.get('error')}")
+                return
+
+            meta = spec.get("meta")
+            if not meta:
+                return
+            try:
+                play_res = await _play_yt_audio_entry(
+                    ctx, cid, notify or "", meta, track_for_loop=True
+                )
+            except Exception as e:
+                play_res = {"ok": False, "error": str(e)}
             if notify:
-                if res.get("ok"):
+                if play_res.get("ok"):
+                    m = play_res["meta"]
+                    badge = "📡 Live PCMStream" if play_res.get("live") else "🎵 Cached WAV"
                     await ctx.send(
                         notify,
-                        f"📺 *YouTube {'Video' if kind == 'video' else 'Audio'} Live!*\n"
-                        f"▶️ *Title:* {title}\n"
-                        f"⏱️ *Length:* `{_fmt_dur(spec.get('duration', 0))}` • "
-                        f"🔁 *Loop:* `{'ON' if loop else 'OFF'}`\n"
-                        f"Controls: `!yt skip` | `!yt queue <song>` | `!yt stop` | `!yt hangup`"
+                        f"📺 *YouTube Audio Connected!* ({badge})\n"
+                        f"▶️ *Title:* {m['title']}\n"
+                        f"⏱️ *Length:* `{_fmt_dur(m['duration'])}` • "
+                        f"🔁 *Loop:* `{'ON' if _cfg.get('loop') else 'OFF'}`\n"
+                        f"Controls: `!yt skip` | `!yt queue <song>` | `!yt pause` | `!yt stop` | `!yt hangup`"
                     )
                 else:
-                    await ctx.send(notify, f"⚠️ Call connected, but YT playback failed: {res.get('error')}")
+                    await ctx.send(notify, f"⚠️ Call connected, but YT stream failed: {play_res.get('error')}")
 
         _spawn(_start_ready())
 
     elif ev == "audio_finish":
-        if _YT_QUEUES.get(cid):
+        loop_spec = _ACTIVE_LIVE_TRACK.get(cid)
+        is_own_live = bool(loop_spec and f"[{loop_spec['video_id']}]" in (getattr(call_ev, "path", "") or ""))
+        if _YT_QUEUES.get(cid) or (_cfg.get("loop", False) and is_own_live):
             _spawn(_advance_queue(ctx, cid))
+        elif loop_spec:
+            _ACTIVE_LIVE_TRACK.pop(cid, None)
 
     elif ev == "end":
         _PENDING_PLAY.pop(cid, None)
         _YT_QUEUES.pop(cid, None)
+        _ACTIVE_LIVE_TRACK.pop(cid, None)
 
 
 async def on_message(ctx, msg):
@@ -1150,7 +1301,7 @@ async def on_message(ctx, msg):
     known_cmds = {
         "", "help", "search", "s", "info", "play", "dial", "playcall", "vcall",
         "queue", "q", "skip", "pause", "resume", "stop", "hangup", "save",
-        "status", "clearcache", "loop", "quality", "maxmins", "public",
+        "status", "clearcache", "mode", "loop", "quality", "maxmins", "public",
     }
     if cmd not in known_cmds:
         rest = raw_arg
@@ -1163,21 +1314,21 @@ async def on_message(ctx, msg):
     if cmd in ("", "help"):
         return await ctx.reply(
             msg,
-            "📺 *YouTube Call Audio/Video Guide*\n\n"
-            "*Play on Calls (Audio):*\n"
-            "• `!yt <url or song name>` — Play now if in call, or search\n"
-            "• `!yt play <url|song|#N>` — Switch audio in active call\n"
-            "• `!yt playcall <url|song|#N>` — Call this chat & play YT audio\n"
-            "• `!yt dial <num|me> <url|song>` — Call someone & play YT audio\n"
+            "📺 *YouTube Call PCMStream Guide*\n\n"
+            "*Play on Calls (Zero-Download Live Audio):*\n"
+            "• `!yt <url or song name>` — Stream live if in call, or search\n"
+            "• `!yt play <url|song|#N>` — Stream/switch audio live in active call\n"
+            "• `!yt playcall <url|song|#N>` — Call this chat & stream on pickup\n"
+            "• `!yt dial <num|me> <url|song>` — Call number & stream on pickup\n"
             "• `!yt vcall <num|me> <url|vid>` — Video call with YT MP4\n\n"
             "*Search, Queue & Library:*\n"
             "• `!yt search <query>` — Top 5 results (`#1`..`#5`)\n"
-            "• `!yt queue <url|song|#N>` — Pre-fetch & queue track\n"
+            "• `!yt queue <url|song|#N>` — Queue track in live call DJ\n"
             "• `!yt q` | `skip` | `pause` | `resume` | `stop` | `hangup`\n"
-            "• `!yt save <url|song|#N>` — Save permanently to `!call tracks`\n\n"
+            "• `!yt save <url|song|#N>` — Save offline WAV to `!call tracks`\n\n"
             "*Settings (Owner):*\n"
-            "• `!yt loop <on|off>` | `quality <hq|fast>` | `maxmins <N>`\n"
-            "• `!yt public <on|off>` | `status` | `clearcache`"
+            "• `!yt mode <stream|cache>` | `quality <hq|fast>` | `loop <on|off>`\n"
+            "• `!yt maxmins <N>` | `public <on|off>` | `status` | `clearcache`"
         )
 
     if cmd == "status":
@@ -1191,14 +1342,16 @@ async def on_message(ctx, msg):
         except Exception:
             ytdlp_ok = "Not installed (InnerTube active)"
         q_label = "fast (<=80k)" if int(_cfg.get("max_kbps", 160)) <= 80 else "hq (<=160k)"
+        m_label = "Live PCMStream ⚡" if _supports_live_pcm(ctx) else "Local Cache (WAV)"
         return await ctx.reply(
             msg,
             "📺 *YouTube Call Plugin Status*\n"
             f"• ⚙️ *VoIP Engine:* {'Ready ✅' if ctx.calls.is_supported() else 'Missing .so ❌'}\n"
-            f"• 📡 *Active Calls:* `{len(active)}` | *Jobs:* `{len(_BG_TASKS)}`\n"
+            f"• 📡 *Playback Mode:* `{m_label}`\n"
+            f"• 📞 *Active Calls:* `{len(active)}` | *Jobs:* `{len(_BG_TASKS)}`\n"
             f"• 🎛️ *Quality:* `{q_label}` | 🔁 *Loop:* `{'ON' if _cfg.get('loop') else 'OFF'}`\n"
             f"• ⏱️ *Max Audio:* `{_cfg.get('max_minutes')}m` | *Max Video:* `{_cfg.get('video_max_minutes')}m`\n"
-            f"• 💾 *YT Cache:* `{len(cfiles)} files ({cbytes / _MIB:.1f} / {_cfg.get('max_cache_mb')} MB)`\n"
+            f"• 💾 *Saved Cache:* `{len(cfiles)} files ({cbytes / _MIB:.1f} / {_cfg.get('max_cache_mb')} MB)`\n"
             f"• 🧩 *yt-dlp Fallback:* {ytdlp_ok}"
         )
 
@@ -1300,14 +1453,22 @@ async def on_message(ctx, msg):
         except YTError as e:
             return await ctx.reply(msg, f"⚠️ {e}")
 
+        use_live = (mode == "audio") and _supports_live_pcm(ctx)
         await ctx.reply(
             msg,
-            f"⏳ Fetching & preparing YouTube {'video' if mode == 'video' else 'audio'} (`{song_q}`)..."
+            f"⏳ Resolving YouTube stream (`{song_q}`)..."
+            if use_live
+            else f"⏳ Fetching & preparing YouTube {'video' if mode == 'video' else 'audio'} (`{song_q}`)..."
         )
 
         async def _job_dial():
             try:
-                meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, song_q, mode)
+                if use_live:
+                    meta = await asyncio.to_thread(_resolve_live_stream_sync, msg.chat_id, song_q)
+                    sz_note = f"live ~{meta['size_mb']} MB" if meta["size_mb"] else "live PCM"
+                else:
+                    meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, song_q, mode)
+                    sz_note = f"{meta['size_mb']} MB cached"
             except Exception as e:
                 log.exception("yt %s prepare failed", cmd)
                 return await ctx.reply(msg, f"❌ YouTube prepare failed: {e}")
@@ -1315,7 +1476,7 @@ async def on_message(ctx, msg):
             await ctx.reply(
                 msg,
                 f"📲 Calling `{_num(target)}` {'(Video Call)' if mode == 'video' else '(Voice Call)'}...\n"
-                f"🎵 *Queued on pickup:* {meta['title']} (`{_fmt_dur(meta['duration'])}`, {meta['size_mb']} MB)"
+                f"🎵 *On pickup:* {meta['title']} (`{_fmt_dur(meta['duration'])}`, {sz_note})"
             )
             res = await ctx.call(target, video=(mode == "video"))
             if not res.get("ok"):
@@ -1324,7 +1485,8 @@ async def on_message(ctx, msg):
             cid = res.get("call_id", "")
             _PENDING_PLAY[cid] = {
                 "kind": mode,
-                "path": meta["path"],
+                "path": meta.get("path", ""),
+                "meta": meta,
                 "title": meta["title"],
                 "duration": meta["duration"],
                 "loop": bool(_cfg.get("loop", False)),
@@ -1348,8 +1510,8 @@ async def on_message(ctx, msg):
                             msg,
                             f"🎵 *{info.title}* (`{_fmt_dur(info.duration)}`)\n"
                             f"No active call right now.\n"
-                            f"• `!yt playcall {vid}` — Call this chat & play\n"
-                            f"• `!yt dial me {vid}` — Call yourself & play"
+                            f"• `!yt playcall {vid}` — Call this chat & stream live\n"
+                            f"• `!yt dial me {vid}` — Call yourself & stream live"
                         )
                     hits = await asyncio.to_thread(_yt().search, rest, 5)
                     if not hits:
@@ -1373,23 +1535,22 @@ async def on_message(ctx, msg):
             return await ctx.reply(msg, "⚠️ Usage: `!yt play <url|id|song|#N>`")
         if not active_cid:
             return await ctx.reply(msg, "📭 No active call. Use `!yt playcall <song>` or `!yt dial <num|me> <song>`!")
-        await ctx.reply(msg, f"⏳ Preparing `{rest}` for call...")
+        await ctx.reply(msg, f"⏳ Starting YouTube stream `{rest}`...")
 
         async def _job_play(cid: str):
             try:
-                meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, rest, "audio")
+                play_res = await _play_yt_audio_entry(ctx, cid, msg.chat_id, rest, track_for_loop=True)
             except Exception as e:
                 log.exception("yt play failed")
                 return await ctx.reply(msg, f"❌ Failed: {e}")
-            if cid not in ctx.calls._active:
-                return await ctx.reply(msg, "📴 Call ended while preparing audio.")
-            res = await ctx.play_call_audio(cid, meta["path"], loop=bool(_cfg.get("loop", False)))
-            if res.get("ok"):
+            if play_res.get("ok"):
+                m = play_res["meta"]
+                badge = "📡 Live PCMStream" if play_res.get("live") else "🎵 Cached WAV"
                 return await ctx.reply(
                     msg,
-                    f"🎵 *Now Playing:* {meta['title']} (`{_fmt_dur(meta['duration'])}`, {meta['size_mb']} MB)"
+                    f"▶️ *Now Playing ({badge}):* {m['title']} (`{_fmt_dur(m['duration'])}`)"
                 )
-            await ctx.reply(msg, f"❌ Playback failed: {res.get('error')}")
+            await ctx.reply(msg, f"❌ Playback failed: {play_res.get('error')}")
 
         _spawn(_job_play(active_cid))
         return
@@ -1402,20 +1563,19 @@ async def on_message(ctx, msg):
 
         cur_state = ctx.calls._active.get(active_cid, {}).get("audio_state", "idle")
         if cur_state == "idle" and not _YT_QUEUES.get(active_cid):
-            await ctx.reply(msg, f"⏳ Preparing `{rest}` to play now...")
+            await ctx.reply(msg, f"⏳ Starting YouTube stream `{rest}`...")
 
             async def _job_q_now(cid: str):
                 try:
-                    meta = await asyncio.to_thread(_prepare_yt_media_sync, msg.chat_id, rest, "audio")
+                    play_res = await _play_yt_audio_entry(ctx, cid, msg.chat_id, rest, track_for_loop=False)
                 except Exception as e:
                     log.exception("yt queue play failed")
-                    return await ctx.reply(msg, f"❌ Queue prepare failed: {e}")
-                if cid not in ctx.calls._active:
-                    return await ctx.reply(msg, "📴 Call ended while preparing audio.")
-                res = await ctx.play_call_audio(cid, meta["path"], loop=False)
-                if res.get("ok"):
-                    return await ctx.reply(msg, f"🎵 *Started Playing:* {meta['title']} (`{_fmt_dur(meta['duration'])}`)")
-                await ctx.reply(msg, f"❌ Error: {res.get('error')}")
+                    return await ctx.reply(msg, f"❌ Queue play failed: {e}")
+                if play_res.get("ok"):
+                    m = play_res["meta"]
+                    badge = "📡 Live PCMStream" if play_res.get("live") else "🎵 Cached WAV"
+                    return await ctx.reply(msg, f"▶️ *Started ({badge}):* {m['title']} (`{_fmt_dur(m['duration'])}`)")
+                await ctx.reply(msg, f"❌ Error: {play_res.get('error')}")
 
             _spawn(_job_q_now(active_cid))
             return
@@ -1425,7 +1585,7 @@ async def on_message(ctx, msg):
             "query": rest,
             "title": rest,
             "duration": 0,
-            "path": "",
+            "meta": None,
             "error": "",
             "notify_chat": msg.chat_id,
             "ready_event": asyncio.Event(),
@@ -1435,17 +1595,18 @@ async def on_message(ctx, msg):
 
         async def _bg_prepare(entry: dict, chat_id: str, q_str: str):
             try:
-                meta = await asyncio.to_thread(_prepare_yt_media_sync, chat_id, q_str, "audio")
+                fn = _resolve_live_stream_sync if _supports_live_pcm(ctx) else _prepare_yt_media_sync
+                meta = await asyncio.to_thread(fn, chat_id, q_str)
                 entry["title"] = meta["title"]
                 entry["duration"] = meta["duration"]
-                entry["path"] = meta["path"]
+                entry["meta"] = meta
             except Exception as exc:
                 entry["error"] = str(exc)
             finally:
                 entry["ready_event"].set()
 
         _spawn(_bg_prepare(item, msg.chat_id, rest))
-        return await ctx.reply(msg, f"📋 Added `{rest}` to YT Queue (`#{pos}` — downloading in background).")
+        return await ctx.reply(msg, f"📋 Added `{rest}` to YT Queue (`#{pos}` — resolving in background).")
 
     if cmd == "q":
         if not active_cid:
@@ -1455,7 +1616,7 @@ async def on_message(ctx, msg):
             return await ctx.reply(msg, "📭 YT Queue is empty. Add tracks via `!yt queue <song>`.")
         lines = ["📋 *Active YT DJ Queue:*"]
         for i, it in enumerate(q_list, 1):
-            st = "✅ ready" if it["path"] else ("❌ " + it["error"] if it["error"] else "⏳ downloading...")
+            st = "✅ ready" if it.get("meta") else ("❌ " + it["error"] if it["error"] else "⏳ resolving...")
             lines.append(f"`#{i}` {it['title']} _({st})_")
         return await ctx.reply(msg, "\n".join(lines))
 
@@ -1464,22 +1625,30 @@ async def on_message(ctx, msg):
             return await ctx.reply(msg, "📭 No active call.")
         q_list = _YT_QUEUES.get(active_cid, [])
         if not q_list:
+            _ACTIVE_LIVE_TRACK.pop(active_cid, None)
             await ctx.stop_call_audio(active_cid)
             return await ctx.reply(msg, "⏹️ YT queue empty — stopped playback.")
         nxt = q_list.pop(0)
 
         async def _job_skip(cid: str, entry: dict):
             if not entry["ready_event"].is_set():
-                await ctx.reply(msg, f"⏳ Finishing download for `{entry['query']}`...")
+                await ctx.reply(msg, f"⏳ Finishing lookup for `{entry['query']}`...")
                 await entry["ready_event"].wait()
             if cid not in ctx.calls._active:
                 return
             if entry.get("error"):
                 return await ctx.reply(msg, f"❌ Next track failed: {entry['error']}")
-            res = await ctx.play_call_audio(cid, entry["path"], loop=False)
-            if res.get("ok"):
-                return await ctx.reply(msg, f"⏭️ *Skipped to:* {entry['title']} (`{_fmt_dur(entry['duration'])}`)")
-            await ctx.reply(msg, f"❌ Skip failed: {res.get('error')}")
+            try:
+                play_res = await _play_yt_audio_entry(
+                    ctx, cid, msg.chat_id, entry.get("meta") or entry["query"], track_for_loop=False
+                )
+            except Exception as e:
+                play_res = {"ok": False, "error": str(e)}
+            if play_res.get("ok"):
+                m = play_res["meta"]
+                badge = "📡 Live" if play_res.get("live") else "🎵 Cached"
+                return await ctx.reply(msg, f"⏭️ *Skipped to ({badge}):* {m['title']} (`{_fmt_dur(m['duration'])}`)")
+            await ctx.reply(msg, f"❌ Skip failed: {play_res.get('error')}")
 
         _spawn(_job_skip(active_cid, nxt))
         return
@@ -1500,6 +1669,7 @@ async def on_message(ctx, msg):
         if not active_cid:
             return await ctx.reply(msg, "📭 No active call.")
         _YT_QUEUES.pop(active_cid, None)
+        _ACTIVE_LIVE_TRACK.pop(active_cid, None)
         await ctx.stop_call_video(active_cid)
         res = await ctx.stop_call_audio(active_cid)
         return await ctx.reply(msg, "⏹️ Playback stopped." if res.get("ok") else f"❌ {res.get('error')}")
@@ -1507,6 +1677,7 @@ async def on_message(ctx, msg):
     if cmd == "hangup":
         if not active_cid:
             return await ctx.reply(msg, "📭 No active call.")
+        _ACTIVE_LIVE_TRACK.pop(active_cid, None)
         res = await ctx.hangup_call(active_cid)
         return await ctx.reply(msg, "📴 Call ended." if res.get("ok") else f"❌ {res.get('error')}")
 
@@ -1516,6 +1687,18 @@ async def on_message(ctx, msg):
     sender_num = _num(msg.sender_id)
     if sender_num and sender_num not in _cfg.setdefault("owners", []):
         _cfg["owners"].append(sender_num)
+
+    if cmd == "mode":
+        m = rest.lower()
+        if m in ("stream", "live", "pcm"):
+            _cfg["stream_mode"] = True
+            _save()
+            return await ctx.reply(msg, "📡 Playback mode set to *Live PCMStream* (zero full-file download).")
+        if m in ("cache", "download", "wav"):
+            _cfg["stream_mode"] = False
+            _save()
+            return await ctx.reply(msg, "💾 Playback mode set to *Cache WAV* (downloads full file first).")
+        return await ctx.reply(msg, "⚠️ Usage: `!yt mode <stream|cache>`")
 
     if cmd == "loop":
         val = rest.lower() in ("on", "1", "true", "yes")

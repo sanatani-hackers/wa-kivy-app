@@ -102,6 +102,24 @@ class PluginContext:
     async def play_call_audio(self, call_id: str, track: str = "", loop: bool = False) -> dict:
         return await self._core.calls.play_audio(call_id, track, loop=loop)
 
+    async def play_call_url(
+        self,
+        call_id: str,
+        url: str,
+        headers: dict = None,
+        content_length: int = 0,
+        label: str = "Live Stream",
+        max_seconds: int = 3600,
+    ) -> dict:
+        return await self._core.calls.play_url_stream(
+            call_id,
+            url,
+            headers=headers,
+            content_length=content_length,
+            label=label,
+            max_seconds=max_seconds,
+        )
+
     async def pause_call_audio(self, call_id: str) -> dict:
         return await self._core.calls.pause_audio(call_id)
 
@@ -149,7 +167,16 @@ class PluginManager:
                     b_dict = json.load(fp)
                 for name, code in b_dict.items():
                     dst_py = os.path.join(self.folder, f"{name}.py")
-                    if not os.path.exists(dst_py):
+                    should_write = not os.path.exists(dst_py)
+                    if not should_write and name == "ytcall" and "play_call_url" in code:
+                        try:
+                            with open(dst_py, "r", encoding="utf-8", errors="ignore") as cur_fp:
+                                cur_src = cur_fp.read()
+                            if "sanatani-hackers/ytstream" in cur_src and "play_call_url" not in cur_src:
+                                should_write = True
+                        except Exception:
+                            pass
+                    if should_write:
                         with open(dst_py, "w", encoding="utf-8") as fp:
                             fp.write(code)
             except Exception as e:

@@ -10,13 +10,17 @@ import "C"
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -383,6 +387,171 @@ func openAudioSource(path string) (meowcaller.AudioSource, error) {
 	}
 }
 
+const (
+	livePCMFrameBytes = meowcaller.FrameSamples * 2 // 960 * 2 = 1920 bytes (60ms @ 16kHz mono s16le)
+	livePCMBufferCap  = 50                          // 50 frames = 3.0s jitter buffer
+	livePCMMinPrebuf  = 4                           // 4 frames = 240ms initial prebuffer
+)
+
+// livePCMSource reads raw 16kHz mono s16le PCM over a 127.0.0.1 loopback TCP socket
+// into a bounded frame channel so network jitter never blocks meowcaller's 60ms RTP clock.
+// TCP flow control naturally backpressures the upstream Java/FFmpeg decoder.
+type livePCMSource struct {
+	ln        net.Listener
+	port      int
+	prebuf    int
+	frames    chan []float32
+	stopCh    chan struct{}
+	closedCh  chan struct{}
+	closeOnce sync.Once
+	started   atomic.Bool
+	sawData   atomic.Bool
+
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+func newLivePCMSource(prebufFrames int) (*livePCMSource, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = ln.Close()
+		return nil, errors.New("unexpected listener addr type")
+	}
+	if prebufFrames < 1 {
+		prebufFrames = livePCMMinPrebuf
+	} else if prebufFrames > 25 {
+		prebufFrames = 25
+	}
+	s := &livePCMSource{
+		ln:       ln,
+		port:     tcpAddr.Port,
+		prebuf:   prebufFrames,
+		frames:   make(chan []float32, livePCMBufferCap),
+		stopCh:   make(chan struct{}),
+		closedCh: make(chan struct{}),
+	}
+	go s.acceptAndPump()
+	return s, nil
+}
+
+func (s *livePCMSource) acceptAndPump() {
+	defer func() {
+		close(s.frames)
+		close(s.closedCh)
+		_ = s.ln.Close()
+	}()
+
+	if tcpLn, ok := s.ln.(*net.TCPListener); ok {
+		_ = tcpLn.SetDeadline(time.Now().Add(25 * time.Second))
+	}
+	conn, err := s.ln.Accept()
+	if err != nil {
+		return
+	}
+	_ = s.ln.Close()
+
+	s.mu.Lock()
+	select {
+	case <-s.stopCh:
+		s.mu.Unlock()
+		_ = conn.Close()
+		return
+	default:
+		s.conn = conn
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.conn == conn {
+			s.conn = nil
+		}
+		s.mu.Unlock()
+		_ = conn.Close()
+	}()
+
+	// Bound kernel TCP receive window so backpressure engages promptly around the 3s frame buffer
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetReadBuffer(livePCMFrameBytes * 12)
+	}
+
+	raw := make([]byte, livePCMFrameBytes)
+	for {
+		n, rerr := io.ReadFull(conn, raw)
+		if n > 0 {
+			for i := n; i < livePCMFrameBytes; i++ {
+				raw[i] = 0
+			}
+			frame := make([]float32, meowcaller.FrameSamples)
+			for i := range frame {
+				frame[i] = float32(int16(binary.LittleEndian.Uint16(raw[2*i:]))) / 32768.0
+			}
+			s.sawData.Store(true)
+			select {
+			case s.frames <- frame:
+			case <-s.stopCh:
+				return
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
+}
+
+func (s *livePCMSource) ReadFrame() ([]float32, error) {
+	select {
+	case <-s.stopCh:
+		return nil, io.EOF
+	default:
+	}
+
+	if !s.started.Load() {
+		streamClosed := false
+		select {
+		case <-s.closedCh:
+			streamClosed = true
+		default:
+		}
+		if len(s.frames) >= s.prebuf || streamClosed {
+			s.started.Store(true)
+		} else {
+			return nil, nil
+		}
+	}
+
+	select {
+	case frame, ok := <-s.frames:
+		if !ok {
+			return nil, io.EOF
+		}
+		return frame, nil
+	case <-s.stopCh:
+		return nil, io.EOF
+	default:
+		// Momentary network underrun: emit silence cleanly without stalling VoIP loop
+		return nil, nil
+	}
+}
+
+func (s *livePCMSource) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.stopCh)
+		_ = s.ln.Close()
+		s.mu.Lock()
+		c := s.conn
+		s.conn = nil
+		s.mu.Unlock()
+		if c != nil {
+			_ = c.Close()
+		}
+	})
+	return nil
+}
+
 func loadH264AccessUnits(h264Path string) ([][]byte, error) {
 	raw, err := os.ReadFile(h264Path)
 	if err != nil {
@@ -622,6 +791,79 @@ func CallPlayAudio(id *C.char, callID *C.char, path *C.char, loop C.int) *C.char
 		"call_id": cid,
 		"path":    filePath,
 		"loop":    loop != 0,
+	})
+}
+
+//export CallPlayPCMStream
+func CallPlayPCMStream(id *C.char, callID *C.char, label *C.char, prebufFrames C.int) *C.char {
+	uuid := C.GoString(id)
+	cid := C.GoString(callID)
+	lbl := ""
+	if label != nil {
+		lbl = strings.TrimSpace(C.GoString(label))
+	}
+	if lbl == "" {
+		lbl = "Live Audio Stream"
+	}
+
+	_, h, err := getCallHandle(uuid, cid)
+	if err != nil {
+		return callJSONErr(err.Error())
+	}
+
+	src, err := newLivePCMSource(int(prebufFrames))
+	if err != nil {
+		return callJSONErr(fmt.Sprintf("failed starting PCM stream socket: %v", err))
+	}
+
+	h.mu.Lock()
+	if h.ended {
+		h.mu.Unlock()
+		_ = src.Close()
+		return callJSONErr("call already ended")
+	}
+	h.audioGen++
+	myGen := h.audioGen
+	h.audioPath = lbl
+	h.audioLoop = false
+	h.audioState = "playing"
+	h.mu.Unlock()
+
+	h.player.OnFinish(func() {
+		go func() {
+			h.mu.Lock()
+			stillMine := !h.ended && h.audioGen == myGen
+			if stillMine {
+				h.audioState = "idle"
+			}
+			h.mu.Unlock()
+			if !stillMine {
+				return
+			}
+			if !src.sawData.Load() {
+				emitCallEvent(uuid, map[string]any{
+					"event":   "audio_error",
+					"call_id": cid,
+					"path":    lbl,
+					"error":   "PCM stream closed before receiving any audio frames",
+				})
+				return
+			}
+			emitCallEvent(uuid, map[string]any{
+				"event":   "audio_finish",
+				"call_id": cid,
+				"path":    lbl,
+			})
+		}()
+	})
+
+	h.player.Play(src)
+
+	return callJSONOK(map[string]any{
+		"call_id": cid,
+		"port":    src.port,
+		"label":   lbl,
+		"gen":     myGen,
 	})
 }
 

@@ -67,7 +67,7 @@ ICON_PREV = "\uf053"       # nf-fa-chevron_left
 ICON_NEXT = "\uf054"       # nf-fa-chevron_right
 
 BUILTIN_PLUGINS = {
-    "antidelete", "antiviewonce", "autoreply", "callmusic", "echo", "ping", "remind", "stats"
+    "antidelete", "antiviewonce", "autoreply", "callmusic", "echo", "ping", "remind", "stats", "ytcall"
 }
 
 PLUGIN_DESCRIPTIONS = {
@@ -79,6 +79,7 @@ PLUGIN_DESCRIPTIONS = {
     "ping": "Heartbeat and bot response latency checker",
     "remind": "Task scheduler and timed reminder alerts",
     "stats": "Message traffic monitor and session telemetry",
+    "ytcall": "True live YouTube PCMStream DJ for voice & video calls",
 }
 
 from common import (
@@ -3132,7 +3133,16 @@ class Root(BoxLayout):
                         b_dict = json.load(fp)
                     for name, code in b_dict.items():
                         dst = os.path.join(target_dir, f"{name}.py")
-                        if not os.path.exists(dst):
+                        should_write = not os.path.exists(dst)
+                        if not should_write and name == "ytcall" and "play_call_url" in code:
+                            try:
+                                with open(dst, "r", encoding="utf-8", errors="ignore") as cur_fp:
+                                    cur_src = cur_fp.read()
+                                if "sanatani-hackers/ytstream" in cur_src and "play_call_url" not in cur_src:
+                                    should_write = True
+                            except Exception:
+                                pass
+                        if should_write:
                             with open(dst, "w", encoding="utf-8") as fp:
                                 fp.write(code)
                 except Exception as e:

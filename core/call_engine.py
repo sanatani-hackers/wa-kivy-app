@@ -4,7 +4,10 @@ import ctypes
 import json
 import logging
 import os
+import shutil
+import socket
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -403,6 +406,205 @@ class CallEngine:
             self._upsert_call_db(call_id, track_played=fname)
             self.core.emit("/log", f"🎵 Playing in call {call_id[:8]}: {fname} (loop={'ON' if loop else 'OFF'})")
         return res
+
+    async def play_pcm_stream(self, call_id: str, label: str = "Live Audio Stream", prebuf_frames: int = 4) -> dict:
+        """Open a live 16kHz mono s16le PCM loopback socket wired into meowcaller.Player."""
+        res = await self._call_ffi("CallPlayPCMStream", call_id, label, int(prebuf_frames))
+        if res.get("ok"):
+            if call_id in self._active:
+                self._active[call_id]["audio_state"] = "playing"
+                self._active[call_id]["audio_path"] = label
+                self._active[call_id]["stream_gen"] = res.get("gen", 0)
+            self._upsert_call_db(call_id, track_played=label)
+            self.core.emit("/log", f"📡 Live PCMStream active in call {call_id[:8]}: {label} (port={res.get('port')})")
+        return res
+
+    @staticmethod
+    def _get_java_stream_state(port: int) -> str:
+        try:
+            from jnius import autoclass
+            Transcoder = autoclass("org.sanatani.waapp.WaMediaTranscoder")
+            return str(Transcoder.getStreamState(int(port)) or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _stream_url_worker_sync(
+        url: str,
+        headers: Optional[dict],
+        content_length: int,
+        port: int,
+        max_seconds: int,
+        started_ev=None,
+    ) -> str:
+        """Blocking worker: decode remote audio URL to live 16kHz s16le PCM over 127.0.0.1:port."""
+        headers_json = json.dumps(headers or {})
+        try:
+            from jnius import autoclass
+            Transcoder = autoclass("org.sanatani.waapp.WaMediaTranscoder")
+            return str(
+                Transcoder.streamUrlToPcmSocket(
+                    str(url),
+                    headers_json,
+                    int(content_length or 0),
+                    "127.0.0.1",
+                    int(port),
+                    int(max_seconds or 0),
+                )
+                or ""
+            )
+        except Exception as android_exc:
+            ff = shutil.which("ffmpeg")
+            if not ff:
+                return f"No live HTTP audio decoder available ({android_exc})"
+
+        # Desktop/Termux fallback: FFmpeg decodes URL chunks live -> s16le PCM pipe -> TCP socket
+        hdr_lines = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items() if v)
+        cmd = [ff, "-hide_banner", "-loglevel", "error"]
+        if hdr_lines:
+            cmd.extend(["-headers", hdr_lines])
+        if max_seconds and max_seconds > 0:
+            cmd.extend(["-t", str(int(max_seconds))])
+        cmd.extend([
+            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
+            "-i", url, "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1",
+        ])
+
+        proc = None
+        sock = None
+        total_sent = 0
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            first_chunk = proc.stdout.read(3840) if proc.stdout else b""
+            if not first_chunk:
+                err_txt = (proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else "").strip()
+                if "403" in err_txt or "410" in err_txt:
+                    return f"HTTP_REFUSED:{403 if '403' in err_txt else 410}"
+                return err_txt or "ffmpeg produced zero PCM bytes"
+
+            sock = socket.create_connection(("127.0.0.1", int(port)), timeout=5.0)
+            sock.settimeout(None)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.sendall(first_chunk)
+            total_sent += len(first_chunk)
+            if started_ev is not None:
+                started_ev.set()
+
+            while True:
+                buf = proc.stdout.read(8192)
+                if not buf:
+                    break
+                sock.sendall(buf)
+                total_sent += len(buf)
+            return ""
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # Go closed socket (stop/skip/hangup) cleanly
+            return "" if total_sent > 0 else "PCM socket closed"
+        except Exception as e:
+            return f"ffmpeg stream failed: {e}"
+        finally:
+            try:
+                if sock is not None:
+                    sock.close()
+            except Exception:
+                pass
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+    @staticmethod
+    def _clear_java_stream_state(port: int) -> None:
+        try:
+            from jnius import autoclass
+            Transcoder = autoclass("org.sanatani.waapp.WaMediaTranscoder")
+            Transcoder.clearStreamState(int(port))
+        except Exception:
+            pass
+
+    async def play_url_stream(
+        self,
+        call_id: str,
+        url: str,
+        headers: Optional[dict] = None,
+        content_length: int = 0,
+        label: str = "Live Stream",
+        max_seconds: int = 3600,
+        prebuf_frames: int = 4,
+    ) -> dict:
+        """Start true real-time zero-download audio streaming into a call from a direct media URL."""
+        res = await self.play_pcm_stream(call_id, label=label, prebuf_frames=prebuf_frames)
+        if not res.get("ok"):
+            return res
+
+        port = int(res.get("port") or 0)
+        gen = res.get("gen", 0)
+        if port <= 0:
+            return {"ok": False, "error": "Invalid PCM stream port from Go bridge"}
+
+        import threading as _threading
+        self._clear_java_stream_state(port)
+        started_ev = _threading.Event()
+        feeder_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._stream_url_worker_sync,
+                url,
+                headers,
+                int(content_length or 0),
+                port,
+                int(max_seconds or 0),
+                started_ev,
+            )
+        )
+
+        async def _watch_late_failure():
+            try:
+                err = await feeder_task
+                if err:
+                    cur = self._active.get(call_id)
+                    if cur and cur.get("stream_gen") == gen:
+                        log.warning("Live stream ended with error (%s): %s", label, err)
+                        self.core.emit("/log", f"⚠️ Stream error ({label}): {err}")
+                        await self._call_ffi("CallStopAudio", call_id)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.debug("stream watcher error: %s", e)
+
+        # Wait up to 12s ONLY until the very first PCM frame flows (typically < 1s) or early error occurs
+        deadline = time.monotonic() + 12.0
+        while not feeder_task.done() and time.monotonic() < deadline:
+            if started_ev.is_set():
+                break
+            jst = self._get_java_stream_state(port)
+            if jst in ("streaming", "done"):
+                break
+            await asyncio.sleep(0.05)
+
+        if feeder_task.done():
+            err = ""
+            try:
+                err = feeder_task.result() or ""
+            except Exception as exc:
+                err = str(exc)
+            if err:
+                cur = self._active.get(call_id)
+                if cur and cur.get("stream_gen") == gen:
+                    await self._call_ffi("CallStopAudio", call_id)
+                return {
+                    "ok": False,
+                    "error": err,
+                    "refused": err.startswith("HTTP_REFUSED:"),
+                }
+        else:
+            asyncio.create_task(_watch_late_failure())
+
+        return {"ok": True, "call_id": call_id, "port": port, "label": label, "gen": gen}
 
     async def pause_audio(self, call_id: str) -> dict:
         res = await self._call_ffi("CallPauseAudio", call_id)
