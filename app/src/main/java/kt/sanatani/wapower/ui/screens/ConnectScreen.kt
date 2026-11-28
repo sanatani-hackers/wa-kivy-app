@@ -9,8 +9,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -45,11 +48,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults.SecondaryIndicator
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -63,6 +69,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -73,8 +80,11 @@ import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kt.sanatani.wapower.core.ConnectionPhase
+import kt.sanatani.wapower.core.GhostConfig
+import kt.sanatani.wapower.core.SyncState
 import kt.sanatani.wapower.core.WaUiState
 import kt.sanatani.wapower.ui.theme.WaColors
+import kt.sanatani.wapower.ui.theme.WaShapes
 
 @Composable
 fun ConnectScreen(
@@ -83,6 +93,8 @@ fun ConnectScreen(
     onStopConnect: () -> Unit,
     onRequestPairCode: (String) -> Unit,
     onLogoutReset: () -> Unit,
+    onUpdateGhost: ((GhostConfig) -> GhostConfig) -> Unit,
+    onResyncContacts: () -> Unit,
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var phoneInput by rememberSaveable { mutableStateOf("") }
@@ -109,224 +121,24 @@ fun ConnectScreen(
             )
 
             if (state.phase != ConnectionPhase.CONNECTED && state.phase != ConnectionPhase.READY) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = WaColors.Surface),
-                    border = BorderStroke(1.dp, WaColors.Stroke),
-                    shape = RoundedCornerShape(16.dp),
-                ) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        TabRow(
-                            selectedTabIndex = selectedTab,
-                            containerColor = WaColors.Surface,
-                            contentColor = WaColors.Emerald,
-                            indicator = { tabPositions ->
-                                SecondaryIndicator(
-                                    modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
-                                    color = WaColors.Emerald,
-                                )
-                            },
-                            divider = { HorizontalDivider(color = WaColors.Stroke) },
-                        ) {
-                            Tab(
-                                selected = selectedTab == 0,
-                                onClick = { selectedTab = 0 },
-                                text = { Text("Phone Code") },
-                                icon = { Icon(Icons.Rounded.PhoneAndroid, contentDescription = null) },
-                            )
-                            Tab(
-                                selected = selectedTab == 1,
-                                onClick = { selectedTab = 1 },
-                                text = { Text("QR Link") },
-                                icon = { Icon(Icons.Rounded.QrCode2, contentDescription = null) },
-                            )
-                        }
-
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            if (selectedTab == 0) {
-                                Text(
-                                    text = "Link with 8-Digit Pairing Code",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = WaColors.TextPrimary,
-                                )
-                                Text(
-                                    text = "Include country code without '+' (for example 919876543210).",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = WaColors.TextSecondary,
-                                )
-                                OutlinedTextField(
-                                    value = phoneInput,
-                                    onValueChange = { phoneInput = it },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true,
-                                    label = { Text("WhatsApp Number") },
-                                    placeholder = { Text("919876543210") },
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = WaColors.Emerald,
-                                        unfocusedBorderColor = WaColors.Stroke,
-                                        focusedLabelColor = WaColors.Emerald,
-                                        unfocusedLabelColor = WaColors.TextSecondary,
-                                        focusedTextColor = WaColors.TextPrimary,
-                                        unfocusedTextColor = WaColors.TextPrimary,
-                                    ),
-                                )
-
-                                Button(
-                                    onClick = { onRequestPairCode(phoneInput) },
-                                    enabled = !state.pairingBusy,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(48.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = WaColors.Emerald,
-                                        contentColor = WaColors.Background,
-                                    ),
-                                    shape = RoundedCornerShape(12.dp),
-                                ) {
-                                    if (state.pairingBusy) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(18.dp),
-                                            strokeWidth = 2.dp,
-                                            color = WaColors.Background,
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Requesting Code...")
-                                    } else {
-                                        Text("Get Pairing Code", fontWeight = FontWeight.SemiBold)
-                                    }
-                                }
-
-                                if (!state.pairingError.isNullOrBlank()) {
-                                    Text(
-                                        text = state.pairingError,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = WaColors.Danger,
-                                    )
-                                }
-
-                                if (!state.pairingCode.isNullOrBlank()) {
-                                    Surface(
-                                        color = WaColors.SurfaceElevated,
-                                        shape = RoundedCornerShape(12.dp),
-                                        border = BorderStroke(1.dp, WaColors.Emerald.copy(alpha = 0.5f)),
-                                        modifier = Modifier.fillMaxWidth(),
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                        ) {
-                                            Column {
-                                                Text(
-                                                    text = "Enter on Phone -> Linked Devices",
-                                                    style = MaterialTheme.typography.bodyMedium,
-                                                    color = WaColors.TextSecondary,
-                                                )
-                                                Spacer(Modifier.height(4.dp))
-                                                Text(
-                                                    text = state.pairingCode,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 26.sp,
-                                                    letterSpacing = 3.sp,
-                                                    color = WaColors.Emerald,
-                                                )
-                                            }
-                                            IconButton(
-                                                onClick = {
-                                                    clipboard.setText(AnnotatedString(state.pairingCode))
-                                                }
-                                            ) {
-                                                Icon(
-                                                    Icons.Rounded.ContentCopy,
-                                                    contentDescription = "Copy pairing code",
-                                                    tint = WaColors.TextPrimary,
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                Text(
-                                    text = "Link with QR Code",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = WaColors.TextPrimary,
-                                )
-                                Text(
-                                    text = "Start the engine below and scan from WhatsApp -> Linked Devices -> Link a Device.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = WaColors.TextSecondary,
-                                )
-
-                                val qrBitmap by produceState<Bitmap?>(initialValue = null, state.qrCode) {
-                                    value = state.qrCode?.let { generateQrBitmap(it) }
-                                }
-
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    if (qrBitmap != null) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(236.dp)
-                                                .clip(RoundedCornerShape(16.dp))
-                                                .background(androidx.compose.ui.graphics.Color.White)
-                                                .padding(12.dp),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Image(
-                                                bitmap = qrBitmap!!.asImageBitmap(),
-                                                contentDescription = "WhatsApp QR Code",
-                                                modifier = Modifier.fillMaxSize(),
-                                            )
-                                        }
-                                    } else {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(236.dp)
-                                                .clip(RoundedCornerShape(16.dp))
-                                                .background(WaColors.SurfaceElevated)
-                                                .border(1.dp, WaColors.Stroke, RoundedCornerShape(16.dp)),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                                Icon(
-                                                    Icons.Rounded.QrCode2,
-                                                    contentDescription = null,
-                                                    tint = WaColors.TextMuted,
-                                                    modifier = Modifier.size(48.dp),
-                                                )
-                                                Spacer(Modifier.height(8.dp))
-                                                Text(
-                                                    text = if (state.phase == ConnectionPhase.CONNECTING) {
-                                                        "Waiting for QR..."
-                                                    } else {
-                                                        "Tap Connect to generate QR"
-                                                    },
-                                                    style = MaterialTheme.typography.bodyMedium,
-                                                    color = WaColors.TextSecondary,
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                PairingCard(
+                    state = state,
+                    selectedTab = selectedTab,
+                    onSelectTab = { selectedTab = it },
+                    phoneInput = phoneInput,
+                    onPhoneInputChange = { phoneInput = it },
+                    onRequestPairCode = onRequestPairCode,
+                    onCopyCode = { clipboard.setText(AnnotatedString(it)) },
+                )
             }
 
-            NativeLogPanel(logs = state.logs)
+            SyncAndGhostPanel(
+                state = state,
+                onUpdateGhost = onUpdateGhost,
+                onResyncContacts = onResyncContacts,
+            )
+
+            EngineLogPanel(logs = state.logs)
         }
     }
 }
@@ -334,7 +146,9 @@ fun ConnectScreen(
 @Composable
 private fun HeaderBanner(state: WaUiState) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
@@ -344,56 +158,61 @@ private fun HeaderBanner(state: WaUiState) {
         ) {
             Box(
                 modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(WaColors.Emerald.copy(alpha = 0.14f))
-                    .border(1.dp, WaColors.Emerald.copy(alpha = 0.35f), RoundedCornerShape(12.dp)),
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(WaShapes.InputRadius))
+                    .background(WaColors.SurfaceElevated)
+                    .border(WaShapes.BorderWidth, WaColors.CardBorder, RoundedCornerShape(WaShapes.InputRadius)),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Bolt,
                     contentDescription = null,
-                    tint = WaColors.Emerald,
+                    tint = WaColors.Primary,
+                    modifier = Modifier.size(20.dp),
                 )
             }
-            Column {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     text = "WA power",
                     style = MaterialTheme.typography.headlineMedium,
                     color = WaColors.TextPrimary,
                 )
                 Text(
-                    text = "Native Go JNI Core ${state.nativeVersion.ifBlank { "..." }}",
+                    text = "Core ${state.nativeVersion.ifBlank { "initializing" }}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = WaColors.TextSecondary,
+                    color = WaColors.TextMuted,
                 )
             }
         }
-        PhaseBadge(phase = state.phase)
+        StatusSignal(phase = state.phase)
     }
 }
 
 @Composable
-private fun PhaseBadge(phase: ConnectionPhase) {
+private fun StatusSignal(phase: ConnectionPhase) {
     val (label, color) = when (phase) {
-        ConnectionPhase.STOPPED -> "IDLE" to WaColors.TextMuted
-        ConnectionPhase.CONNECTING -> "CONNECTING" to WaColors.AmberWarn
-        ConnectionPhase.AWAITING_PAIRING -> "PAIRING" to WaColors.SkyInfo
-        ConnectionPhase.CONNECTED -> "CONNECTED" to WaColors.Emerald
-        ConnectionPhase.READY -> "READY" to WaColors.Emerald
-        ConnectionPhase.LOGGED_OUT -> "LOGGED OUT" to WaColors.Danger
-        ConnectionPhase.ERROR -> "ERROR" to WaColors.Danger
+        ConnectionPhase.STOPPED -> "Idle" to WaColors.TextMuted
+        ConnectionPhase.CONNECTING -> "Connecting" to WaColors.Warning
+        ConnectionPhase.AWAITING_PAIRING -> "Waiting for link" to WaColors.Info
+        ConnectionPhase.CONNECTED -> "Connected" to WaColors.Success
+        ConnectionPhase.READY -> "Ready" to WaColors.Primary
+        ConnectionPhase.LOGGED_OUT -> "Logged out" to WaColors.Danger
+        ConnectionPhase.ERROR -> "Error" to WaColors.Danger
     }
-    Surface(
-        color = color.copy(alpha = 0.14f),
-        border = BorderStroke(1.dp, color.copy(alpha = 0.4f)),
-        shape = CircleShape,
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(color),
+        )
         Text(
             text = label,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
             style = MaterialTheme.typography.labelMedium,
-            color = color,
+            color = WaColors.TextSecondary,
         )
     }
 }
@@ -410,9 +229,9 @@ private fun StatusCard(
         state.phase != ConnectionPhase.ERROR
 
     Card(
-        colors = CardDefaults.cardColors(containerColor = WaColors.Surface),
-        border = BorderStroke(1.dp, WaColors.Stroke),
-        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = WaColors.CardBackground),
+        border = BorderStroke(WaShapes.BorderWidth, WaColors.CardBorder),
+        shape = RoundedCornerShape(WaShapes.CardRadius),
     ) {
         Column(
             modifier = Modifier
@@ -425,23 +244,27 @@ private fun StatusCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
                     Text(
-                        text = if (state.selfJid != null) {
-                            state.pushName?.takeIf { it.isNotBlank() } ?: state.selfJid
-                        } else if (state.storedDevices.isNotEmpty()) {
-                            "Saved session: ${state.storedDevices.first().jid}"
-                        } else {
-                            "No WhatsApp device linked"
+                        text = when {
+                            state.selfJid != null ->
+                                state.pushName?.takeIf { it.isNotBlank() } ?: state.selfJid
+                            state.storedDevices.isNotEmpty() ->
+                                "Saved session"
+                            else -> "No linked device"
                         },
                         style = MaterialTheme.typography.titleMedium,
                         color = WaColors.TextPrimary,
                     )
-                    if (state.selfJid != null) {
+                    val subline = state.selfJid ?: state.storedDevices.firstOrNull()?.jid
+                    if (subline != null) {
                         Text(
-                            text = state.selfJid,
+                            text = subline,
                             style = MaterialTheme.typography.labelMedium,
-                            color = WaColors.SkyInfo,
+                            color = WaColors.TextSecondary,
                         )
                     }
                     if (!state.lastError.isNullOrBlank()) {
@@ -456,55 +279,74 @@ private fun StatusCard(
                     Icon(
                         imageVector = Icons.Rounded.CheckCircle,
                         contentDescription = null,
-                        tint = WaColors.Emerald,
-                        modifier = Modifier.size(28.dp),
+                        tint = WaColors.Primary,
+                        modifier = Modifier.size(20.dp),
                     )
                 }
             }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (!isRunning) {
                     Button(
                         onClick = { onStartConnect(false) },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = WaColors.Emerald,
-                            contentColor = WaColors.Background,
+                            containerColor = WaColors.ButtonBackground,
+                            contentColor = WaColors.ButtonText,
                         ),
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RoundedCornerShape(WaShapes.ButtonRadius),
                     ) {
-                        Icon(Icons.Rounded.PlayArrow, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
+                        Icon(
+                            Icons.Rounded.PlayArrow,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
                         Text(
-                            if (state.storedDevices.isNotEmpty()) "Reconnect" else "Connect",
-                            fontWeight = FontWeight.SemiBold,
+                            text = if (state.storedDevices.isNotEmpty()) "Reconnect" else "Connect",
+                            fontWeight = FontWeight.Medium,
                         )
                     }
                 } else {
                     OutlinedButton(
                         onClick = onStopConnect,
-                        modifier = Modifier.weight(1f),
-                        border = BorderStroke(1.dp, WaColors.Stroke),
-                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp),
+                        border = BorderStroke(WaShapes.BorderWidth, WaColors.Border),
+                        shape = RoundedCornerShape(WaShapes.ButtonRadius),
                     ) {
-                        Icon(Icons.Rounded.Stop, contentDescription = null, tint = WaColors.TextPrimary)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Stop", color = WaColors.TextPrimary)
+                        Icon(
+                            Icons.Rounded.Stop,
+                            contentDescription = null,
+                            tint = WaColors.TextSecondary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Disconnect", color = WaColors.TextPrimary, fontWeight = FontWeight.Medium)
                     }
                 }
 
                 if (state.storedDevices.isNotEmpty() || state.selfJid != null) {
                     OutlinedButton(
                         onClick = onLogoutReset,
-                        border = BorderStroke(1.dp, WaColors.Danger.copy(alpha = 0.5f)),
-                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.height(44.dp),
+                        border = BorderStroke(WaShapes.BorderWidth, WaColors.Danger.copy(alpha = 0.45f)),
+                        shape = RoundedCornerShape(WaShapes.ButtonRadius),
                     ) {
-                        Icon(Icons.Rounded.LinkOff, contentDescription = null, tint = WaColors.Danger)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Unlink", color = WaColors.Danger)
+                        Icon(
+                            Icons.Rounded.LinkOff,
+                            contentDescription = null,
+                            tint = WaColors.Danger,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Unlink", color = WaColors.Danger, fontWeight = FontWeight.Medium)
                     }
                 }
             }
@@ -513,11 +355,445 @@ private fun StatusCard(
 }
 
 @Composable
-private fun NativeLogPanel(logs: List<String>) {
+private fun PairingCard(
+    state: WaUiState,
+    selectedTab: Int,
+    onSelectTab: (Int) -> Unit,
+    phoneInput: String,
+    onPhoneInputChange: (String) -> Unit,
+    onRequestPairCode: (String) -> Unit,
+    onCopyCode: (String) -> Unit,
+) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = WaColors.Surface),
-        border = BorderStroke(1.dp, WaColors.Stroke),
-        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = WaColors.CardBackground),
+        border = BorderStroke(WaShapes.BorderWidth, WaColors.CardBorder),
+        shape = RoundedCornerShape(WaShapes.CardRadius),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            TabRow(
+                selectedTabIndex = selectedTab,
+                containerColor = WaColors.BackgroundSecondary,
+                contentColor = WaColors.Primary,
+                indicator = { tabPositions ->
+                    SecondaryIndicator(
+                        modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
+                        color = WaColors.Primary,
+                    )
+                },
+                divider = { HorizontalDivider(color = WaColors.Divider) },
+            ) {
+                Tab(
+                    selected = selectedTab == 0,
+                    onClick = { onSelectTab(0) },
+                    selectedContentColor = WaColors.Primary,
+                    unselectedContentColor = WaColors.TextSecondary,
+                    text = { Text("Phone code") },
+                    icon = { Icon(Icons.Rounded.PhoneAndroid, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                )
+                Tab(
+                    selected = selectedTab == 1,
+                    onClick = { onSelectTab(1) },
+                    selectedContentColor = WaColors.Primary,
+                    unselectedContentColor = WaColors.TextSecondary,
+                    text = { Text("QR link") },
+                    icon = { Icon(Icons.Rounded.QrCode2, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (selectedTab == 0) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "Link with 8-digit pairing code",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = WaColors.TextPrimary,
+                        )
+                        Text(
+                            text = "Include country code without '+' (e.g. 919876543210)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = WaColors.TextSecondary,
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = phoneInput,
+                        onValueChange = onPhoneInputChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("WhatsApp number") },
+                        placeholder = { Text("919876543210") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        shape = RoundedCornerShape(WaShapes.InputRadius),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = WaColors.InputBackground,
+                            unfocusedContainerColor = WaColors.InputBackground,
+                            focusedBorderColor = WaColors.Primary,
+                            unfocusedBorderColor = WaColors.InputBorder,
+                            focusedLabelColor = WaColors.PrimaryLight,
+                            unfocusedLabelColor = WaColors.TextSecondary,
+                            focusedTextColor = WaColors.TextPrimary,
+                            unfocusedTextColor = WaColors.TextPrimary,
+                        ),
+                    )
+
+                    Button(
+                        onClick = { onRequestPairCode(phoneInput) },
+                        enabled = !state.pairingBusy,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = WaColors.ButtonBackground,
+                            contentColor = WaColors.ButtonText,
+                        ),
+                        shape = RoundedCornerShape(WaShapes.ButtonRadius),
+                    ) {
+                        if (state.pairingBusy) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = WaColors.ButtonText,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Requesting code", fontWeight = FontWeight.Medium)
+                        } else {
+                            Text("Get pairing code", fontWeight = FontWeight.Medium)
+                        }
+                    }
+
+                    if (!state.pairingError.isNullOrBlank()) {
+                        Text(
+                            text = state.pairingError,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = WaColors.Danger,
+                        )
+                    }
+
+                    if (!state.pairingCode.isNullOrBlank()) {
+                        Surface(
+                            color = WaColors.SurfaceVariant,
+                            shape = RoundedCornerShape(WaShapes.InputRadius),
+                            border = BorderStroke(WaShapes.BorderWidth, WaColors.CardBorder),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(
+                                        text = "Enter in WhatsApp -> Linked devices",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = WaColors.TextSecondary,
+                                    )
+                                    Text(
+                                        text = state.pairingCode,
+                                        style = TextStyle(
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 24.sp,
+                                            letterSpacing = 2.sp,
+                                            fontFeatureSettings = "tnum",
+                                        ),
+                                        color = WaColors.PrimaryLight,
+                                    )
+                                }
+                                IconButton(onClick = { onCopyCode(state.pairingCode) }) {
+                                    Icon(
+                                        Icons.Rounded.ContentCopy,
+                                        contentDescription = "Copy pairing code",
+                                        tint = WaColors.TextSecondary,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "Link with QR code",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = WaColors.TextPrimary,
+                        )
+                        Text(
+                            text = "Scan from WhatsApp -> Linked devices -> Link a device",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = WaColors.TextSecondary,
+                        )
+                    }
+
+                    val qrBitmap by produceState<Bitmap?>(initialValue = null, state.qrCode) {
+                        value = state.qrCode?.let { generateQrBitmap(it) }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (qrBitmap != null) {
+                            Box(
+                                modifier = Modifier
+                                    .size(224.dp)
+                                    .clip(RoundedCornerShape(WaShapes.InputRadius))
+                                    .background(androidx.compose.ui.graphics.Color.White)
+                                    .padding(12.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Image(
+                                    bitmap = qrBitmap!!.asImageBitmap(),
+                                    contentDescription = "WhatsApp QR code",
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(224.dp)
+                                    .clip(RoundedCornerShape(WaShapes.InputRadius))
+                                    .background(WaColors.SurfaceVariant)
+                                    .border(WaShapes.BorderWidth, WaColors.CardBorder, RoundedCornerShape(WaShapes.InputRadius)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.QrCode2,
+                                        contentDescription = null,
+                                        tint = WaColors.TextMuted,
+                                        modifier = Modifier.size(32.dp),
+                                    )
+                                    Text(
+                                        text = if (state.phase == ConnectionPhase.CONNECTING) {
+                                            "Generating QR"
+                                        } else {
+                                            "Connect to generate QR"
+                                        },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = WaColors.TextSecondary,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SyncAndGhostPanel(
+    state: WaUiState,
+    onUpdateGhost: ((GhostConfig) -> GhostConfig) -> Unit,
+    onResyncContacts: () -> Unit,
+) {
+    val syncLabel = when (state.syncState) {
+        SyncState.STOPPED -> "Idle"
+        SyncState.CONNECTING -> "Connecting"
+        SyncState.WS_CONNECTED -> "Socket connected"
+        SyncState.SYNCING_OFFLINE -> "Syncing history"
+        SyncState.READY -> "Synchronized"
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = WaColors.CardBackground),
+        border = BorderStroke(WaShapes.BorderWidth, WaColors.CardBorder),
+        shape = RoundedCornerShape(WaShapes.CardRadius),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "Session store & sync",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = WaColors.TextPrimary,
+                    )
+                    Text(
+                        text = syncLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (state.syncState == SyncState.READY) WaColors.Primary else WaColors.TextSecondary,
+                    )
+                }
+                if (state.syncState == SyncState.READY) {
+                    OutlinedButton(
+                        onClick = onResyncContacts,
+                        modifier = Modifier.height(36.dp),
+                        border = BorderStroke(WaShapes.BorderWidth, WaColors.Border),
+                        shape = RoundedCornerShape(WaShapes.InputRadius),
+                    ) {
+                        Icon(
+                            Icons.Rounded.Sync,
+                            contentDescription = null,
+                            tint = WaColors.TextSecondary,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Resync", color = WaColors.TextPrimary)
+                    }
+                }
+            }
+
+            Surface(
+                color = WaColors.SurfaceVariant,
+                shape = RoundedCornerShape(WaShapes.InputRadius),
+                border = BorderStroke(WaShapes.BorderWidth, WaColors.Divider),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(IntrinsicSize.Min)
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TelemetryCell(label = "Chats", value = state.chatCount, highlight = true, modifier = Modifier.weight(1f))
+                    VerticalDivider(modifier = Modifier.fillMaxHeight(), color = WaColors.Divider)
+                    TelemetryCell(label = "Messages", value = state.messageCount, highlight = false, modifier = Modifier.weight(1f))
+                    VerticalDivider(modifier = Modifier.fillMaxHeight(), color = WaColors.Divider)
+                    TelemetryCell(label = "Contacts", value = state.contactCount, highlight = false, modifier = Modifier.weight(1f))
+                }
+            }
+
+            HorizontalDivider(color = WaColors.Divider)
+
+            Text(
+                text = "Privacy controls",
+                style = MaterialTheme.typography.titleMedium,
+                color = WaColors.TextPrimary,
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                GhostToggleRow(
+                    title = "Ghost read",
+                    subtitle = "Hide blue read receipts",
+                    checked = state.ghostConfig.ghostRead,
+                    onCheckedChange = { v -> onUpdateGhost { it.copy(ghostRead = v) } },
+                )
+                GhostToggleRow(
+                    title = "Ghost presence",
+                    subtitle = "Appear offline while active",
+                    checked = state.ghostConfig.ghostPresence,
+                    onCheckedChange = { v -> onUpdateGhost { it.copy(ghostPresence = v) } },
+                )
+                GhostToggleRow(
+                    title = "Ghost typing",
+                    subtitle = "Hide typing and recording status",
+                    checked = state.ghostConfig.ghostTyping,
+                    onCheckedChange = { v -> onUpdateGhost { it.copy(ghostTyping = v) } },
+                )
+                GhostToggleRow(
+                    title = "Ghost view-once",
+                    subtitle = "Save view-once media locally",
+                    checked = state.ghostConfig.ghostViewOnceInline,
+                    onCheckedChange = { v -> onUpdateGhost { it.copy(ghostViewOnceInline = v) } },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TelemetryCell(
+    label: String,
+    value: Int,
+    highlight: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.padding(horizontal = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = value.toString(),
+            style = TextStyle(
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Medium,
+                fontSize = 18.sp,
+                fontFeatureSettings = "tnum",
+            ),
+            color = if (highlight) WaColors.Primary else WaColors.TextPrimary,
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = WaColors.TextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun GhostToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = WaColors.TextPrimary,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = WaColors.TextSecondary,
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = WaColors.ButtonText,
+                checkedTrackColor = WaColors.Primary,
+                uncheckedThumbColor = WaColors.TextSecondary,
+                uncheckedTrackColor = WaColors.SurfaceElevated,
+                uncheckedBorderColor = WaColors.Border,
+            ),
+        )
+    }
+}
+
+@Composable
+private fun EngineLogPanel(logs: List<String>) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = WaColors.CardBackground),
+        border = BorderStroke(WaShapes.BorderWidth, WaColors.CardBorder),
+        shape = RoundedCornerShape(WaShapes.CardRadius),
     ) {
         Column(
             modifier = Modifier
@@ -526,23 +802,25 @@ private fun NativeLogPanel(logs: List<String>) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = "JNI Proof-of-Life Log",
+                text = "Engine log",
                 style = MaterialTheme.typography.titleMedium,
                 color = WaColors.TextPrimary,
             )
             if (logs.isEmpty()) {
                 Text(
-                    text = "Waiting for native events...",
+                    text = "No events recorded yet",
                     style = MaterialTheme.typography.labelMedium,
                     color = WaColors.TextMuted,
                 )
             } else {
-                logs.takeLast(14).forEach { line ->
-                    Text(
-                        text = line,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = WaColors.TextSecondary,
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    logs.takeLast(12).forEach { line ->
+                        Text(
+                            text = line,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = WaColors.TextSecondary,
+                        )
+                    }
                 }
             }
         }

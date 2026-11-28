@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 import kt.sanatani.wapower.MainActivity
 import kt.sanatani.wapower.R
 import kt.sanatani.wapower.core.ConnectionPhase
+import kt.sanatani.wapower.core.SyncState
 import kt.sanatani.wapower.core.WaClientManager
 import kt.sanatani.wapower.jni.NeonizeBridge
 
@@ -34,14 +35,23 @@ class WaForegroundService : Service() {
 
         serviceScope.launch {
             WaClientManager.state.collect { state ->
-                val text = when (state.phase) {
-                    ConnectionPhase.STOPPED -> "Engine idle"
-                    ConnectionPhase.CONNECTING -> "Connecting to WhatsApp..."
-                    ConnectionPhase.AWAITING_PAIRING -> "Waiting for pairing..."
-                    ConnectionPhase.CONNECTED -> "Connected (${state.selfJid ?: "WhatsApp"})"
-                    ConnectionPhase.READY -> "Online (${state.pushName ?: state.selfJid ?: "WA power"})"
-                    ConnectionPhase.LOGGED_OUT -> "Logged out"
-                    ConnectionPhase.ERROR -> "Error: ${state.lastError ?: "connection issue"}"
+                val ghostSuffix = if (state.ghostConfig.ghostPresence || state.ghostConfig.ghostRead) {
+                    " • Ghost"
+                } else {
+                    ""
+                }
+                val text = when {
+                    state.phase == ConnectionPhase.STOPPED -> "Engine idle"
+                    state.phase == ConnectionPhase.AWAITING_PAIRING -> "Waiting for pairing..."
+                    state.phase == ConnectionPhase.LOGGED_OUT -> "Logged out"
+                    state.phase == ConnectionPhase.ERROR -> "Error: ${state.lastError ?: "connection issue"}"
+                    state.syncState == SyncState.READY ->
+                        "Ready (${state.pushName ?: state.selfJid ?: "WA power"})$ghostSuffix"
+                    state.syncState == SyncState.SYNCING_OFFLINE ->
+                        "Syncing offline messages...$ghostSuffix"
+                    state.phase == ConnectionPhase.CONNECTED ->
+                        "Connected (${state.selfJid ?: "WhatsApp"})$ghostSuffix"
+                    else -> "Connecting to WhatsApp..."
                 }
                 val nm = getSystemService(NotificationManager::class.java)
                 nm?.notify(NOTIFICATION_ID, buildNotification(text))

@@ -31,10 +31,12 @@
 
 ## Visual Design Language
 
-- **Obsidian Dark Material 3:** Match and elevate WA power's established palette natively:
-  - Background: `#080C14` | Surface: `#0F172A` | Elevated/Stroke: `#1E293B`
-  - Primary Accent: `#10B981` (Emerald) | Secondary Info/Read Tick: `#38BDF8` | Amber Warning: `#F59E0B` | Danger: `#EF4444`
-  - Typography: Native Android Material 3 scale with crisp spacing (`4dp`/`8dp`/`16dp` grid), no purple AI gradients, no glowing blobs, no emoji clutter in navigation labels.
+- **Obsidian Imperial (Luxury Hacker Dark Material 3):**
+  - Background: `#000000` (secondary `#080808`) | Surface: `#101010` (`#15130F` variant, `#1D1A14` elevated) | Card: `#12110F` / Border `#30291E` (`#393124` border, `#292319` divider)
+  - Primary Accent: `#D6B56D` (Champagne Gold, light `#E8D5A8`, dark `#A88950`, gradient `#D6B56D -> #A88950`, glow `#D6B56D @ 0.12`)
+  - Text: `#F2EBDD` primary | `#A69B88` secondary | `#786F60` muted
+  - Status: Success `#B5A078` | Warning `#E0B65C` | Error `#D95B55` | Info `#9CABB8`
+  - Shapes: Card `14dp`, Button `12dp`, Input `10dp`, Border `1dp` | Typography: Inter / Roboto / JetBrains Mono aesthetics (`4dp`/`8dp`/`16dp` grid), no purple AI gradients, no emoji clutter in navigation labels.
 - **Navigation (Paired):** `Chats | Contacts | Calls | Tools | Settings` (and `Connect` onboarding flow before pairing).
 - **Performance Rules:**
   - `LazyColumn` with stable `key`s (`jid`, `message.id`) backed by Room `Flow<PagingData / List>`.

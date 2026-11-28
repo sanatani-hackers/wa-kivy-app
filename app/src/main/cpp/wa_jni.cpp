@@ -70,6 +70,13 @@ using FnSendPresence = char* (*)(const char*, const char*);
 using FnSendChatPresence = char* (*)(const char*, const unsigned char*, int, int, int);
 using FnSetPassive = char* (*)(const char*, bool);
 using FnMarkRead = char* (*)(const char*, const char*, int, const unsigned char*, int, const unsigned char*, int, const char*);
+using FnGetAllContacts = BytesReturn* (*)(const char*);
+using FnGetJoinedGroups = BytesReturn* (*)(const char*);
+using FnDownloadAny = BytesReturn* (*)(const char*, const unsigned char*, int);
+using FnSubscribePresence = char* (*)(const char*, const unsigned char*, int);
+using FnPutPinned = char* (*)(const char*, const unsigned char*, int, bool);
+using FnPutArchived = char* (*)(const char*, const unsigned char*, int, bool);
+using FnPutMutedUntil = char* (*)(const char*, const unsigned char*, int, float);
 
 using FnCallRegisterCallback = char* (*)(FnCallEventCb);
 using FnCallPlace = char* (*)(const char*, const char*, int);
@@ -101,6 +108,13 @@ struct NeonizeApi {
     FnSendChatPresence SendChatPresence = nullptr;
     FnSetPassive SetPassive = nullptr;
     FnMarkRead MarkRead = nullptr;
+    FnGetAllContacts GetAllContacts = nullptr;
+    FnGetJoinedGroups GetJoinedGroups = nullptr;
+    FnDownloadAny DownloadAny = nullptr;
+    FnSubscribePresence SubscribePresence = nullptr;
+    FnPutPinned PutPinned = nullptr;
+    FnPutArchived PutArchived = nullptr;
+    FnPutMutedUntil PutMutedUntil = nullptr;
 
     FnCallRegisterCallback CallRegisterCallback = nullptr;
     FnCallPlace CallPlace = nullptr;
@@ -362,6 +376,13 @@ bool ensureApiLoaded() {
     ok &= resolveSym(handle, "SendChatPresence", g_api.SendChatPresence);
     ok &= resolveSym(handle, "SetPassive", g_api.SetPassive);
     ok &= resolveSym(handle, "MarkRead", g_api.MarkRead);
+    ok &= resolveSym(handle, "GetAllContacts", g_api.GetAllContacts);
+    ok &= resolveSym(handle, "GetJoinedGroups", g_api.GetJoinedGroups);
+    ok &= resolveSym(handle, "DownloadAny", g_api.DownloadAny);
+    ok &= resolveSym(handle, "SubscribePresence", g_api.SubscribePresence);
+    ok &= resolveSym(handle, "PutPinned", g_api.PutPinned);
+    ok &= resolveSym(handle, "PutArchived", g_api.PutArchived);
+    ok &= resolveSym(handle, "PutMutedUntil", g_api.PutMutedUntil);
 
     ok &= resolveSym(handle, "CallRegisterCallback", g_api.CallRegisterCallback);
     ok &= resolveSym(handle, "CallPlace", g_api.CallPlace);
@@ -577,6 +598,181 @@ Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeSetPassive(
     if (!ensureApiLoaded() || !g_api.SetPassive) return utf8ToJString(env, "libneonize.so not loaded");
     std::string id = jstringToStdString(env, uuid);
     return consumeCString(env, g_api.SetPassive(id.c_str(), passive == JNI_TRUE));
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeSendMessage(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jbyteArray jidBytes,
+    jbyteArray messageBytes
+) {
+    if (!ensureApiLoaded() || !g_api.SendMessage) return nullptr;
+    std::string id = jstringToStdString(env, uuid);
+    std::vector<uint8_t> jid = jbyteArrayToVec(env, jidBytes);
+    std::vector<uint8_t> msg = jbyteArrayToVec(env, messageBytes);
+    BytesReturn* br = g_api.SendMessage(
+        id.c_str(),
+        jid.empty() ? nullptr : jid.data(),
+        static_cast<int>(jid.size()),
+        msg.empty() ? nullptr : msg.data(),
+        static_cast<int>(msg.size())
+    );
+    return consumeBytesReturn(env, br);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeMarkRead(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jstring idsSpaceJoined,
+    jint timestampSec,
+    jbyteArray chatJidBytes,
+    jbyteArray senderJidBytes,
+    jstring receiptType
+) {
+    if (!ensureApiLoaded() || !g_api.MarkRead) return utf8ToJString(env, "libneonize.so not loaded");
+    std::string id = jstringToStdString(env, uuid);
+    std::string ids = jstringToStdString(env, idsSpaceJoined);
+    std::string rtype = jstringToStdString(env, receiptType);
+    std::vector<uint8_t> chat = jbyteArrayToVec(env, chatJidBytes);
+    std::vector<uint8_t> sender = jbyteArrayToVec(env, senderJidBytes);
+    return consumeCString(
+        env,
+        g_api.MarkRead(
+            id.c_str(),
+            ids.c_str(),
+            static_cast<int>(timestampSec),
+            chat.empty() ? nullptr : chat.data(),
+            static_cast<int>(chat.size()),
+            sender.empty() ? nullptr : sender.data(),
+            static_cast<int>(sender.size()),
+            rtype.c_str()
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeSendChatPresence(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jbyteArray jidBytes,
+    jint state,
+    jint media
+) {
+    if (!ensureApiLoaded() || !g_api.SendChatPresence) return utf8ToJString(env, "libneonize.so not loaded");
+    std::string id = jstringToStdString(env, uuid);
+    std::vector<uint8_t> jid = jbyteArrayToVec(env, jidBytes);
+    return consumeCString(
+        env,
+        g_api.SendChatPresence(
+            id.c_str(),
+            jid.empty() ? nullptr : jid.data(),
+            static_cast<int>(jid.size()),
+            static_cast<int>(state),
+            static_cast<int>(media)
+        )
+    );
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeGetAllContacts(JNIEnv* env, jobject /*thiz*/, jstring uuid) {
+    if (!ensureApiLoaded() || !g_api.GetAllContacts) return nullptr;
+    std::string id = jstringToStdString(env, uuid);
+    return consumeBytesReturn(env, g_api.GetAllContacts(id.c_str()));
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeGetJoinedGroups(JNIEnv* env, jobject /*thiz*/, jstring uuid) {
+    if (!ensureApiLoaded() || !g_api.GetJoinedGroups) return nullptr;
+    std::string id = jstringToStdString(env, uuid);
+    return consumeBytesReturn(env, g_api.GetJoinedGroups(id.c_str()));
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeDownloadAny(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jbyteArray messageBytes
+) {
+    if (!ensureApiLoaded() || !g_api.DownloadAny) return nullptr;
+    std::string id = jstringToStdString(env, uuid);
+    std::vector<uint8_t> msg = jbyteArrayToVec(env, messageBytes);
+    return consumeBytesReturn(
+        env,
+        g_api.DownloadAny(id.c_str(), msg.empty() ? nullptr : msg.data(), static_cast<int>(msg.size()))
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeSubscribePresence(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jbyteArray jidBytes
+) {
+    if (!ensureApiLoaded() || !g_api.SubscribePresence) return utf8ToJString(env, "libneonize.so not loaded");
+    std::string id = jstringToStdString(env, uuid);
+    std::vector<uint8_t> jid = jbyteArrayToVec(env, jidBytes);
+    return consumeCString(
+        env,
+        g_api.SubscribePresence(id.c_str(), jid.empty() ? nullptr : jid.data(), static_cast<int>(jid.size()))
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativePutPinned(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jbyteArray jidBytes,
+    jboolean pinned
+) {
+    if (!ensureApiLoaded() || !g_api.PutPinned) return utf8ToJString(env, "libneonize.so not loaded");
+    std::string id = jstringToStdString(env, uuid);
+    std::vector<uint8_t> jid = jbyteArrayToVec(env, jidBytes);
+    return consumeCString(
+        env,
+        g_api.PutPinned(id.c_str(), jid.empty() ? nullptr : jid.data(), static_cast<int>(jid.size()), pinned == JNI_TRUE)
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativePutArchived(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jbyteArray jidBytes,
+    jboolean archived
+) {
+    if (!ensureApiLoaded() || !g_api.PutArchived) return utf8ToJString(env, "libneonize.so not loaded");
+    std::string id = jstringToStdString(env, uuid);
+    std::vector<uint8_t> jid = jbyteArrayToVec(env, jidBytes);
+    return consumeCString(
+        env,
+        g_api.PutArchived(id.c_str(), jid.empty() ? nullptr : jid.data(), static_cast<int>(jid.size()), archived == JNI_TRUE)
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativePutMutedUntil(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jbyteArray jidBytes,
+    jfloat untilSeconds
+) {
+    if (!ensureApiLoaded() || !g_api.PutMutedUntil) return utf8ToJString(env, "libneonize.so not loaded");
+    std::string id = jstringToStdString(env, uuid);
+    std::vector<uint8_t> jid = jbyteArrayToVec(env, jidBytes);
+    return consumeCString(
+        env,
+        g_api.PutMutedUntil(id.c_str(), jid.empty() ? nullptr : jid.data(), static_cast<int>(jid.size()), static_cast<float>(untilSeconds))
+    );
 }
 
 extern "C" JNIEXPORT jstring JNICALL

@@ -9,6 +9,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -33,6 +34,7 @@ enum class ConnectionPhase {
 
 data class WaUiState(
     val phase: ConnectionPhase = ConnectionPhase.STOPPED,
+    val syncState: SyncState = SyncState.STOPPED,
     val nativeVersion: String = "",
     val qrCode: String? = null,
     val pairingCode: String? = null,
@@ -41,12 +43,16 @@ data class WaUiState(
     val selfJid: String? = null,
     val pushName: String? = null,
     val storedDevices: List<StoredDeviceInfo> = emptyList(),
+    val chatCount: Int = 0,
+    val messageCount: Int = 0,
+    val contactCount: Int = 0,
+    val ghostConfig: GhostConfig = GhostConfig(),
     val logs: List<String> = emptyList(),
     val lastError: String? = null,
 )
 
 object WaClientManager {
-    private const val SESSION_UUID = "wapower_main"
+    const val SESSION_UUID = "wapower_main"
     private const val MAX_LOG_LINES = 80
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -55,6 +61,11 @@ object WaClientManager {
 
     @Volatile
     private var appContext: Context? = null
+
+    @Volatile
+    private var _repository: WaRepository? = null
+    val repository: WaRepository
+        get() = checkNotNull(_repository) { "WaClientManager.init must be called first" }
 
     @Volatile
     private var neonizeJob: Job? = null
@@ -66,8 +77,17 @@ object WaClientManager {
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     fun init(context: Context) {
-        if (appContext == null) {
-            appContext = context.applicationContext
+        synchronized(this) {
+            if (appContext == null) {
+                appContext = context.applicationContext
+            }
+            if (_repository == null) {
+                _repository = WaRepository(
+                    context = appContext!!,
+                    sessionUuid = SESSION_UUID,
+                    onLog = { msg -> appendLog(msg) },
+                )
+            }
         }
         startEventCollector()
         scope.launch {
@@ -101,6 +121,7 @@ object WaClientManager {
             }
             startEventCollector()
             val path = dbPath()
+            _repository?.onConnecting()
             _state.update {
                 it.copy(
                     phase = ConnectionPhase.CONNECTING,
@@ -123,6 +144,7 @@ object WaClientManager {
                     newDevice = forceNewDevice,
                     logLevel = "INFO",
                 )
+                _repository?.onStopped()
                 if (!err.isNullOrBlank()) {
                     appendLog("Neonize exited with error: $err")
                     _state.update {
@@ -149,6 +171,7 @@ object WaClientManager {
         appendLog("Stopping Neonize session...")
         scope.launch {
             NeonizeBridge.stop(SESSION_UUID)
+            _repository?.onStopped()
             neonizeJob?.cancel()
             neonizeJob = null
             _state.update {
@@ -182,7 +205,6 @@ object WaClientManager {
 
             startEngine(forceNewDevice = false)
 
-            // Wait briefly for Go's Neonize() to register client & open WhatsApp WebSocket
             var connectedReady = false
             val deadlineMs = System.currentTimeMillis() + 8000L
             while (isActive && System.currentTimeMillis() < deadlineMs) {
@@ -229,6 +251,7 @@ object WaClientManager {
                 appendLog("Logout note: $err")
             }
             NeonizeBridge.stop(SESSION_UUID)
+            _repository?.onStopped()
             neonizeJob?.cancel()
             neonizeJob = null
             runCatching { File(dbPath()).delete() }
@@ -236,6 +259,10 @@ object WaClientManager {
                 WaUiState(
                     nativeVersion = it.nativeVersion,
                     phase = ConnectionPhase.LOGGED_OUT,
+                    ghostConfig = it.ghostConfig,
+                    chatCount = it.chatCount,
+                    messageCount = it.messageCount,
+                    contactCount = it.contactCount,
                     logs = it.logs,
                 )
             }
@@ -243,9 +270,52 @@ object WaClientManager {
         }
     }
 
+    fun updateGhost(transform: (GhostConfig) -> GhostConfig) {
+        _repository?.updateGhost(transform)
+    }
+
+    fun resyncContacts() {
+        scope.launch {
+            _repository?.resyncContacts()
+        }
+    }
+
     private fun startEventCollector() {
         if (collectorStarted) return
         collectorStarted = true
+
+        _repository?.let { repo ->
+            scope.launch {
+                combine(
+                    repo.syncState,
+                    repo.ghostConfig,
+                    repo.chatCount,
+                    repo.messageCount,
+                    repo.contactCount,
+                ) { sync, ghost, chats, msgs, contacts ->
+                    Triple(sync to ghost, chats to msgs, contacts)
+                }.collect { (syncGhost, chatMsg, contacts) ->
+                    val (sync, ghost) = syncGhost
+                    val (chats, msgs) = chatMsg
+                    _state.update { cur ->
+                        val nextPhase = if (sync == SyncState.READY && cur.phase == ConnectionPhase.CONNECTED) {
+                            ConnectionPhase.READY
+                        } else {
+                            cur.phase
+                        }
+                        cur.copy(
+                            phase = nextPhase,
+                            syncState = sync,
+                            ghostConfig = ghost,
+                            chatCount = chats,
+                            messageCount = msgs,
+                            contactCount = contacts,
+                        )
+                    }
+                }
+            }
+        }
+
         scope.launch {
             NeonizeBridge.nativeEvents.collect { evt ->
                 when (evt) {
@@ -280,44 +350,43 @@ object WaClientManager {
                         }
                     }
 
-                    is NativeEvent.ProtoEvent -> handleProtoEvent(evt.code, evt.payload)
+                    is NativeEvent.ProtoEvent -> {
+                        handleUiProtoEvent(evt.code, evt.payload)
+                        _repository?.handleProtoEvent(evt.code, evt.payload)
+                    }
                 }
             }
         }
     }
 
-    private fun handleProtoEvent(code: Int, payload: ByteArray) {
+    private fun handleUiProtoEvent(code: Int, payload: ByteArray) {
         when (code) {
             0 -> { // Device
-                val dev = runCatching { NeonizeProtos.Device.parseFrom(payload) }.getOrNull()
-                if (dev != null) {
-                    val jid = if (dev.hasJID()) "${dev.jid.user}@${dev.jid.server}" else null
-                    appendLog("Device info: jid=$jid push=${dev.pushName}")
-                    _state.update {
-                        it.copy(
-                            selfJid = jid ?: it.selfJid,
-                            pushName = dev.pushName.ifBlank { it.pushName },
-                        )
-                    }
+                val dev = runCatching { NeonizeProtos.Device.parseFrom(payload) }.getOrNull() ?: return
+                val jid = if (dev.hasJID()) "${dev.jid.user}@${dev.jid.server}" else null
+                appendLog("Device info: jid=$jid push=${dev.pushName}")
+                _state.update {
+                    it.copy(
+                        selfJid = jid ?: it.selfJid,
+                        pushName = dev.pushName.ifBlank { it.pushName },
+                    )
                 }
             }
 
             2 -> { // PairStatus
-                val ps = runCatching { NeonizeProtos.PairStatus.parseFrom(payload) }.getOrNull()
-                if (ps != null) {
-                    val jid = "${ps.id.user}@${ps.id.server}"
-                    appendLog("PairStatus: ${ps.status} ($jid)")
-                    if (ps.status == NeonizeProtos.PairStatus.PStatus.SUCCESS) {
-                        val devices = NeonizeBridge.getAllDevices(dbPath())
-                        _state.update {
-                            it.copy(
-                                phase = ConnectionPhase.CONNECTED,
-                                selfJid = jid,
-                                qrCode = null,
-                                pairingCode = null,
-                                storedDevices = devices,
-                            )
-                        }
+                val ps = runCatching { NeonizeProtos.PairStatus.parseFrom(payload) }.getOrNull() ?: return
+                val jid = "${ps.id.user}@${ps.id.server}"
+                appendLog("PairStatus: ${ps.status} ($jid)")
+                if (ps.status == NeonizeProtos.PairStatus.PStatus.SUCCESS) {
+                    val devices = NeonizeBridge.getAllDevices(dbPath())
+                    _state.update {
+                        it.copy(
+                            phase = ConnectionPhase.CONNECTED,
+                            selfJid = jid,
+                            qrCode = null,
+                            pairingCode = null,
+                            storedDevices = devices,
+                        )
                     }
                 }
             }
@@ -367,14 +436,6 @@ object WaClientManager {
             27 -> { // OfflineSyncCompleted
                 val osc = runCatching { NeonizeProtos.OfflineSyncCompleted.parseFrom(payload) }.getOrNull()
                 appendLog("OfflineSyncCompleted (count=${osc?.count ?: 0})")
-                _state.update { it.copy(phase = ConnectionPhase.READY) }
-            }
-
-            56 -> { // AppStateSyncComplete
-                appendLog("AppStateSyncComplete")
-                _state.update {
-                    if (it.phase == ConnectionPhase.CONNECTED) it.copy(phase = ConnectionPhase.READY) else it
-                }
             }
         }
     }

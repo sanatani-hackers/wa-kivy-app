@@ -10,10 +10,10 @@ Execute incrementally in sprints, verifying compilation and device/emulator test
 - [ ] Build minimal Jetpack Compose `ConnectScreen` (8-digit pairing code + QR display) + Foreground Service and verify live WhatsApp Web login & pairing! *(UI + `WaForegroundService` built & signed APK verified; live WhatsApp Web pairing test pending device run)*
 
 ## Sprint 2: Room Database, Sync Gate & Wire Ghost Mode
-- [ ] Implement `WaDatabase` (Room WAL) with `ChatEntity`, `MessageEntity`, `ContactEntity`, `CallLogEntity` + Reactive `Flow` DAOs.
-- [ ] Port `SyncStateMachine` (`OfflineSyncCompletedEv` gate + `3.5s` fallback) and `ProcessLifecycleOwner` foreground/background `Presence.AVAILABLE` / `UNAVAILABLE`.
-- [ ] Implement `HistorySyncEv`, `ContactSyncEv`, `MessageEv`, `ReceiptEv`, `PresenceEv`, `ChatPresenceEv`, `MessageDeleteForMeEv` event ingestion.
-- [ ] Wire `GhostPolicy` (DataStore) inside `WaRepository`: suppress `markRead`, `sendPresence(AVAILABLE)`, `sendChatPresence`, and view-once receipts natively on wire.
+- [x] Implement `WaDatabase` (Room WAL) with `ChatEntity`, `MessageEntity`, `ContactEntity`, `CallLogEntity` + Reactive `Flow` DAOs.
+- [x] Port `SyncStateMachine` (`OfflineSyncCompletedEv` gate + `3.5s` fallback) and `ProcessLifecycleOwner` foreground/background `Presence.AVAILABLE` / `UNAVAILABLE`.
+- [x] Implement `HistorySyncEv`, `ContactSyncEv`, `MessageEv`, `ReceiptEv`, `PresenceEv`, `ChatPresenceEv`, `MessageDeleteForMeEv` event ingestion.
+- [x] Wire `GhostPolicy` (DataStore) inside `WaRepository`: suppress `markRead`, `sendPresence(AVAILABLE)`, `sendChatPresence`, and view-once receipts natively on wire.
 
 ## Sprint 3: 120fps Jetpack Compose Client UI
 - [ ] Build Obsidian Dark Material 3 theme (`Theme.kt`) and bottom navigation (`Chats | Contacts | Calls | Tools | Settings`).

@@ -1,7 +1,9 @@
 package kt.sanatani.wapower.jni
 
+import kt.sanatani.wapower.db.normalizeJid
 import kt.sanatani.wapower.proto.NeonizeProtos
 import kt.sanatani.wapower.proto.waCompanionReg.WACompanionReg.DeviceProps
+import kt.sanatani.wapower.proto.waE2E.WAWebProtobufsE2E
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -150,6 +152,123 @@ object NeonizeBridge {
         return nativeSetPassive(uuid, passive)
     }
 
+    fun buildJid(jidRaw: String): NeonizeProtos.JID {
+        val norm = normalizeJid(jidRaw)
+        val user = if ('@' in norm) norm.substringBefore('@') else norm
+        val server = if ('@' in norm) norm.substringAfter('@') else "s.whatsapp.net"
+        return NeonizeProtos.JID.newBuilder()
+            .setUser(user)
+            .setRawAgent(0)
+            .setDevice(0)
+            .setIntegrator(0)
+            .setServer(server)
+            .setIsEmpty(user.isBlank() && server.isBlank())
+            .build()
+    }
+
+    fun jidToString(jid: NeonizeProtos.JID?): String {
+        if (jid == null || jid.isEmpty) return ""
+        val u = jid.user
+        val s = jid.server
+        if (u.isBlank() && s.isBlank()) return ""
+        return if (u.isNotBlank() && s.isNotBlank()) normalizeJid("$u@$s") else (u.ifBlank { s })
+    }
+
+    fun sendMessage(
+        uuid: String,
+        toJid: String,
+        message: WAWebProtobufsE2E.Message,
+    ): Result<NeonizeProtos.SendResponse> {
+        if (!ensureInitialized()) return Result.failure(IllegalStateException("Bridge not initialized"))
+        val jidBytes = buildJid(toJid).toByteArray()
+        val msgBytes = message.toByteArray()
+        val respBytes = nativeSendMessage(uuid, jidBytes, msgBytes)
+            ?: return Result.failure(IllegalStateException("Empty SendMessage response"))
+        return runCatching {
+            val ret = NeonizeProtos.SendMessageReturnFunction.parseFrom(respBytes)
+            if (ret.hasError() && ret.error.isNotBlank()) error(ret.error)
+            ret.sendResponse
+        }
+    }
+
+    fun markRead(
+        uuid: String,
+        messageIds: List<String>,
+        chatJid: String,
+        senderJid: String,
+        receiptType: String = "read",
+        timestampSec: Int = (System.currentTimeMillis() / 1000L).toInt(),
+    ): String? {
+        if (!ensureInitialized() || messageIds.isEmpty()) return null
+        return nativeMarkRead(
+            uuid = uuid,
+            idsSpaceJoined = messageIds.joinToString(" "),
+            timestampSec = timestampSec,
+            chatJidBytes = buildJid(chatJid).toByteArray(),
+            senderJidBytes = buildJid(senderJid).toByteArray(),
+            receiptType = receiptType,
+        )
+    }
+
+    fun sendChatPresence(
+        uuid: String,
+        chatJid: String,
+        composing: Boolean,
+        isAudio: Boolean = false,
+    ): String? {
+        if (!ensureInitialized()) return "Bridge not initialized"
+        val state = if (composing) 0 else 1
+        val media = if (isAudio) 1 else 0
+        return nativeSendChatPresence(uuid, buildJid(chatJid).toByteArray(), state, media)
+    }
+
+    fun getAllContacts(uuid: String): Result<List<NeonizeProtos.Contact>> {
+        if (!ensureInitialized()) return Result.failure(IllegalStateException("Bridge not initialized"))
+        val bytes = nativeGetAllContacts(uuid)
+            ?: return Result.failure(IllegalStateException("Empty GetAllContacts response"))
+        return runCatching {
+            val ret = NeonizeProtos.ContactsGetAllContactsReturnFunction.parseFrom(bytes)
+            if (ret.hasError() && ret.error.isNotBlank()) error(ret.error)
+            ret.contactList
+        }
+    }
+
+    fun getJoinedGroups(uuid: String): Result<List<NeonizeProtos.GroupInfo>> {
+        if (!ensureInitialized()) return Result.failure(IllegalStateException("Bridge not initialized"))
+        val bytes = nativeGetJoinedGroups(uuid)
+            ?: return Result.failure(IllegalStateException("Empty GetJoinedGroups response"))
+        return runCatching {
+            val ret = NeonizeProtos.GetJoinedGroupsReturnFunction.parseFrom(bytes)
+            if (ret.hasError() && ret.error.isNotBlank()) error(ret.error)
+            ret.groupList
+        }
+    }
+
+    fun downloadAny(uuid: String, message: WAWebProtobufsE2E.Message): Result<ByteArray> {
+        if (!ensureInitialized()) return Result.failure(IllegalStateException("Bridge not initialized"))
+        val bytes = nativeDownloadAny(uuid, message.toByteArray())
+            ?: return Result.failure(IllegalStateException("Empty DownloadAny response"))
+        return runCatching {
+            val ret = NeonizeProtos.DownloadReturnFunction.parseFrom(bytes)
+            if (ret.hasError() && ret.error.isNotBlank()) error(ret.error)
+            ret.binary.toByteArray()
+        }
+    }
+
+    fun subscribePresence(uuid: String, jid: String): String? {
+        if (!ensureInitialized()) return "Bridge not initialized"
+        return nativeSubscribePresence(uuid, buildJid(jid).toByteArray())
+    }
+
+    fun putPinned(uuid: String, jid: String, pinned: Boolean): String? =
+        if (ensureInitialized()) nativePutPinned(uuid, buildJid(jid).toByteArray(), pinned) else "Bridge not initialized"
+
+    fun putArchived(uuid: String, jid: String, archived: Boolean): String? =
+        if (ensureInitialized()) nativePutArchived(uuid, buildJid(jid).toByteArray(), archived) else "Bridge not initialized"
+
+    fun putMutedUntil(uuid: String, jid: String, seconds: Float): String? =
+        if (ensureInitialized()) nativePutMutedUntil(uuid, buildJid(jid).toByteArray(), seconds) else "Bridge not initialized"
+
     fun listActiveCallsJson(uuid: String): String =
         if (ensureInitialized()) nativeCallListActive(uuid).orEmpty() else "{}"
 
@@ -220,6 +339,23 @@ object NeonizeBridge {
     private external fun nativeGetMe(uuid: String): ByteArray?
     private external fun nativeSendPresence(uuid: String, presence: String): String?
     private external fun nativeSetPassive(uuid: String, passive: Boolean): String?
+    private external fun nativeSendMessage(uuid: String, jidBytes: ByteArray, messageBytes: ByteArray): ByteArray?
+    private external fun nativeMarkRead(
+        uuid: String,
+        idsSpaceJoined: String,
+        timestampSec: Int,
+        chatJidBytes: ByteArray,
+        senderJidBytes: ByteArray,
+        receiptType: String,
+    ): String?
+    private external fun nativeSendChatPresence(uuid: String, jidBytes: ByteArray, state: Int, media: Int): String?
+    private external fun nativeGetAllContacts(uuid: String): ByteArray?
+    private external fun nativeGetJoinedGroups(uuid: String): ByteArray?
+    private external fun nativeDownloadAny(uuid: String, messageBytes: ByteArray): ByteArray?
+    private external fun nativeSubscribePresence(uuid: String, jidBytes: ByteArray): String?
+    private external fun nativePutPinned(uuid: String, jidBytes: ByteArray, pinned: Boolean): String?
+    private external fun nativePutArchived(uuid: String, jidBytes: ByteArray, archived: Boolean): String?
+    private external fun nativePutMutedUntil(uuid: String, jidBytes: ByteArray, untilSeconds: Float): String?
     private external fun nativeCallListActive(uuid: String): String?
 
     internal fun sanitizePhoneDigits(input: String): String =

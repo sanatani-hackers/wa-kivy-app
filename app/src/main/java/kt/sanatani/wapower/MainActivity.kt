@@ -45,6 +45,12 @@ class MainActivity : ComponentActivity() {
                     onLogoutReset = {
                         WaClientManager.logoutAndReset()
                     },
+                    onUpdateGhost = { transform ->
+                        WaClientManager.updateGhost(transform)
+                    },
+                    onResyncContacts = {
+                        WaClientManager.resyncContacts()
+                    },
                 )
             }
         }
