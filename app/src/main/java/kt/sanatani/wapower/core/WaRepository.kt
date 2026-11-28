@@ -1,10 +1,12 @@
 package kt.sanatani.wapower.core
 
 import android.content.Context
+import android.net.Uri
 import android.util.Base64
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.google.protobuf.ByteString
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -14,6 +16,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kt.sanatani.wapower.db.ChatListRow
 import kt.sanatani.wapower.db.ContactEntity
 import kt.sanatani.wapower.db.MessageEntity
@@ -21,12 +24,26 @@ import kt.sanatani.wapower.db.WaDatabase
 import kt.sanatani.wapower.db.normalizeJid
 import kt.sanatani.wapower.jni.NeonizeBridge
 import kt.sanatani.wapower.proto.NeonizeProtos
+import kt.sanatani.wapower.proto.waE2E.WAWebProtobufsE2E.AudioMessage
+import kt.sanatani.wapower.proto.waE2E.WAWebProtobufsE2E.ContextInfo
+import kt.sanatani.wapower.proto.waE2E.WAWebProtobufsE2E.DocumentMessage
 import kt.sanatani.wapower.proto.waE2E.WAWebProtobufsE2E.ExtendedTextMessage
+import kt.sanatani.wapower.proto.waE2E.WAWebProtobufsE2E.ImageMessage
 import kt.sanatani.wapower.proto.waE2E.WAWebProtobufsE2E.Message as E2EMessage
 import kt.sanatani.wapower.proto.waE2E.WAWebProtobufsE2E.ProtocolMessage
+import kt.sanatani.wapower.proto.waE2E.WAWebProtobufsE2E.VideoMessage
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+data class WhatsAppCheckResult(
+    val ok: Boolean,
+    val registered: Boolean,
+    val jid: String = "",
+    val phone: String = "",
+    val error: String = "",
+)
 
 class WaRepository(
     context: Context,
@@ -63,6 +80,14 @@ class WaRepository(
     val chatCount: Flow<Int> = db.chatDao().observeCount()
     val messageCount: Flow<Int> = db.messageDao().observeCount()
     val contactCount: Flow<Int> = db.contactDao().observeCount()
+
+    private val avatarLookupAttempted = ConcurrentHashMap.newKeySet<String>()
+
+    fun observeChat(chatJid: String): Flow<ChatListRow?> =
+        db.chatDao().observeChat(normalizeJid(chatJid))
+
+    fun observeMessages(chatJid: String): Flow<List<MessageEntity>> =
+        db.messageDao().observeMessages(normalizeJid(chatJid))
 
     private val outboundQueue = OutboundQueue(
         scope = scope,
@@ -231,10 +256,29 @@ class WaRepository(
 
     private suspend fun performSend(job: OutboundJob) {
         val msg = if (job.quotedId.isNotBlank()) {
+            val quotedRow = db.messageDao().getById(job.quotedId)
+            val ctxBuilder = ContextInfo.newBuilder()
+                .setStanzaID(job.quotedId)
+            if (quotedRow != null) {
+                val participant = when {
+                    quotedRow.senderId.isNotBlank() -> quotedRow.senderId
+                    quotedRow.fromMe -> NeonizeBridge.getMe(sessionUuid)?.let {
+                        if (it.hasJID()) NeonizeBridge.jidToString(it.jid) else ""
+                    }.orEmpty()
+                    else -> job.chatJid
+                }
+                if (participant.isNotBlank()) {
+                    ctxBuilder.setParticipant(participant)
+                }
+                ctxBuilder.setQuotedMessage(
+                    E2EMessage.newBuilder().setConversation(quotedRow.body).build()
+                )
+            }
             E2EMessage.newBuilder()
                 .setExtendedTextMessage(
                     ExtendedTextMessage.newBuilder()
                         .setText(job.text)
+                        .setContextInfo(ctxBuilder.build())
                         .build()
                 )
                 .build()
@@ -260,6 +304,276 @@ class WaRepository(
             db.messageDao().getById(job.localMsgId)?.let { cur ->
                 db.messageDao().insertOrReplace(cur.copy(receiptStatus = "failed"))
             }
+        }
+    }
+
+    suspend fun sendReaction(chatJidRaw: String, messageId: String, senderJidRaw: String, emoji: String) {
+        val chatJid = normalizeJid(chatJidRaw)
+        if (chatJid.isBlank() || messageId.isBlank()) return
+        val meJid = NeonizeBridge.getMe(sessionUuid)?.let {
+            if (it.hasJID()) NeonizeBridge.jidToString(it.jid) else ""
+        }.orEmpty()
+        val effectiveSender = normalizeJid(senderJidRaw).ifBlank { chatJid }
+        val built = NeonizeBridge.buildReaction(
+            uuid = sessionUuid,
+            chatJid = chatJid,
+            senderJid = effectiveSender,
+            messageId = messageId,
+            reaction = emoji,
+        )
+        built.onSuccess { reactionMsg ->
+            NeonizeBridge.sendMessage(sessionUuid, chatJid, reactionMsg).onSuccess {
+                db.messageDao().addReaction(messageId, meJid.ifBlank { "me" }, emoji)
+            }.onFailure { err ->
+                onLog("Send reaction failed: ${err.message}")
+            }
+        }.onFailure { err ->
+            onLog("BuildReaction failed: ${err.message}")
+        }
+    }
+
+    suspend fun sendMediaAttachment(
+        chatJidRaw: String,
+        uri: Uri,
+        mimeType: String,
+        fileName: String,
+        caption: String = "",
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val chatJid = normalizeJid(chatJidRaw)
+        if (chatJid.isBlank()) return@withContext Result.failure(IllegalArgumentException("Invalid chat"))
+        if (!syncMachine.awaitReady(5000L) || !NeonizeBridge.isConnected(sessionUuid)) {
+            return@withContext Result.failure(IllegalStateException("WhatsApp not connected"))
+        }
+
+        val bytes = runCatching {
+            appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull() ?: return@withContext Result.failure(IllegalStateException("Failed to read file"))
+
+        val lowerMime = mimeType.lowercase()
+        val (msgType, mediaInt, defaultPreview) = when {
+            lowerMime.startsWith("image/") -> Triple("image", 0, "Photo")
+            lowerMime.startsWith("video/") -> Triple("video", 1, "Video")
+            lowerMime.startsWith("audio/") -> Triple("audio", 2, "Audio")
+            else -> Triple("document", 3, fileName.ifBlank { "Document" })
+        }
+
+        val upload = NeonizeBridge.upload(sessionUuid, bytes, mediaInt).getOrElse {
+            return@withContext Result.failure(it)
+        }
+
+        val msgBuilder = E2EMessage.newBuilder()
+        when (msgType) {
+            "image" -> msgBuilder.setImageMessage(
+                ImageMessage.newBuilder()
+                    .setURL(upload.url)
+                    .setDirectPath(upload.directPath)
+                    .setMediaKey(upload.mediaKey)
+                    .setFileEncSHA256(upload.fileEncSHA256)
+                    .setFileSHA256(upload.fileSHA256)
+                    .setFileLength(upload.fileLength.toLong())
+                    .setMimetype(mimeType.ifBlank { "image/jpeg" })
+                    .setCaption(caption)
+                    .build()
+            )
+            "video" -> msgBuilder.setVideoMessage(
+                VideoMessage.newBuilder()
+                    .setURL(upload.url)
+                    .setDirectPath(upload.directPath)
+                    .setMediaKey(upload.mediaKey)
+                    .setFileEncSHA256(upload.fileEncSHA256)
+                    .setFileSHA256(upload.fileSHA256)
+                    .setFileLength(upload.fileLength.toLong())
+                    .setMimetype(mimeType.ifBlank { "video/mp4" })
+                    .setCaption(caption)
+                    .build()
+            )
+            "audio" -> msgBuilder.setAudioMessage(
+                AudioMessage.newBuilder()
+                    .setURL(upload.url)
+                    .setDirectPath(upload.directPath)
+                    .setMediaKey(upload.mediaKey)
+                    .setFileEncSHA256(upload.fileEncSHA256)
+                    .setFileSHA256(upload.fileSHA256)
+                    .setFileLength(upload.fileLength.toLong())
+                    .setMimetype(mimeType.ifBlank { "audio/ogg" })
+                    .setPTT(false)
+                    .build()
+            )
+            else -> msgBuilder.setDocumentMessage(
+                DocumentMessage.newBuilder()
+                    .setURL(upload.url)
+                    .setDirectPath(upload.directPath)
+                    .setMediaKey(upload.mediaKey)
+                    .setFileEncSHA256(upload.fileEncSHA256)
+                    .setFileSHA256(upload.fileSHA256)
+                    .setFileLength(upload.fileLength.toLong())
+                    .setMimetype(mimeType.ifBlank { "application/octet-stream" })
+                    .setFileName(fileName.ifBlank { "file" })
+                    .setTitle(fileName.ifBlank { "file" })
+                    .setCaption(caption)
+                    .build()
+            )
+        }
+
+        val e2eMsg = msgBuilder.build()
+        val resp = NeonizeBridge.sendMessage(sessionUuid, chatJid, e2eMsg).getOrElse {
+            return@withContext Result.failure(it)
+        }
+
+        val msgId = resp.id.ifBlank { "local_${UUID.randomUUID().toString().take(8)}" }
+        val ts = MessagePayloadExtractor.normalizeTimestampSec(resp.timestamp)
+            .takeIf { it > 0 } ?: (System.currentTimeMillis() / 1000L)
+
+        val localFile = runCatching {
+            val dir = File(appContext.filesDir, "media_cache").apply { mkdirs() }
+            val ext = MessagePayloadExtractor.extForMedia(msgType, mimeType, fileName)
+            val safeId = msgId.filter { it.isLetterOrDigit() || it == '-' || it == '_' }.take(64)
+            val out = File(dir, "sent_$safeId$ext")
+            out.writeBytes(bytes)
+            out.absolutePath
+        }.getOrDefault("")
+
+        val body = caption.ifBlank { defaultPreview }
+        db.messageDao().upsertMessage(
+            MessageEntity(
+                id = msgId,
+                chatId = chatJid,
+                fromMe = true,
+                ts = ts,
+                msgType = msgType,
+                body = body,
+                mediaPath = localFile,
+                mediaMime = mimeType,
+                receiptStatus = "sent",
+                rawJson = serializeMediaRaw(e2eMsg),
+            )
+        )
+        db.chatDao().upsertChat(
+            jidRaw = chatJid,
+            isGroup = chatJid.endsWith("@g.us"),
+            lastMsgId = msgId,
+            lastPreview = if (caption.isNotBlank()) "$defaultPreview: $caption" else defaultPreview,
+            lastTs = ts,
+            unreadDelta = 0,
+        )
+        Result.success(msgId)
+    }
+
+    suspend fun downloadMessageMedia(msgId: String): Result<String> = withContext(Dispatchers.IO) {
+        val row = db.messageDao().getById(msgId)
+            ?: return@withContext Result.failure(IllegalStateException("Message not found"))
+        if (row.mediaPath.isNotBlank() && File(row.mediaPath).exists()) {
+            return@withContext Result.success(row.mediaPath)
+        }
+        val b64 = runCatching { JSONObject(row.rawJson).optString("pb_b64", "") }.getOrDefault("")
+        if (b64.isBlank()) {
+            return@withContext Result.failure(IllegalStateException("No downloadable media metadata"))
+        }
+        val proto = runCatching { E2EMessage.parseFrom(Base64.decode(b64, Base64.DEFAULT)) }.getOrNull()
+            ?: return@withContext Result.failure(IllegalStateException("Corrupt media payload"))
+        val bytes = NeonizeBridge.downloadAny(sessionUuid, proto).getOrElse {
+            return@withContext Result.failure(it)
+        }
+        if (bytes.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("Downloaded empty bytes"))
+        }
+        val dir = File(appContext.filesDir, "media_cache").apply { mkdirs() }
+        val ext = MessagePayloadExtractor.extForMedia(row.msgType, row.mediaMime)
+        val safeId = msgId.filter { it.isLetterOrDigit() || it == '-' || it == '_' }.take(64)
+        val out = File(dir, "dl_$safeId$ext")
+        out.writeBytes(bytes)
+        db.messageDao().updateMediaPath(msgId, out.absolutePath, row.mediaMime)
+        Result.success(out.absolutePath)
+    }
+
+    suspend fun setChatPinned(chatJidRaw: String, pinned: Boolean) {
+        val jid = normalizeJid(chatJidRaw)
+        db.chatDao().setPinned(jid, pinned)
+        if (NeonizeBridge.isConnected(sessionUuid)) {
+            NeonizeBridge.putPinned(sessionUuid, jid, pinned)
+        }
+    }
+
+    suspend fun setChatArchived(chatJidRaw: String, archived: Boolean) {
+        val jid = normalizeJid(chatJidRaw)
+        db.chatDao().setArchived(jid, archived)
+        if (NeonizeBridge.isConnected(sessionUuid)) {
+            NeonizeBridge.putArchived(sessionUuid, jid, archived)
+        }
+    }
+
+    suspend fun setChatMuted(chatJidRaw: String, muted: Boolean) {
+        val jid = normalizeJid(chatJidRaw)
+        val untilSec = if (muted) (System.currentTimeMillis() / 1000L) + 8 * 3600L else 0L
+        db.chatDao().setMutedUntil(jid, untilSec)
+        if (NeonizeBridge.isConnected(sessionUuid)) {
+            NeonizeBridge.putMutedUntil(sessionUuid, jid, if (muted) 8 * 3600f else 0f)
+        }
+    }
+
+    fun fetchProfileAvatarIfNeeded(jidRaw: String) {
+        val jid = normalizeJid(jidRaw)
+        if (jid.isBlank() || !avatarLookupAttempted.add(jid)) return
+        scope.launch {
+            if (!NeonizeBridge.isConnected(sessionUuid)) {
+                avatarLookupAttempted.remove(jid)
+                return@launch
+            }
+            NeonizeBridge.getProfilePictureUrl(sessionUuid, jid, preview = true).onSuccess { url ->
+                if (url.isNotBlank()) {
+                    db.contactDao().updateAvatarPath(jid, url)
+                    db.chatDao().updateAvatarPath(jid, url)
+                }
+            }
+        }
+    }
+
+    fun subscribeChatPresence(jidRaw: String) {
+        val jid = normalizeJid(jidRaw)
+        if (jid.isBlank() || jid.endsWith("@g.us")) return
+        scope.launch {
+            if (NeonizeBridge.isConnected(sessionUuid)) {
+                NeonizeBridge.subscribePresence(sessionUuid, jid)
+            }
+        }
+    }
+
+    suspend fun checkOnWhatsApp(phoneInput: String): WhatsAppCheckResult = withContext(Dispatchers.IO) {
+        val clean = NeonizeBridge.sanitizePhoneDigits(phoneInput)
+        if (clean.length < 5) {
+            return@withContext WhatsAppCheckResult(ok = false, registered = false, phone = clean, error = "Enter valid phone digits")
+        }
+        if (!NeonizeBridge.isConnected(sessionUuid)) {
+            return@withContext WhatsAppCheckResult(ok = false, registered = false, phone = clean, error = "WhatsApp not connected")
+        }
+        val res = NeonizeBridge.isOnWhatsApp(sessionUuid, listOf(clean)).getOrElse {
+            return@withContext WhatsAppCheckResult(ok = false, registered = false, phone = clean, error = it.message ?: "Check failed")
+        }
+        val first = res.firstOrNull()
+        val isIn = first?.isIn == true
+        val jid = first?.let { NeonizeBridge.jidToString(it.jid) }.orEmpty().ifBlank {
+            if (isIn) "$clean@s.whatsapp.net" else ""
+        }
+        if (isIn && jid.isNotBlank()) {
+            db.contactDao().upsertContact(jidRaw = jid, phone = clean)
+        }
+        WhatsAppCheckResult(ok = true, registered = isIn, jid = jid, phone = clean)
+    }
+
+    suspend fun placeCall(targetJid: String, isVideo: Boolean): Result<String> = withContext(Dispatchers.IO) {
+        if (!NeonizeBridge.isConnected(sessionUuid)) {
+            return@withContext Result.failure(IllegalStateException("WhatsApp not connected"))
+        }
+        val raw = NeonizeBridge.callPlace(sessionUuid, targetJid, isVideo)
+        val obj = runCatching { JSONObject(raw) }.getOrNull()
+        if (obj?.optBoolean("ok") == true) {
+            val cid = obj.optString("call_id", "")
+            onLog("Placed ${if (isVideo) "video" else "voice"} call to $targetJid ($cid)")
+            Result.success(cid)
+        } else {
+            val err = obj?.optString("error", "Call failed") ?: "Call failed"
+            onLog("CallPlace failed: $err")
+            Result.failure(IllegalStateException(err))
         }
     }
 

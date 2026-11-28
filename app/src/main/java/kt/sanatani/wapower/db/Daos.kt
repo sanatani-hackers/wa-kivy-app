@@ -71,6 +71,35 @@ interface ChatDao {
     @Query("SELECT * FROM chats WHERE jid = :jid LIMIT 1")
     suspend fun getByJid(jid: String): ChatEntity?
 
+    @Query(
+        """
+        SELECT ch.*,
+               ct.full_name AS contact_full_name,
+               ct.push_name AS contact_push_name,
+               ct.avatar_path AS contact_avatar,
+               COALESCE(ct.is_online, 0) AS is_online,
+               COALESCE(ct.is_typing, 0) AS is_typing,
+               COALESCE(ct.last_seen_ts, 0) AS last_seen_ts
+        FROM chats ch
+        LEFT JOIN contacts ct ON ct.jid = ch.jid
+        WHERE ch.jid = :jid
+        LIMIT 1
+        """
+    )
+    fun observeChat(jid: String): Flow<ChatListRow?>
+
+    @Query("UPDATE chats SET pinned = :pinned, updated_at = :now WHERE jid = :jid")
+    suspend fun setPinned(jid: String, pinned: Boolean, now: Long = System.currentTimeMillis() / 1000L)
+
+    @Query("UPDATE chats SET archived = :archived, updated_at = :now WHERE jid = :jid")
+    suspend fun setArchived(jid: String, archived: Boolean, now: Long = System.currentTimeMillis() / 1000L)
+
+    @Query("UPDATE chats SET muted_until = :mutedUntil, updated_at = :now WHERE jid = :jid")
+    suspend fun setMutedUntil(jid: String, mutedUntil: Long, now: Long = System.currentTimeMillis() / 1000L)
+
+    @Query("UPDATE chats SET avatar_path = :avatarPath, updated_at = :now WHERE jid = :jid")
+    suspend fun updateAvatarPath(jid: String, avatarPath: String, now: Long = System.currentTimeMillis() / 1000L)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrReplace(chat: ChatEntity)
 
@@ -288,6 +317,9 @@ interface ContactDao {
 
     @Query("SELECT * FROM contacts WHERE jid = :jid LIMIT 1")
     suspend fun getByJid(jid: String): ContactEntity?
+
+    @Query("UPDATE contacts SET avatar_path = :avatarPath, updated_at = :now WHERE jid = :jid")
+    suspend fun updateAvatarPath(jid: String, avatarPath: String, now: Long = System.currentTimeMillis() / 1000L)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrReplace(contact: ContactEntity)

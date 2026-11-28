@@ -16,10 +16,10 @@ Execute incrementally in sprints, verifying compilation and device/emulator test
 - [x] Wire `GhostPolicy` (DataStore) inside `WaRepository`: suppress `markRead`, `sendPresence(AVAILABLE)`, `sendChatPresence`, and view-once receipts natively on wire.
 
 ## Sprint 3: 120fps Jetpack Compose Client UI
-- [ ] Build Obsidian Dark Material 3 theme (`Theme.kt`) and bottom navigation (`Chats | Contacts | Calls | Tools | Settings`).
-- [ ] Build `ChatsScreen` (search, `All/Unread/Groups/Archived` pills, pin/archive/mute actions, Coil avatars, unread badges).
-- [ ] Build `ChatDetailScreen` (`LazyColumn` reverse thread, swipe-to-reply, reactions picker, inline Coil/ExoPlayer media viewer, Deleted/Edited/View-Once badges, manual **Mark Read** CTA when Ghost Read is ON, attachment picker).
-- [ ] Build `ContactsScreen` (`getAllContacts` + `getJoinedGroups`, `isOnWhatsApp` checker, 1-tap Chat/Voice/Video).
+- [x] Build Obsidian Imperial Material 3 theme (`Theme.kt`) and bottom navigation (`Chats | Contacts | Calls | Tools | Settings`).
+- [x] Build `ChatsScreen` (search, `All/Unread/Groups/Archived` pills, pin/archive/mute actions, Coil avatars, unread badges).
+- [x] Build `ChatDetailScreen` (`LazyColumn` reverse thread, swipe-to-reply, reactions picker, inline Coil/ExoPlayer media viewer, Deleted/Edited/View-Once badges, manual **Mark Read** CTA when Ghost Read is ON, attachment picker).
+- [x] Build `ContactsScreen` (`getAllContacts` + `getJoinedGroups`, `isOnWhatsApp` checker, 1-tap Chat/Voice/Video).
 
 ## Sprint 4: Built-in VoIP & Live YouTube Video/Audio Streaming
 - [ ] Copy `media_ref/WaMediaTranscoder.java` into `app/src/main/java/kt/sanatani/wapower/WaMediaTranscoder.java`.

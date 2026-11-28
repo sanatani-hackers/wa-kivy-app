@@ -269,6 +269,70 @@ object NeonizeBridge {
     fun putMutedUntil(uuid: String, jid: String, seconds: Float): String? =
         if (ensureInitialized()) nativePutMutedUntil(uuid, buildJid(jid).toByteArray(), seconds) else "Bridge not initialized"
 
+    fun buildReaction(
+        uuid: String,
+        chatJid: String,
+        senderJid: String,
+        messageId: String,
+        reaction: String,
+    ): Result<WAWebProtobufsE2E.Message> {
+        if (!ensureInitialized()) return Result.failure(IllegalStateException("Bridge not initialized"))
+        val bytes = nativeBuildReaction(
+            uuid = uuid,
+            chatJidBytes = buildJid(chatJid).toByteArray(),
+            senderJidBytes = buildJid(senderJid).toByteArray(),
+            messageId = messageId,
+            reaction = reaction,
+        ) ?: return Result.failure(IllegalStateException("Empty BuildReaction response"))
+        return runCatching {
+            val ret = NeonizeProtos.BuildMessageReturnFunction.parseFrom(bytes)
+            if (ret.hasError() && ret.error.isNotBlank()) error(ret.error)
+            ret.message
+        }
+    }
+
+    fun isOnWhatsApp(uuid: String, numbers: List<String>): Result<List<NeonizeProtos.IsOnWhatsAppResponse>> {
+        if (!ensureInitialized()) return Result.failure(IllegalStateException("Bridge not initialized"))
+        val cleaned = numbers.map { sanitizePhoneDigits(it) }.filter { it.isNotBlank() }
+        if (cleaned.isEmpty()) return Result.success(emptyList())
+        val bytes = nativeIsOnWhatsApp(uuid, cleaned.joinToString(" "))
+            ?: return Result.failure(IllegalStateException("Empty IsOnWhatsApp response"))
+        return runCatching {
+            val ret = NeonizeProtos.IsOnWhatsAppReturnFunction.parseFrom(bytes)
+            if (ret.hasError() && ret.error.isNotBlank()) error(ret.error)
+            ret.isOnWhatsAppResponseList
+        }
+    }
+
+    fun getProfilePictureUrl(uuid: String, jid: String, preview: Boolean = true): Result<String> {
+        if (!ensureInitialized()) return Result.failure(IllegalStateException("Bridge not initialized"))
+        val params = NeonizeProtos.GetProfilePictureParams.newBuilder()
+            .setPreview(preview)
+            .build()
+            .toByteArray()
+        val bytes = nativeGetProfilePicture(uuid, buildJid(jid).toByteArray(), params)
+            ?: return Result.failure(IllegalStateException("Empty GetProfilePicture response"))
+        return runCatching {
+            val ret = NeonizeProtos.GetProfilePictureReturnFunction.parseFrom(bytes)
+            if (ret.hasError() && ret.error.isNotBlank()) error(ret.error)
+            ret.picture.url
+        }
+    }
+
+    fun upload(uuid: String, data: ByteArray, mediaType: Int): Result<NeonizeProtos.UploadResponse> {
+        if (!ensureInitialized()) return Result.failure(IllegalStateException("Bridge not initialized"))
+        val bytes = nativeUpload(uuid, data, mediaType)
+            ?: return Result.failure(IllegalStateException("Empty Upload response"))
+        return runCatching {
+            val ret = NeonizeProtos.UploadReturnFunction.parseFrom(bytes)
+            if (ret.hasError() && ret.error.isNotBlank()) error(ret.error)
+            ret.uploadResponse
+        }
+    }
+
+    fun callPlace(uuid: String, target: String, isVideo: Boolean): String =
+        if (ensureInitialized()) nativeCallPlace(uuid, target, if (isVideo) 1 else 0).orEmpty() else "{\"ok\":false}"
+
     fun listActiveCallsJson(uuid: String): String =
         if (ensureInitialized()) nativeCallListActive(uuid).orEmpty() else "{}"
 
@@ -356,6 +420,17 @@ object NeonizeBridge {
     private external fun nativePutPinned(uuid: String, jidBytes: ByteArray, pinned: Boolean): String?
     private external fun nativePutArchived(uuid: String, jidBytes: ByteArray, archived: Boolean): String?
     private external fun nativePutMutedUntil(uuid: String, jidBytes: ByteArray, untilSeconds: Float): String?
+    private external fun nativeBuildReaction(
+        uuid: String,
+        chatJidBytes: ByteArray,
+        senderJidBytes: ByteArray,
+        messageId: String,
+        reaction: String,
+    ): ByteArray?
+    private external fun nativeIsOnWhatsApp(uuid: String, numbersSpaceSeparated: String): ByteArray?
+    private external fun nativeGetProfilePicture(uuid: String, jidBytes: ByteArray, paramsBytes: ByteArray): ByteArray?
+    private external fun nativeUpload(uuid: String, mediaBytes: ByteArray, mediaType: Int): ByteArray?
+    private external fun nativeCallPlace(uuid: String, target: String, isVideo: Int): String?
     private external fun nativeCallListActive(uuid: String): String?
 
     internal fun sanitizePhoneDigits(input: String): String =

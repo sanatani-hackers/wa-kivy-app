@@ -77,6 +77,10 @@ using FnSubscribePresence = char* (*)(const char*, const unsigned char*, int);
 using FnPutPinned = char* (*)(const char*, const unsigned char*, int, bool);
 using FnPutArchived = char* (*)(const char*, const unsigned char*, int, bool);
 using FnPutMutedUntil = char* (*)(const char*, const unsigned char*, int, float);
+using FnBuildReaction = BytesReturn* (*)(const char*, const unsigned char*, int, const unsigned char*, int, const char*, const char*);
+using FnIsOnWhatsApp = BytesReturn* (*)(const char*, const char*);
+using FnGetProfilePicture = BytesReturn* (*)(const char*, const unsigned char*, int, const unsigned char*, int);
+using FnUpload = BytesReturn* (*)(const char*, const unsigned char*, int, int);
 
 using FnCallRegisterCallback = char* (*)(FnCallEventCb);
 using FnCallPlace = char* (*)(const char*, const char*, int);
@@ -115,6 +119,10 @@ struct NeonizeApi {
     FnPutPinned PutPinned = nullptr;
     FnPutArchived PutArchived = nullptr;
     FnPutMutedUntil PutMutedUntil = nullptr;
+    FnBuildReaction BuildReaction = nullptr;
+    FnIsOnWhatsApp IsOnWhatsApp = nullptr;
+    FnGetProfilePicture GetProfilePicture = nullptr;
+    FnUpload Upload = nullptr;
 
     FnCallRegisterCallback CallRegisterCallback = nullptr;
     FnCallPlace CallPlace = nullptr;
@@ -383,6 +391,10 @@ bool ensureApiLoaded() {
     ok &= resolveSym(handle, "PutPinned", g_api.PutPinned);
     ok &= resolveSym(handle, "PutArchived", g_api.PutArchived);
     ok &= resolveSym(handle, "PutMutedUntil", g_api.PutMutedUntil);
+    ok &= resolveSym(handle, "BuildReaction", g_api.BuildReaction);
+    ok &= resolveSym(handle, "IsOnWhatsApp", g_api.IsOnWhatsApp);
+    ok &= resolveSym(handle, "GetProfilePicture", g_api.GetProfilePicture);
+    ok &= resolveSym(handle, "Upload", g_api.Upload);
 
     ok &= resolveSym(handle, "CallRegisterCallback", g_api.CallRegisterCallback);
     ok &= resolveSym(handle, "CallPlace", g_api.CallPlace);
@@ -784,4 +796,107 @@ Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallListActive(
     if (!ensureApiLoaded() || !g_api.CallListActive) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
     std::string id = jstringToStdString(env, uuid);
     return consumeCString(env, g_api.CallListActive(id.c_str()));
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeBuildReaction(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jbyteArray chatJidBytes,
+    jbyteArray senderJidBytes,
+    jstring messageId,
+    jstring reaction
+) {
+    if (!ensureApiLoaded() || !g_api.BuildReaction) return nullptr;
+    std::string id = jstringToStdString(env, uuid);
+    std::vector<uint8_t> chat = jbyteArrayToVec(env, chatJidBytes);
+    std::vector<uint8_t> sender = jbyteArrayToVec(env, senderJidBytes);
+    std::string mid = jstringToStdString(env, messageId);
+    std::string rx = jstringToStdString(env, reaction);
+    return consumeBytesReturn(
+        env,
+        g_api.BuildReaction(
+            id.c_str(),
+            chat.empty() ? nullptr : chat.data(),
+            static_cast<int>(chat.size()),
+            sender.empty() ? nullptr : sender.data(),
+            static_cast<int>(sender.size()),
+            mid.c_str(),
+            rx.c_str()
+        )
+    );
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeIsOnWhatsApp(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jstring numbersSpaceSeparated
+) {
+    if (!ensureApiLoaded() || !g_api.IsOnWhatsApp) return nullptr;
+    std::string id = jstringToStdString(env, uuid);
+    std::string nums = jstringToStdString(env, numbersSpaceSeparated);
+    return consumeBytesReturn(env, g_api.IsOnWhatsApp(id.c_str(), nums.c_str()));
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeGetProfilePicture(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jbyteArray jidBytes,
+    jbyteArray paramsBytes
+) {
+    if (!ensureApiLoaded() || !g_api.GetProfilePicture) return nullptr;
+    std::string id = jstringToStdString(env, uuid);
+    std::vector<uint8_t> jid = jbyteArrayToVec(env, jidBytes);
+    std::vector<uint8_t> params = jbyteArrayToVec(env, paramsBytes);
+    return consumeBytesReturn(
+        env,
+        g_api.GetProfilePicture(
+            id.c_str(),
+            jid.empty() ? nullptr : jid.data(),
+            static_cast<int>(jid.size()),
+            params.empty() ? nullptr : params.data(),
+            static_cast<int>(params.size())
+        )
+    );
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeUpload(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jbyteArray mediaBytes,
+    jint mediaType
+) {
+    if (!ensureApiLoaded() || !g_api.Upload) return nullptr;
+    std::string id = jstringToStdString(env, uuid);
+    std::vector<uint8_t> media = jbyteArrayToVec(env, mediaBytes);
+    return consumeBytesReturn(
+        env,
+        g_api.Upload(
+            id.c_str(),
+            media.empty() ? nullptr : media.data(),
+            static_cast<int>(media.size()),
+            static_cast<int>(mediaType)
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallPlace(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring uuid,
+    jstring target,
+    jint isVideo
+) {
+    if (!ensureApiLoaded() || !g_api.CallPlace) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string tgt = jstringToStdString(env, target);
+    return consumeCString(env, g_api.CallPlace(id.c_str(), tgt.c_str(), static_cast<int>(isVideo)));
 }
