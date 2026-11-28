@@ -1,0 +1,9 @@
+syntax = "proto2";
+package WAWebProtobufsEphemeral;
+option go_package = "go.mau.fi/whatsmeow/proto/waEphemeral";
+option java_package = "kt.sanatani.wapower.proto.waEphemeral";
+
+message EphemeralSetting {
+	optional sfixed32 duration = 1;
+	optional sfixed64 timestamp = 2;
+}

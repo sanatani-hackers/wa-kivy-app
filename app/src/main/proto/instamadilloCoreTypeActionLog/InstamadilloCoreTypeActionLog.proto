@@ -1,0 +1,14 @@
+syntax = "proto2";
+package InstamadilloCoreTypeActionLog;
+option go_package = "go.mau.fi/whatsmeow/proto/instamadilloCoreTypeActionLog";
+option java_package = "kt.sanatani.wapower.proto.instamadilloCoreTypeActionLog";
+
+message ActionLog {
+	oneof actionLogSubtype {
+		ActionLogReaction actionLogReaction = 1;
+	}
+}
+
+message ActionLogReaction {
+	optional string emojiUnicode = 1;
+}

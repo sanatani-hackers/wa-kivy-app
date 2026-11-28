@@ -3,11 +3,11 @@
 Execute incrementally in sprints, verifying compilation and device/emulator tests at each milestone.
 
 ## Sprint 1: Android Project Scaffold (`kt.sanatani.wapower`) + Go JNI Proof of Life
-- [ ] Initialize Gradle Kotlin DSL Android project (`settings.gradle.kts`, `build.gradle.kts`, `app/build.gradle.kts`, `gradle-wrapper`) targeting API 26–34, `arm64-v8a`.
-- [ ] Sync `.proto` definitions from `krypton-byte/neonize` (`0.12.4` `defproto/`) and configure `protobuf-gradle-plugin` (`javalite`).
-- [ ] Build `libneonize.so` via `go_bridge/build_so.sh` on Codespace into `app/src/main/jniLibs/arm64-v8a/libneonize.so`.
-- [ ] Implement `app/src/main/cpp/wa_jni.cpp` + `NeonizeBridge.kt` (load `.so`, handle `FreeString`/`FreeBytesStruct`, marshall JNI <-> Go event/bytes callbacks safely via `JavaVM::AttachCurrentThread`).
-- [ ] Build minimal Jetpack Compose `ConnectScreen` (8-digit pairing code + QR display) + Foreground Service and verify live WhatsApp Web login & pairing!
+- [x] Initialize Gradle Kotlin DSL Android project (`settings.gradle.kts`, `build.gradle.kts`, `app/build.gradle.kts`, `gradle-wrapper`) targeting API 26–34, `arm64-v8a`.
+- [x] Sync `.proto` definitions from `krypton-byte/neonize` (`0.12.4` `defproto/`) and configure `protobuf-gradle-plugin` (`javalite`).
+- [x] Build `libneonize.so` via `go_bridge/build_so.sh` on Codespace into `app/src/main/jniLibs/arm64-v8a/libneonize.so`.
+- [x] Implement `app/src/main/cpp/wa_jni.cpp` + `NeonizeBridge.kt` (load `.so`, handle `FreeString`/`FreeBytesStruct`, marshall JNI <-> Go event/bytes callbacks safely via `JavaVM::AttachCurrentThread`).
+- [ ] Build minimal Jetpack Compose `ConnectScreen` (8-digit pairing code + QR display) + Foreground Service and verify live WhatsApp Web login & pairing! *(UI + `WaForegroundService` built & signed APK verified; live WhatsApp Web pairing test pending device run)*
 
 ## Sprint 2: Room Database, Sync Gate & Wire Ghost Mode
 - [ ] Implement `WaDatabase` (Room WAL) with `ChatEntity`, `MessageEntity`, `ContactEntity`, `CallLogEntity` + Reactive `Flow` DAOs.

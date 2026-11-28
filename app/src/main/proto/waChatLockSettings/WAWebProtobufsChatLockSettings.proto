@@ -1,0 +1,11 @@
+syntax = "proto2";
+package WAWebProtobufsChatLockSettings;
+option go_package = "go.mau.fi/whatsmeow/proto/waChatLockSettings";
+option java_package = "kt.sanatani.wapower.proto.waChatLockSettings";
+
+import "waUserPassword/WAWebProtobufsUserPassword.proto";
+
+message ChatLockSettings {
+	optional bool hideLockedChats = 1;
+	optional WAWebProtobufsUserPassword.UserPassword secretCode = 2;
+}
