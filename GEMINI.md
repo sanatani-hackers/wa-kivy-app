@@ -21,6 +21,7 @@
      - `git show main:plugins/callmusic.py` — Call Guard (`off | music | reject | vip`), VIP/Block lists, DJ queue
      - `git show main:plugins/groqchat.py` — Conversation memory TTL, rate caps & Hinglish system prompt reference (adapt into multi-provider OpenAI / Anthropic / Gemini client!)
      - `git show main:plugins/antidelete.py` & `plugins/antiviewonce.py` — Revoke / Edit / View-Once unlock specs
+     - Full v0.3.0 feature catalog: [`FEATURES_INVENTORY.md`](FEATURES_INVENTORY.md)
 3. **Reuse Proven Native C/Go/Java Components Already on This Branch:**
    - [`go_bridge/call_bridge.go`](go_bridge/call_bridge.go) — `meowcaller` VoIP + 9s (`150`-frame) live PCM stream + 45-AU live H.264 video stream (`CallPlayAVStream`)
    - [`go_bridge/call_bridge_pcm_test.go`](go_bridge/call_bridge_pcm_test.go) — Go unit tests (`TestLivePCMSourceLargeBuffer`, `TestLiveVideoSourceFraming`)
