@@ -1,7 +1,23 @@
-.buildozer/
+# Build & IDE
+.gradle/
+.cxx/
+.idea/
+build/
+app/build/
+local.properties
+*.iml
 bin/
+
+# Generated binaries / caches
+*.apk
+*.aab
+*.idsig
+*.keystore
+*.jks
+
+# Legacy / scratch
+.buildozer/
 __pycache__/
 *.pyc
 *.pyo
-.gradle/
-local.properties
+.DS_Store
