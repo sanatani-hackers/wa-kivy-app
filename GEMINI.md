@@ -1,23 +1,25 @@
-# WA Core Native (`kotlin-native` Branch) — Project Guide
+# WA power (`kotlin-native` Branch) — Project Guide
 
-> **Mission:** Build **WA Core Native** (`org.sanatani.waapp`) from scratch on branch `kotlin-native` as a lag-free, 60/120fps pure **Kotlin + Jetpack Compose + Material 3 + Room SQLite + Android NDK JNI + Go `libneonize.so`** WhatsApp Web MD client — with **all power automation built in natively** and **zero Python / Kivy / plugin system**.
+> **Mission:** Build **WA power** (`kt.sanatani.wapower`) from scratch on branch `kotlin-native` as a lag-free, 60/120fps pure **Kotlin + Jetpack Compose + Material 3 + Room SQLite + Android NDK JNI + Go `libneonize.so`** WhatsApp Web MD client — with **all power automation built in natively** and **zero Python / Kivy / plugin system**.
 
 ---
 
 ## Core Architecture Decisions (Locked)
 
-1. **Zero Python / Zero Kivy / Zero Plugin Loader:**
+1. **App Identity & Zero Plugin Loader:**
+   - **App Name:** `WA power`
+   - **Application ID / Package:** `kt.sanatani.wapower` (`minSdk = 26`, `targetSdk = 34`, `arm64-v8a`)
    - Do **not** add Python, Kivy, Chaquopy, Buildozer, UDP OSC, or dynamic plugin scripting (`QuickJS`, `Lua`, `.py` plugins).
-   - Every capability is a clean, first-class **built-in Kotlin module** controlled from the native Settings/Tools UI.
+   - Every capability is a clean, first-class **built-in Kotlin module** controlled from the native Settings/Tools UI (including a **universal AI Assistant** supporting custom Base URL + API Key across **OpenAI / Anthropic / Gemini** formats).
 2. **Legacy Reference Branch (`main`):**
    - The working Python/Kivy v0.3.0 app lives untouched on `main`. Never force-push or break `main`.
-   - Whenever you need exact protocol mappings, InnerTube payloads, Groq prompts, or edge-case fixes already solved in v0.3.0, inspect them directly via `git show main:<path>`:
+   - Whenever you need exact protocol mappings, InnerTube payloads, AI conversation prompts, or edge-case fixes already solved in v0.3.0, inspect them directly via `git show main:<path>`:
      - `git show main:neonize/_binder.py` — Exact C-FFI signatures & `FreeString` / `FreeBytesStruct` memory rules
      - `git show main:core/wa_client.py` — Offline sync gate (`OfflineSyncCompletedEv`), `Presence` lifecycle, protobuf event handling
      - `git show main:core/client_db.py` & `core/ghost.py` — Schema, anti-delete/anti-edit/view-once & wire Ghost Mode rules
      - `git show main:plugins/ytcall.py` — YouTube InnerTube cascade (`VISIONOS`, `ANDROID_VR`, `TVHTML5`, `WEB_REMIX`, `IOS`), `itag 134/135/140/18` adaptive quality selector
      - `git show main:plugins/callmusic.py` — Call Guard (`off | music | reject | vip`), VIP/Block lists, DJ queue
-     - `git show main:plugins/groqchat.py` — Groq LPU client (`llama-3.3-70b-versatile`, per-chat TTL, cooldown/cap)
+     - `git show main:plugins/groqchat.py` — Conversation memory TTL, rate caps & Hinglish system prompt reference (adapt into multi-provider OpenAI / Anthropic / Gemini client!)
      - `git show main:plugins/antidelete.py` & `plugins/antiviewonce.py` — Revoke / Edit / View-Once unlock specs
 3. **Reuse Proven Native C/Go/Java Components Already on This Branch:**
    - [`go_bridge/call_bridge.go`](go_bridge/call_bridge.go) — `meowcaller` VoIP + 9s (`150`-frame) live PCM stream + 45-AU live H.264 video stream (`CallPlayAVStream`)
@@ -29,7 +31,7 @@
 
 ## Visual Design Language
 
-- **Obsidian Dark Material 3:** Match and elevate WA Core's established palette natively:
+- **Obsidian Dark Material 3:** Match and elevate WA power's established palette natively:
   - Background: `#080C14` | Surface: `#0F172A` | Elevated/Stroke: `#1E293B`
   - Primary Accent: `#10B981` (Emerald) | Secondary Info/Read Tick: `#38BDF8` | Amber Warning: `#F59E0B` | Danger: `#EF4444`
   - Typography: Native Android Material 3 scale with crisp spacing (`4dp`/`8dp`/`16dp` grid), no purple AI gradients, no glowing blobs, no emoji clutter in navigation labels.

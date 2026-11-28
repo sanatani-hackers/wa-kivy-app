@@ -1,4 +1,4 @@
-# WA Core Native — Technical Architecture (`kotlin-native`)
+# WA power — Technical Architecture (`kotlin-native`)
 
 ## 1. End-to-End Architecture
 
@@ -17,7 +17,7 @@
 |  |     * CallGuardEngine  (Auto-answer / VIP / Block / DJ queue)  |
 |  |     * AntiDeleteEngine (Inline original_body + Edit history)   |
 |  |     * AntiViewOnce     (Decrypt & persist view-once inline)    |
-|  |     * GroqAiEngine     (!ai / !groq auto-chat + cooldowns)     |
+|  |     * AiAssistantEngine(!ai Base URL+Key: OpenAI/Anthropic/Gem)|
 |  |     * AutoResponder    (!ping, greetings, reminders, stats)    |
 |  +-- WaMediaTranscoder.java (512KiB Lookahead + Hardware H.264)   |
 +-------------------------------+-----------------------------------+
@@ -32,7 +32,7 @@
 
 ## 2. Target Android / Gradle Package Layout
 
-Recommended structure inside `wa_app/` (`package = org.sanatani.waapp`, `minSdk = 26`, `targetSdk = 34`, `abiFilters "arm64-v8a"`):
+Recommended structure inside `wa_app/` (`applicationId = "kt.sanatani.wapower"`, `namespace = "kt.sanatani.wapower"`, app name `"WA power"`, `minSdk = 26`, `targetSdk = 34`, `abiFilters "arm64-v8a"`):
 
 ```
 app/
@@ -42,9 +42,9 @@ app/
     cpp/
       CMakeLists.txt
       wa_jni.cpp              # dlopen/link libneonize.so, JNI <-> C FFI & callback trampolines
-    java/org/sanatani/waapp/
+    java/kt/sanatani/wapower/
       WaMediaTranscoder.java  # ported directly from media_ref/WaMediaTranscoder.java
-      WaApp.kt                # Application, Hilt/manual DI container, Notification channels
+      WaApp.kt                # Application, container, Notification channels
       jni/
         NeonizeBridge.kt      # external fun declarations + Protobuf byte marshalling
         CallBridge.kt         # JSON + event SharedFlow from CallRegisterCallback
@@ -66,17 +66,17 @@ app/
       features/
         AntiDeleteHandler.kt  # Inline REVOKE (type 0) & MESSAGE_EDIT (type 14) preservation
         AntiViewOnceHandler.kt# Auto downloadAny into filesDir/view_once_inline without receipt
-        GroqAiFeature.kt      # OkHttp streaming/completion client for !ai / !groq
+        AiAssistantFeature.kt # Universal Base URL + API Key + Format adapter (OpenAI / Anthropic / Gemini)
         CommandRouter.kt      # Built-in command handler (!yt, !call, !ai, !ping, !stats)
       ui/
         theme/Theme.kt        # Obsidian Dark palette (#080C14 / #0F172A / #10B981)
         screens/
           ConnectScreen.kt    # Phone pairing code + ZXing/Bitmap QR scanner
           ChatsScreen.kt      # Search, All/Unread/Groups/Archived filters, Pin/Archive/Mute
-          ChatDetailScreen.kt # LazyColumn reverseLayout bubbles, swipe-to-reply, media preview, Ghost Read button
+          ChatDetailScreen.kt # LazyColumn reverse thread, swipe-to-reply, media preview, Ghost Read button
           ContactsScreen.kt   # Synced contacts & groups, isOnWhatsApp checker, 1-tap Call/Chat
           CallsScreen.kt      # Active call deck, YouTube Live Video/Audio streamer, local tracks, log
-          ToolsScreen.kt      # Built-in Power Controls: Groq AI config, Call Guard, Auto-Reply, Session Backup
+          ToolsScreen.kt      # Built-in Power Controls: Universal AI config, Call Guard, Auto-Reply, Session Backup
           SettingsScreen.kt   # Ghost Mode switches, Service & Battery, Updater, About
     jniLibs/arm64-v8a/
       libneonize.so           # Built by go_bridge/build_so.sh
@@ -111,7 +111,21 @@ Instead of runtime plugins, implement each cleanly with UI toggles + Kotlin conf
 | :--- | :--- | :--- |
 | `ytcall.py` | `YouTubeInnerTube.kt` + `CallController.kt` | Zero-download `CallPlayPCMStream` & `CallPlayAVStream` (`360p`/`480p` adaptive `itag 134/135` + `140` / muxed `18`), buffer profiles (`4/8/14` frames), search & queue |
 | `callmusic.py` | `CallGuardEngine.kt` | Incoming call policies (`off`, `music`, `reject`, `vip`), VIP/blocked numbers, hold track loop, auto-delay, auto-reply |
-| `groqchat.py` | `GroqAiFeature.kt` | `!ai` / `!groq` LPU chat (`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `deepseek-r1-distill-llama-70b`), per-chat memory, system persona UI editor |
+| `groqchat.py` | `AiAssistantFeature.kt` | Universal AI engine with user-configurable **Base URL**, **API Key**, **Model**, & **Format (`auto | openai | anthropic | gemini`)** — handles OpenAI (`/chat/completions` incl. Groq/OpenRouter/local), Anthropic (`/v1/messages` `x-api-key` + `anthropic-version`), & Google Gemini (`:generateContent` + smart fallback response parser), plus per-chat memory & persona editor |
 | `antidelete.py` | `AntiDeleteHandler.kt` | Stores original message inline in `messages.original_body`, flags `is_deleted` / `is_edited`, posts heads-up notification |
 | `antiviewonce.py` | `AntiViewOnceHandler.kt` | Auto-decrypts `viewOnceMessage*` into `filesDir/view_once_inline` and renders permanently in `ChatDetailScreen` |
 | `autoreply`, `echo`, `ping`, `remind`, `stats` | `AutoResponderFeature.kt` + `CommandRouter.kt` | Built-in lightweight triggers & WorkManager / coroutine scheduled reminders |
+
+---
+
+## 5. Universal Multi-Provider AI Client Spec (`AiAssistantFeature.kt`)
+
+User supplies **Base URL**, **API Key**, **Model**, **Format** (`auto | openai | anthropic | gemini`), and **System Persona** inside `ToolsScreen`:
+
+| Format | Endpoint Resolution | Auth & Headers | Request / Response Shape |
+| :--- | :--- | :--- | :--- |
+| **OpenAI** (Groq, OpenAI, OpenRouter, Together, DeepSeek, Ollama) | `{baseUrl}/chat/completions` (or use `baseUrl` as-is if ending in `/chat/completions`) | `Authorization: Bearer <apiKey>` | `{model, messages}` -> `choices[0].message.content` (string or text parts array) |
+| **Anthropic** | `{baseUrl}/v1/messages` (avoid double `/v1` if already present) | `x-api-key: <apiKey>`, `anthropic-version: 2023-06-01` | `{model, max_tokens, system, messages}` -> `content[].text` |
+| **Google Gemini** | `{baseUrl}/models/{model}:generateContent` | `x-goog-api-key: <apiKey>` (fallback query `?key=` if needed) | `{systemInstruction, contents}` -> `candidates[0].content.parts[].text` |
+
+- **`auto` Format Detection:** Inspect Base URL / Model first (`generativelanguage.googleapis.com` or `:generateContent` -> Gemini; `api.anthropic.com` or `claude-` + `/messages` -> Anthropic; default OpenAI) AND parse responses defensively across all 3 JSON structures (`choices`, `content`, `candidates`) so custom proxies/relays returning any format work seamlessly.

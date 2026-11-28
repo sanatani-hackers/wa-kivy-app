@@ -1,8 +1,8 @@
-# WA Core Native — Implementation Roadmap
+# WA power — Implementation Roadmap
 
 Execute incrementally in sprints, verifying compilation and device/emulator tests at each milestone.
 
-## Sprint 1: Android Project Scaffold + Go JNI Proof of Life
+## Sprint 1: Android Project Scaffold (`kt.sanatani.wapower`) + Go JNI Proof of Life
 - [ ] Initialize Gradle Kotlin DSL Android project (`settings.gradle.kts`, `build.gradle.kts`, `app/build.gradle.kts`, `gradle-wrapper`) targeting API 26–34, `arm64-v8a`.
 - [ ] Sync `.proto` definitions from `krypton-byte/neonize` (`0.12.4` `defproto/`) and configure `protobuf-gradle-plugin` (`javalite`).
 - [ ] Build `libneonize.so` via `go_bridge/build_so.sh` on Codespace into `app/src/main/jniLibs/arm64-v8a/libneonize.so`.
@@ -22,13 +22,13 @@ Execute incrementally in sprints, verifying compilation and device/emulator test
 - [ ] Build `ContactsScreen` (`getAllContacts` + `getJoinedGroups`, `isOnWhatsApp` checker, 1-tap Chat/Voice/Video).
 
 ## Sprint 4: Built-in VoIP & Live YouTube Video/Audio Streaming
-- [ ] Copy `media_ref/WaMediaTranscoder.java` into `app/src/main/java/org/sanatani/waapp/WaMediaTranscoder.java`.
+- [ ] Copy `media_ref/WaMediaTranscoder.java` into `app/src/main/java/kt/sanatani/wapower/WaMediaTranscoder.java`.
 - [ ] Build `YouTubeInnerTube.kt` (OkHttp client cascade + 360p/480p adaptive `itag 134/135` + `140` / muxed `18` resolver) and `CallController.kt` bridging `CallPlayPCMStream` & `CallPlayAVStream`.
 - [ ] Build `CallsScreen` (Active Call controls, rich notification w/ Answer+Music & Decline, YouTube Live Video/Voice Deck, local track picker, call history).
 
 ## Sprint 5: Built-in Power Tools (Zero Plugin Overhead)
-- [ ] Build `AntiDeleteHandler` + `AntiViewOnceHandler` + `CallGuardEngine` + `GroqAiFeature` + `AutoResponderFeature`.
-- [ ] Build `ToolsScreen` (native Compose cards for configuring Groq API key/model/persona, Call Guard VIP/Block/Modes, Auto-Reply keywords, and Session `.sqlite3` Backup/Restore).
+- [ ] Build `AntiDeleteHandler` + `AntiViewOnceHandler` + `CallGuardEngine` + `AiAssistantFeature` (Base URL, API Key, OpenAI / Anthropic / Gemini multi-format adapter + response auto-detector) + `AutoResponderFeature`.
+- [ ] Build `ToolsScreen` (native Compose cards for configuring AI Base URL / API Key / Provider format / Model / Persona, Call Guard VIP/Block/Modes, Auto-Reply keywords, and Session `.sqlite3` Backup/Restore).
 - [ ] Wire `SettingsScreen` (Ghost switches, Notification/Storage permissions, Resync Contacts/History, OTA check).
 
 ## Sprint 6: Release Verification on Codespace

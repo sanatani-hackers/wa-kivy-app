@@ -1,4 +1,4 @@
-package org.sanatani.waapp;
+package kt.sanatani.wapower;
 
 import android.graphics.SurfaceTexture;
 import android.media.AudioFormat;
