@@ -25,11 +25,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import kt.sanatani.wapower.core.ConnectionPhase
 import kt.sanatani.wapower.core.WaClientManager
-import kt.sanatani.wapower.jni.NeonizeBridge
 import kt.sanatani.wapower.service.WaForegroundService
 import kt.sanatani.wapower.ui.components.MainTab
 import kt.sanatani.wapower.ui.components.WaBottomBar
-import kt.sanatani.wapower.ui.screens.CallsPlaceholderScreen
+import kt.sanatani.wapower.ui.screens.CallsScreen
 import kt.sanatani.wapower.ui.screens.ChatDetailScreen
 import kt.sanatani.wapower.ui.screens.ChatsScreen
 import kt.sanatani.wapower.ui.screens.ConnectScreen
@@ -54,15 +53,17 @@ class MainActivity : ComponentActivity() {
             WaPowerTheme {
                 val state by WaClientManager.state.collectAsStateWithLifecycle()
                 val repo = WaClientManager.repository
+                val callController = WaClientManager.callController
                 val activeChats by repo.activeChats.collectAsStateWithLifecycle(initialValue = emptyList())
                 val archivedChats by repo.archivedChats.collectAsStateWithLifecycle(initialValue = emptyList())
                 val contacts by repo.contacts.collectAsStateWithLifecycle(initialValue = emptyList())
+                val callDeck by callController.deckState.collectAsStateWithLifecycle()
+                val callHistory by callController.callHistory.collectAsStateWithLifecycle(initialValue = emptyList())
 
                 val scope = rememberCoroutineScope()
                 var currentTab by rememberSaveable { mutableStateOf(MainTab.CHATS) }
                 var activeChatJid by rememberSaveable { mutableStateOf<String?>(null) }
                 var showConnectionPage by rememberSaveable { mutableStateOf(false) }
-                var activeCallsJson by rememberSaveable { mutableStateOf("") }
 
                 // Auto-start foreground engine if a saved session already exists
                 LaunchedEffect(state.storedDevices.size) {
@@ -192,19 +193,31 @@ class MainActivity : ComponentActivity() {
                                         onCheckOnWhatsApp = { phone -> repo.checkOnWhatsApp(phone) },
                                         onOpenChat = { jid -> activeChatJid = jid },
                                         onPlaceCall = { jid, isVideo ->
-                                            scope.launch {
-                                                repo.placeCall(jid, isVideo)
-                                                activeCallsJson = NeonizeBridge.listActiveCallsJson(WaClientManager.SESSION_UUID)
-                                                currentTab = MainTab.CALLS
-                                            }
+                                            callController.placeCall(jid, isVideo)
+                                            currentTab = MainTab.CALLS
                                         },
                                     )
 
-                                    MainTab.CALLS -> CallsPlaceholderScreen(
-                                        activeCallsJson = activeCallsJson,
-                                        onRefreshCalls = {
-                                            activeCallsJson = NeonizeBridge.listActiveCallsJson(WaClientManager.SESSION_UUID)
-                                        },
+                                    MainTab.CALLS -> CallsScreen(
+                                        deck = callDeck,
+                                        callHistory = callHistory,
+                                        onPlaceCall = { target, isVideo -> callController.placeCall(target, isVideo) },
+                                        onAnswerCall = { cid -> callController.answerCall(cid) },
+                                        onDeclineCall = { cid -> callController.declineCall(cid) },
+                                        onHangupCall = { cid -> callController.hangupCall(cid) },
+                                        onPauseAudio = { cid -> callController.pauseAudio(cid) },
+                                        onResumeAudio = { cid -> callController.resumeAudio(cid) },
+                                        onStopMedia = { cid -> callController.stopMedia(cid) },
+                                        onSkipNext = { cid -> callController.skipNext(cid) },
+                                        onSearchYouTube = { q -> callController.searchYouTube(q) },
+                                        onStreamYtAudio = { cid, q -> callController.streamYouTubeAudio(cid, q) },
+                                        onStreamYtVideo = { cid, q -> callController.streamYouTubeVideo(cid, q) },
+                                        onEnqueueYt = { url, title, asVid -> callController.enqueueTrack(url, title, asVid) },
+                                        onRemoveQueued = { uid -> callController.removeQueuedTrack(uid) },
+                                        onPlayLocalMedia = { cid, uri, mime, name -> callController.playLocalMediaFile(cid, uri, mime, name) },
+                                        onSetBufferProfile = { callController.setBufferProfile(it) },
+                                        onSetVideoQuality = { callController.setVideoQuality(it) },
+                                        onSetLoopTrack = { callController.setLoopTrack(it) },
                                     )
 
                                     MainTab.TOOLS -> ToolsPlaceholderScreen()

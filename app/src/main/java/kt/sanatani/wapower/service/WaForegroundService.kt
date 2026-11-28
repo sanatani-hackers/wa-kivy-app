@@ -72,6 +72,23 @@ class WaForegroundService : Service() {
                 val forceNew = intent.getBooleanExtra(EXTRA_NEW_DEVICE, false)
                 WaClientManager.startEngine(forceNewDevice = forceNew)
             }
+
+            ACTION_CALL_ANSWER -> {
+                val cid = intent.getStringExtra(EXTRA_CALL_ID).orEmpty()
+                if (cid.isNotBlank()) WaClientManager.callController.answerCall(cid)
+            }
+
+            ACTION_CALL_ANSWER_MUSIC -> {
+                val cid = intent.getStringExtra(EXTRA_CALL_ID).orEmpty()
+                val query = WaClientManager.callController.deckState.value.queue.firstOrNull()?.queryOrUrl
+                    ?: "lofi hip hop beats"
+                if (cid.isNotBlank()) WaClientManager.callController.answerCall(cid, withAutoMusicQuery = query)
+            }
+
+            ACTION_CALL_DECLINE -> {
+                val cid = intent.getStringExtra(EXTRA_CALL_ID).orEmpty()
+                if (cid.isNotBlank()) WaClientManager.callController.declineCall(cid)
+            }
         }
         return START_STICKY
     }
@@ -128,7 +145,11 @@ class WaForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
         const val ACTION_START = "kt.sanatani.wapower.action.START"
         const val ACTION_STOP = "kt.sanatani.wapower.action.STOP"
+        const val ACTION_CALL_ANSWER = "kt.sanatani.wapower.action.CALL_ANSWER"
+        const val ACTION_CALL_ANSWER_MUSIC = "kt.sanatani.wapower.action.CALL_ANSWER_MUSIC"
+        const val ACTION_CALL_DECLINE = "kt.sanatani.wapower.action.CALL_DECLINE"
         const val EXTRA_NEW_DEVICE = "extra_new_device"
+        const val EXTRA_CALL_ID = "extra_call_id"
 
         fun start(context: Context, forceNewDevice: Boolean = false) {
             val intent = Intent(context, WaForegroundService::class.java).apply {

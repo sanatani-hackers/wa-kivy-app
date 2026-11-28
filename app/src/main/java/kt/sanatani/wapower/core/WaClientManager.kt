@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kt.sanatani.wapower.calls.CallController
 import kt.sanatani.wapower.jni.NativeEvent
 import kt.sanatani.wapower.jni.NeonizeBridge
 import kt.sanatani.wapower.jni.StoredDeviceInfo
@@ -68,6 +69,11 @@ object WaClientManager {
         get() = checkNotNull(_repository) { "WaClientManager.init must be called first" }
 
     @Volatile
+    private var _callController: CallController? = null
+    val callController: CallController
+        get() = checkNotNull(_callController) { "WaClientManager.init must be called first" }
+
+    @Volatile
     private var neonizeJob: Job? = null
 
     @Volatile
@@ -85,6 +91,14 @@ object WaClientManager {
                 _repository = WaRepository(
                     context = appContext!!,
                     sessionUuid = SESSION_UUID,
+                    onLog = { msg -> appendLog(msg) },
+                )
+            }
+            if (_callController == null) {
+                _callController = CallController(
+                    context = appContext!!,
+                    sessionUuid = SESSION_UUID,
+                    db = _repository!!.db,
                     onLog = { msg -> appendLog(msg) },
                 )
             }

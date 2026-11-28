@@ -900,3 +900,174 @@ Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallPlace(
     std::string tgt = jstringToStdString(env, target);
     return consumeCString(env, g_api.CallPlace(id.c_str(), tgt.c_str(), static_cast<int>(isVideo)));
 }
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallAnswer(JNIEnv* env, jobject, jstring uuid, jstring callId) {
+    if (!ensureApiLoaded() || !g_api.CallAnswer) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    return consumeCString(env, g_api.CallAnswer(id.c_str(), cid.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallDecline(JNIEnv* env, jobject, jstring uuid, jstring callId) {
+    if (!ensureApiLoaded() || !g_api.CallDecline) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    return consumeCString(env, g_api.CallDecline(id.c_str(), cid.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallHangup(JNIEnv* env, jobject, jstring uuid, jstring callId) {
+    if (!ensureApiLoaded() || !g_api.CallHangup) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    return consumeCString(env, g_api.CallHangup(id.c_str(), cid.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallPlayAudio(
+    JNIEnv* env, jobject, jstring uuid, jstring callId, jstring path, jint loop
+) {
+    if (!ensureApiLoaded() || !g_api.CallPlayAudio) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    std::string p = jstringToStdString(env, path);
+    return consumeCString(env, g_api.CallPlayAudio(id.c_str(), cid.c_str(), p.c_str(), static_cast<int>(loop)));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallPlayPCMStream(
+    JNIEnv* env, jobject, jstring uuid, jstring callId, jstring label, jint prebufFrames
+) {
+    if (!ensureApiLoaded() || !g_api.CallPlayPCMStream) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    std::string lbl = jstringToStdString(env, label);
+    return consumeCString(env, g_api.CallPlayPCMStream(id.c_str(), cid.c_str(), lbl.c_str(), static_cast<int>(prebufFrames)));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallPauseAudio(JNIEnv* env, jobject, jstring uuid, jstring callId) {
+    if (!ensureApiLoaded() || !g_api.CallPauseAudio) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    return consumeCString(env, g_api.CallPauseAudio(id.c_str(), cid.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallResumeAudio(JNIEnv* env, jobject, jstring uuid, jstring callId) {
+    if (!ensureApiLoaded() || !g_api.CallResumeAudio) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    return consumeCString(env, g_api.CallResumeAudio(id.c_str(), cid.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallStopAudio(JNIEnv* env, jobject, jstring uuid, jstring callId) {
+    if (!ensureApiLoaded() || !g_api.CallStopAudio) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    return consumeCString(env, g_api.CallStopAudio(id.c_str(), cid.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallPlayAV(
+    JNIEnv* env, jobject, jstring uuid, jstring callId, jstring h264Path, jstring audioPath, jint fps, jint loop
+) {
+    if (!ensureApiLoaded() || !g_api.CallPlayAV) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    std::string vp = jstringToStdString(env, h264Path);
+    std::string ap = jstringToStdString(env, audioPath);
+    return consumeCString(
+        env,
+        g_api.CallPlayAV(
+            id.c_str(),
+            cid.c_str(),
+            vp.c_str(),
+            ap.empty() ? nullptr : ap.c_str(),
+            static_cast<int>(fps),
+            static_cast<int>(loop)
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallPlayAVStream(
+    JNIEnv* env, jobject, jstring uuid, jstring callId, jstring label, jint fps, jint prebufFrames
+) {
+    if (!ensureApiLoaded() || !g_api.CallPlayAVStream) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    std::string lbl = jstringToStdString(env, label);
+    return consumeCString(
+        env,
+        g_api.CallPlayAVStream(id.c_str(), cid.c_str(), lbl.c_str(), static_cast<int>(fps), static_cast<int>(prebufFrames))
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallStopVideoStream(JNIEnv* env, jobject, jstring uuid, jstring callId) {
+    if (!ensureApiLoaded() || !g_api.CallStopVideoStream) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    return consumeCString(env, g_api.CallStopVideoStream(id.c_str(), cid.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallStartVideo(JNIEnv* env, jobject, jstring uuid, jstring callId) {
+    if (!ensureApiLoaded() || !g_api.CallStartVideo) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    return consumeCString(env, g_api.CallStartVideo(id.c_str(), cid.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallAcceptVideo(JNIEnv* env, jobject, jstring uuid, jstring callId) {
+    if (!ensureApiLoaded() || !g_api.CallAcceptVideo) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    return consumeCString(env, g_api.CallAcceptVideo(id.c_str(), cid.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallStopVideo(JNIEnv* env, jobject, jstring uuid, jstring callId) {
+    if (!ensureApiLoaded() || !g_api.CallStopVideo) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    return consumeCString(env, g_api.CallStopVideo(id.c_str(), cid.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallRecordAudio(
+    JNIEnv* env, jobject, jstring uuid, jstring callId, jstring path
+) {
+    if (!ensureApiLoaded() || !g_api.CallRecordAudio) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    std::string p = jstringToStdString(env, path);
+    return consumeCString(env, g_api.CallRecordAudio(id.c_str(), cid.c_str(), p.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallRecordVideo(
+    JNIEnv* env, jobject, jstring uuid, jstring callId, jstring path
+) {
+    if (!ensureApiLoaded() || !g_api.CallRecordVideo) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    std::string p = jstringToStdString(env, path);
+    return consumeCString(env, g_api.CallRecordVideo(id.c_str(), cid.c_str(), p.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kt_sanatani_wapower_jni_NeonizeBridge_nativeCallSendReaction(
+    JNIEnv* env, jobject, jstring uuid, jstring callId, jstring reaction
+) {
+    if (!ensureApiLoaded() || !g_api.CallSendReaction) return utf8ToJString(env, "{\"ok\":false,\"error\":\"not loaded\"}");
+    std::string id = jstringToStdString(env, uuid);
+    std::string cid = jstringToStdString(env, callId);
+    std::string rx = jstringToStdString(env, reaction);
+    return consumeCString(env, g_api.CallSendReaction(id.c_str(), cid.c_str(), rx.c_str()));
+}

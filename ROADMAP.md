@@ -22,9 +22,9 @@ Execute incrementally in sprints, verifying compilation and device/emulator test
 - [x] Build `ContactsScreen` (`getAllContacts` + `getJoinedGroups`, `isOnWhatsApp` checker, 1-tap Chat/Voice/Video).
 
 ## Sprint 4: Built-in VoIP & Live YouTube Video/Audio Streaming
-- [ ] Copy `media_ref/WaMediaTranscoder.java` into `app/src/main/java/kt/sanatani/wapower/WaMediaTranscoder.java`.
-- [ ] Build `YouTubeInnerTube.kt` (OkHttp client cascade + 360p/480p adaptive `itag 134/135` + `140` / muxed `18` resolver) and `CallController.kt` bridging `CallPlayPCMStream` & `CallPlayAVStream`.
-- [ ] Build `CallsScreen` (Active Call controls, rich notification w/ Answer+Music & Decline, YouTube Live Video/Voice Deck, local track picker, call history).
+- [x] Copy `media_ref/WaMediaTranscoder.java` into `app/src/main/java/kt/sanatani/wapower/WaMediaTranscoder.java`.
+- [x] Build `YouTubeInnerTube.kt` (OkHttp client cascade + 360p/480p adaptive `itag 134/135` + `140` / muxed `18` resolver) and `CallController.kt` bridging `CallPlayPCMStream` & `CallPlayAVStream`.
+- [x] Build `CallsScreen` (Active Call controls, rich notification w/ Answer+Music & Decline, YouTube Live Video/Voice Deck, local track picker, call history). (Live on-device VoIP/YT verification pending)
 
 ## Sprint 5: Built-in Power Tools (Zero Plugin Overhead)
 - [ ] Build `AntiDeleteHandler` + `AntiViewOnceHandler` + `CallGuardEngine` + `AiAssistantFeature` (Base URL, API Key, OpenAI / Anthropic / Gemini multi-format adapter + response auto-detector) + `AutoResponderFeature`.

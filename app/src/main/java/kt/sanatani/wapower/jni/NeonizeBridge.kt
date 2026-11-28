@@ -333,6 +333,57 @@ object NeonizeBridge {
     fun callPlace(uuid: String, target: String, isVideo: Boolean): String =
         if (ensureInitialized()) nativeCallPlace(uuid, target, if (isVideo) 1 else 0).orEmpty() else "{\"ok\":false}"
 
+    fun callAnswer(uuid: String, callId: String): String =
+        if (ensureInitialized()) nativeCallAnswer(uuid, callId).orEmpty() else "{\"ok\":false}"
+
+    fun callDecline(uuid: String, callId: String): String =
+        if (ensureInitialized()) nativeCallDecline(uuid, callId).orEmpty() else "{\"ok\":false}"
+
+    fun callHangup(uuid: String, callId: String): String =
+        if (ensureInitialized()) nativeCallHangup(uuid, callId).orEmpty() else "{\"ok\":false}"
+
+    fun callPlayAudio(uuid: String, callId: String, path: String, loop: Boolean): String =
+        if (ensureInitialized()) nativeCallPlayAudio(uuid, callId, path, if (loop) 1 else 0).orEmpty() else "{\"ok\":false}"
+
+    fun callPlayPcmStream(uuid: String, callId: String, label: String, prebufFrames: Int): String =
+        if (ensureInitialized()) nativeCallPlayPCMStream(uuid, callId, label, prebufFrames).orEmpty() else "{\"ok\":false}"
+
+    fun callPauseAudio(uuid: String, callId: String): String =
+        if (ensureInitialized()) nativeCallPauseAudio(uuid, callId).orEmpty() else "{\"ok\":false}"
+
+    fun callResumeAudio(uuid: String, callId: String): String =
+        if (ensureInitialized()) nativeCallResumeAudio(uuid, callId).orEmpty() else "{\"ok\":false}"
+
+    fun callStopAudio(uuid: String, callId: String): String =
+        if (ensureInitialized()) nativeCallStopAudio(uuid, callId).orEmpty() else "{\"ok\":false}"
+
+    fun callPlayAv(uuid: String, callId: String, h264Path: String, audioPath: String, fps: Int, loop: Boolean): String =
+        if (ensureInitialized()) nativeCallPlayAV(uuid, callId, h264Path, audioPath, fps, if (loop) 1 else 0).orEmpty() else "{\"ok\":false}"
+
+    fun callPlayAvStream(uuid: String, callId: String, label: String, fps: Int, prebufFrames: Int): String =
+        if (ensureInitialized()) nativeCallPlayAVStream(uuid, callId, label, fps, prebufFrames).orEmpty() else "{\"ok\":false}"
+
+    fun callStopVideoStream(uuid: String, callId: String): String =
+        if (ensureInitialized()) nativeCallStopVideoStream(uuid, callId).orEmpty() else "{\"ok\":false}"
+
+    fun callStartVideo(uuid: String, callId: String): String =
+        if (ensureInitialized()) nativeCallStartVideo(uuid, callId).orEmpty() else "{\"ok\":false}"
+
+    fun callAcceptVideo(uuid: String, callId: String): String =
+        if (ensureInitialized()) nativeCallAcceptVideo(uuid, callId).orEmpty() else "{\"ok\":false}"
+
+    fun callStopVideo(uuid: String, callId: String): String =
+        if (ensureInitialized()) nativeCallStopVideo(uuid, callId).orEmpty() else "{\"ok\":false}"
+
+    fun callRecordAudio(uuid: String, callId: String, path: String): String =
+        if (ensureInitialized()) nativeCallRecordAudio(uuid, callId, path).orEmpty() else "{\"ok\":false}"
+
+    fun callRecordVideo(uuid: String, callId: String, path: String): String =
+        if (ensureInitialized()) nativeCallRecordVideo(uuid, callId, path).orEmpty() else "{\"ok\":false}"
+
+    fun callSendReaction(uuid: String, callId: String, reaction: String): String =
+        if (ensureInitialized()) nativeCallSendReaction(uuid, callId, reaction).orEmpty() else "{\"ok\":false}"
+
     fun listActiveCallsJson(uuid: String): String =
         if (ensureInitialized()) nativeCallListActive(uuid).orEmpty() else "{}"
 
@@ -431,6 +482,23 @@ object NeonizeBridge {
     private external fun nativeGetProfilePicture(uuid: String, jidBytes: ByteArray, paramsBytes: ByteArray): ByteArray?
     private external fun nativeUpload(uuid: String, mediaBytes: ByteArray, mediaType: Int): ByteArray?
     private external fun nativeCallPlace(uuid: String, target: String, isVideo: Int): String?
+    private external fun nativeCallAnswer(uuid: String, callId: String): String?
+    private external fun nativeCallDecline(uuid: String, callId: String): String?
+    private external fun nativeCallHangup(uuid: String, callId: String): String?
+    private external fun nativeCallPlayAudio(uuid: String, callId: String, path: String, loop: Int): String?
+    private external fun nativeCallPlayPCMStream(uuid: String, callId: String, label: String, prebufFrames: Int): String?
+    private external fun nativeCallPauseAudio(uuid: String, callId: String): String?
+    private external fun nativeCallResumeAudio(uuid: String, callId: String): String?
+    private external fun nativeCallStopAudio(uuid: String, callId: String): String?
+    private external fun nativeCallPlayAV(uuid: String, callId: String, h264Path: String, audioPath: String, fps: Int, loop: Int): String?
+    private external fun nativeCallPlayAVStream(uuid: String, callId: String, label: String, fps: Int, prebufFrames: Int): String?
+    private external fun nativeCallStopVideoStream(uuid: String, callId: String): String?
+    private external fun nativeCallStartVideo(uuid: String, callId: String): String?
+    private external fun nativeCallAcceptVideo(uuid: String, callId: String): String?
+    private external fun nativeCallStopVideo(uuid: String, callId: String): String?
+    private external fun nativeCallRecordAudio(uuid: String, callId: String, path: String): String?
+    private external fun nativeCallRecordVideo(uuid: String, callId: String, path: String): String?
+    private external fun nativeCallSendReaction(uuid: String, callId: String, reaction: String): String?
     private external fun nativeCallListActive(uuid: String): String?
 
     internal fun sanitizePhoneDigits(input: String): String =
