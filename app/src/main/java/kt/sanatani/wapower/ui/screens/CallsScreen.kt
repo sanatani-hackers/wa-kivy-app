@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
@@ -57,6 +58,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -64,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -82,6 +85,7 @@ fun CallsScreen(
     callHistory: List<CallLogEntity>,
     onPlaceCall: (target: String, isVideo: Boolean) -> Unit,
     onAnswerCall: (callId: String) -> Unit,
+    onAnswerWithMusic: (callId: String) -> Unit = {},
     onDeclineCall: (callId: String) -> Unit,
     onHangupCall: (callId: String) -> Unit,
     onPauseAudio: (callId: String) -> Unit,
@@ -104,13 +108,14 @@ fun CallsScreen(
 
     val selectedCall = deck.activeCalls.firstOrNull { it.callId == deck.selectedCallId }
         ?: deck.activeCalls.firstOrNull()
+    val latestCallId by rememberUpdatedState(selectedCall?.callId.orEmpty())
 
     val localTrackPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
-        val cid = selectedCall?.callId ?: return@rememberLauncherForActivityResult
+        val cid = latestCallId.ifBlank { return@rememberLauncherForActivityResult }
         if (uri != null) {
-            val mime = context.contentResolver.getType(uri) ?: "audio/*"
+            val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull() ?: "audio/*"
             val name = resolveTrackName(context, uri)
             onPlayLocalMedia(cid, uri, mime, name)
         }
@@ -165,10 +170,11 @@ fun CallsScreen(
         }
 
         // Active Calls Deck
-        items(deck.activeCalls, key = { it.callId }) { call ->
+        items(deck.activeCalls, key = { "active_${it.callId}" }) { call ->
             ActiveCallCard(
                 call = call,
                 onAnswer = { onAnswerCall(call.callId) },
+                onAnswerWithMusic = { onAnswerWithMusic(call.callId) },
                 onDecline = { onDeclineCall(call.callId) },
                 onHangup = { onHangupCall(call.callId) },
                 onPause = { onPauseAudio(call.callId) },
@@ -266,7 +272,12 @@ fun CallsScreen(
                         )
                         if (selectedCall != null) {
                             OutlinedButton(
-                                onClick = { localTrackPicker.launch(arrayOf("audio/*", "video/*")) },
+                                onClick = {
+                                    runCatching { localTrackPicker.launch(arrayOf("audio/*", "video/*")) }
+                                        .onFailure {
+                                            runCatching { localTrackPicker.launch(arrayOf("*/*")) }
+                                        }
+                                },
                                 modifier = Modifier.height(34.dp),
                                 contentPadding = PaddingValues(horizontal = 10.dp),
                                 border = BorderStroke(1.dp, WaColors.CardBorder),
@@ -290,6 +301,8 @@ fun CallsScreen(
                             modifier = Modifier.weight(1f),
                             singleLine = true,
                             placeholder = { Text("Search song or YouTube URL", color = WaColors.TextMuted) },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = { onSearchYouTube(ytInput) }),
                             shape = RoundedCornerShape(WaShapes.InputRadius),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedContainerColor = WaColors.InputBackground,
@@ -411,7 +424,7 @@ fun CallsScreen(
             item(key = "yt_hits_hdr") {
                 Text("Search results", style = MaterialTheme.typography.titleMedium, color = WaColors.TextPrimary)
             }
-            items(deck.searchResults, key = { it.id }) { hit ->
+            items(deck.searchResults, key = { "yt_${it.id}" }) { hit ->
                 Card(
                     colors = CardDefaults.cardColors(containerColor = WaColors.CardBackground),
                     border = BorderStroke(WaShapes.BorderWidth, WaColors.CardBorder),
@@ -459,7 +472,7 @@ fun CallsScreen(
             item(key = "queue_hdr") {
                 Text("DJ queue (${deck.queue.size})", style = MaterialTheme.typography.titleMedium, color = WaColors.TextPrimary)
             }
-            items(deck.queue, key = { it.uid }) { item ->
+            items(deck.queue, key = { "queue_${it.uid}" }) { item ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -492,7 +505,7 @@ fun CallsScreen(
                 Text("No call logs yet", style = MaterialTheme.typography.bodyMedium, color = WaColors.TextMuted)
             }
         } else {
-            items(callHistory, key = { it.callId }) { log ->
+            items(callHistory, key = { "hist_${it.callId}" }) { log ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -528,6 +541,7 @@ fun CallsScreen(
 private fun ActiveCallCard(
     call: ActiveCallInfo,
     onAnswer: () -> Unit,
+    onAnswerWithMusic: () -> Unit,
     onDecline: () -> Unit,
     onHangup: () -> Unit,
     onPause: () -> Unit,
@@ -579,8 +593,8 @@ private fun ActiveCallCard(
                 )
             }
 
-            if (call.direction == "in" && call.phase == "ringing") {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (call.direction == "in" && call.phase !in setOf("active", "ended")) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = onAnswer,
                         modifier = Modifier.weight(1f),
@@ -591,6 +605,14 @@ private fun ActiveCallCard(
                         shape = RoundedCornerShape(WaShapes.ButtonRadius),
                     ) {
                         Text("Answer")
+                    }
+                    OutlinedButton(
+                        onClick = onAnswerWithMusic,
+                        modifier = Modifier.weight(1f),
+                        border = BorderStroke(1.dp, WaColors.Primary.copy(alpha = 0.6f)),
+                        shape = RoundedCornerShape(WaShapes.ButtonRadius),
+                    ) {
+                        Text("+Music", color = WaColors.Primary)
                     }
                     OutlinedButton(
                         onClick = onDecline,
@@ -640,11 +662,16 @@ private fun ActiveCallCard(
 }
 
 private fun resolveTrackName(context: android.content.Context, uri: Uri): String {
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-        if (c.moveToFirst()) {
-            val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (idx >= 0) return c.getString(idx).orEmpty()
+    runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) {
+                    val v = c.getString(idx).orEmpty().trim()
+                    if (v.isNotEmpty()) return v
+                }
+            }
         }
     }
-    return uri.lastPathSegment ?: "track"
+    return uri.lastPathSegment?.substringAfterLast('/')?.ifBlank { null } ?: "track"
 }

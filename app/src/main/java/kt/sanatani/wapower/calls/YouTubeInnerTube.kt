@@ -1,11 +1,13 @@
 package kt.sanatani.wapower.calls
 
+import okhttp3.ConnectionPool
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -139,12 +141,14 @@ class YouTubeInnerTube(
             .url(SEARCH_URL)
             .post(bodyJson.toString().toRequestBody(JSON_MEDIA_TYPE))
             .header("User-Agent", CHROME_UA)
+            .header("Accept", "application/json")
+            .header("Cache-Control", "no-cache")
+            .header("X-Goog-Api-Format-Version", "1")
+            .header("X-Origin", "https://www.youtube.com")
+            .header("Referer", "https://www.youtube.com/")
             .build()
 
-        val root = http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw IllegalStateException("YouTube search HTTP ${resp.code}")
-            JSONObject(resp.body?.string().orEmpty())
-        }
+        val root = executeJsonWithRetry(req, "YouTube search")
 
         val hits = ArrayList<YtSearchHit>()
         val seen = HashSet<String>()
@@ -292,6 +296,9 @@ class YouTubeInnerTube(
             .url(PLAYER_URL)
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
             .header("User-Agent", cfg.userAgent)
+            .header("Accept", "application/json")
+            .header("Cache-Control", "no-cache")
+            .header("X-Goog-Api-Format-Version", "1")
             .header("X-YouTube-Client-Name", cfg.clientId)
             .header("X-YouTube-Client-Version", cfg.version())
         cfg.extraHeaders.forEach { (k, v) -> reqBuilder.header(k, v) }
@@ -299,10 +306,7 @@ class YouTubeInnerTube(
             reqBuilder.header("X-Goog-Visitor-Id", visitor)
         }
 
-        val data = http.newCall(reqBuilder.build()).execute().use { resp ->
-            if (!resp.isSuccessful) throw IllegalStateException("Player HTTP ${resp.code}")
-            JSONObject(resp.body?.string().orEmpty())
-        }
+        val data = executeJsonWithRetry(reqBuilder.build(), "Player")
 
         val playability = data.optJSONObject("playabilityStatus") ?: JSONObject()
         val status = playability.optString("status", "")
@@ -378,6 +382,32 @@ class YouTubeInnerTube(
                 null
             }
         }.getOrNull()
+    }
+
+    private fun executeJsonWithRetry(req: Request, label: String): JSONObject {
+        var lastErr: IOException? = null
+        var backoffMs = 350L
+        for (attempt in 0 until 3) {
+            try {
+                http.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        throw IllegalStateException("$label HTTP ${resp.code}")
+                    }
+                    val raw = resp.body?.string().orEmpty()
+                    if (raw.isBlank()) {
+                        throw IllegalStateException("$label returned empty body")
+                    }
+                    return JSONObject(raw)
+                }
+            } catch (ioe: IOException) {
+                lastErr = ioe
+                if (attempt < 2) {
+                    runCatching { Thread.sleep(backoffMs) }
+                    backoffMs *= 2L
+                }
+            }
+        }
+        throw lastErr ?: IOException("$label network error")
     }
 
     private fun activeExclusions(videoId: String, now: Long): Set<String> {
@@ -469,8 +499,10 @@ class YouTubeInnerTube(
         )
 
         fun defaultOkHttpClient(): OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
+            .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+            .retryOnConnectionFailure(true)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
             .build()
 
         fun extractVideoIdOrNull(input: String): String? {

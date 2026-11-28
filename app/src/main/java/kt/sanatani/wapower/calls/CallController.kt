@@ -101,6 +101,46 @@ class CallController(
                 handleGoCallEvent(evt)
             }
         }
+        scope.launch {
+            CallBridge.logs.collect { line ->
+                onLog("[VoIP] $line")
+            }
+        }
+    }
+
+    fun reconcileActiveCalls() {
+        scope.launch {
+            val raw = runCatching { NeonizeBridge.listActiveCallsJson(sessionUuid) }.getOrNull() ?: return@launch
+            val obj = runCatching { JSONObject(raw) }.getOrNull() ?: return@launch
+            if (!obj.optBoolean("ok", true)) return@launch
+            val arr = obj.optJSONArray("calls") ?: return@launch
+            val nowSec = System.currentTimeMillis() / 1000L
+            for (i in 0 until arr.length()) {
+                val c = arr.optJSONObject(i) ?: continue
+                val cid = c.optString("call_id", "").trim()
+                if (cid.isBlank()) continue
+                val peer = c.optString("peer", "")
+                val direction = c.optString("direction", "in")
+                val phase = c.optString("phase", "ringing")
+                if (phase == "ended") continue
+                val existing = _deckState.value.activeCalls.firstOrNull { it.callId == cid }
+                val info = ActiveCallInfo(
+                    callId = cid,
+                    peer = peer,
+                    peerDisplay = peer.substringBefore('@').substringBefore(':'),
+                    direction = direction,
+                    isVideo = c.optBoolean("is_video", false),
+                    phase = phase,
+                    audioState = c.optString("audio_state", existing?.audioState ?: "idle"),
+                    nowPlaying = existing?.nowPlaying ?: c.optString("audio_path", ""),
+                    startedAtSec = existing?.startedAtSec ?: nowSec,
+                )
+                addOrUpdateCall(info)
+                if (existing == null && direction == "in" && phase !in setOf("active", "ended")) {
+                    showIncomingCallNotification(info)
+                }
+            }
+        }
     }
 
     fun setBufferProfile(profile: BufferProfile) {
@@ -401,12 +441,20 @@ class CallController(
     }
 
     fun playLocalMediaFile(callId: String, uri: Uri, mimeType: String, displayName: String) {
-        activeStreams.remove(callId)?.cancel()
+        val targetCallId = callId.ifBlank { _deckState.value.activeCalls.firstOrNull()?.callId.orEmpty() }
+        if (targetCallId.isBlank()) {
+            _deckState.update { it.copy(statusNote = "No active call selected") }
+            return
+        }
+        activeStreams.remove(targetCallId)?.cancel()
         scope.launch {
-            _deckState.update { it.copy(streamingBusy = true, statusNote = "Preparing $displayName...") }
+            val cleanName = displayName.ifBlank { "track" }
+            _deckState.update { it.copy(streamingBusy = true, statusNote = "Preparing $cleanName...") }
             runCatching {
                 val trackDir = File(appContext.filesDir, "call_tracks").apply { mkdirs() }
-                val rawFile = File(trackDir, "src_${UUID.randomUUID().toString().take(8)}_${displayName.filter { it.isLetterOrDigit() || it == '.' || it == '_' }}")
+                val safeName = cleanName.filter { it.isLetterOrDigit() || it == '.' || it == '_' }
+                    .ifBlank { "track.bin" }
+                val rawFile = File(trackDir, "src_${UUID.randomUUID().toString().take(8)}_$safeName")
                 appContext.contentResolver.openInputStream(uri)?.use { input ->
                     rawFile.outputStream().use { out -> input.copyTo(out) }
                 } ?: error("Cannot open selected file")
@@ -414,7 +462,7 @@ class CallController(
                 val wavFile = File(trackDir, "${rawFile.nameWithoutExtension}.wav")
                 val audioErr = WaMediaTranscoder.extractAudioToWav16k(rawFile.absolutePath, wavFile.absolutePath)
 
-                if (mimeType.lowercase().startsWith("video/")) {
+                if (isVideoMedia(mimeType, cleanName)) {
                     val h264File = File(trackDir, "${rawFile.nameWithoutExtension}.h264")
                     val vidErr = WaMediaTranscoder.transcodeVideoToH264(
                         rawFile.absolutePath,
@@ -426,7 +474,7 @@ class CallController(
                     if (vidErr.isNotBlank()) error(vidErr)
                     val resRaw = NeonizeBridge.callPlayAv(
                         sessionUuid,
-                        callId,
+                        targetCallId,
                         h264File.absolutePath,
                         if (audioErr.isBlank()) wavFile.absolutePath else "",
                         15,
@@ -438,17 +486,18 @@ class CallController(
                     if (audioErr.isNotBlank()) error(audioErr)
                     val resRaw = NeonizeBridge.callPlayAudio(
                         sessionUuid,
-                        callId,
+                        targetCallId,
                         wavFile.absolutePath,
                         _deckState.value.loopTrack,
                     )
                     val obj = JSONObject(resRaw)
                     if (!obj.optBoolean("ok")) error(obj.optString("error", "CallPlayAudio failed"))
                 }
-                updateCall(callId) { it.copy(audioState = "playing", nowPlaying = displayName) }
-                _deckState.update { it.copy(streamingBusy = false, statusNote = "Playing local: $displayName") }
+                updateCall(targetCallId) { it.copy(audioState = "playing", nowPlaying = cleanName) }
+                _deckState.update { it.copy(streamingBusy = false, statusNote = "Playing local: $cleanName") }
             }.onFailure { err ->
                 _deckState.update { it.copy(streamingBusy = false, statusNote = err.message ?: "Local play failed") }
+                onLog("Local media failed: ${err.message}")
             }
         }
     }
@@ -634,8 +683,11 @@ class CallController(
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(if (call.isVideo) "Incoming video call" else "Incoming voice call")
             .setContentText(call.peerDisplay.ifBlank { call.peer })
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setDefaults(Notification.DEFAULT_ALL)
+            .setFullScreenIntent(openIntent, true)
             .setOngoing(true)
             .setContentIntent(openIntent)
             .addAction(0, "Answer", answerIntent)
@@ -643,15 +695,26 @@ class CallController(
             .addAction(0, "Decline", declineIntent)
             .build()
 
-        appContext.getSystemService(NotificationManager::class.java)?.notify(CALL_NOTIF_ID, notif)
+        runCatching {
+            appContext.getSystemService(NotificationManager::class.java)?.notify(CALL_NOTIF_ID, notif)
+        }
     }
 
     private fun dismissIncomingNotification() {
-        appContext.getSystemService(NotificationManager::class.java)?.cancel(CALL_NOTIF_ID)
+        runCatching {
+            appContext.getSystemService(NotificationManager::class.java)?.cancel(CALL_NOTIF_ID)
+        }
     }
 
     companion object {
-        private const val CALL_CHANNEL_ID = "wa_power_calls"
+        private const val CALL_CHANNEL_ID = "wa_power_calls_v2"
         private const val CALL_NOTIF_ID = 2002
+        private val VIDEO_EXTS = setOf("mp4", "mkv", "mov", "webm", "3gp", "avi", "m4v")
+
+        internal fun isVideoMedia(mimeType: String, displayName: String): Boolean {
+            if (mimeType.trim().lowercase().startsWith("video/")) return true
+            val ext = displayName.substringAfterLast('.', "").trim().lowercase()
+            return ext in VIDEO_EXTS
+        }
     }
 }

@@ -22,14 +22,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DoneAll
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Unarchive
-import androidx.compose.material.icons.rounded.VolumeOff
-import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -299,7 +299,7 @@ fun ChatsScreen(
                     },
                 )
                 SheetActionRow(
-                    icon = if (isMuted) Icons.Rounded.VolumeUp else Icons.Rounded.VolumeOff,
+                    icon = if (isMuted) Icons.AutoMirrored.Rounded.VolumeUp else Icons.AutoMirrored.Rounded.VolumeOff,
                     label = if (isMuted) "Unmute notifications" else "Mute for 8 hours",
                     onClick = {
                         onToggleMute(target.chat.jid, !isMuted)
@@ -391,7 +391,7 @@ private fun ChatListItemRow(
                 ) {
                     if (isMuted) {
                         Icon(
-                            Icons.Rounded.VolumeOff,
+                            Icons.AutoMirrored.Rounded.VolumeOff,
                             contentDescription = "Muted",
                             tint = WaColors.TextMuted,
                             modifier = Modifier.size(14.dp),

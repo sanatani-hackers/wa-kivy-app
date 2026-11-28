@@ -9,20 +9,45 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.CallEnd
+import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
+import kt.sanatani.wapower.calls.ActiveCallInfo
 import kt.sanatani.wapower.core.ConnectionPhase
 import kt.sanatani.wapower.core.WaClientManager
 import kt.sanatani.wapower.service.WaForegroundService
@@ -37,6 +62,7 @@ import kt.sanatani.wapower.ui.screens.SettingsScreen
 import kt.sanatani.wapower.ui.screens.ToolsPlaceholderScreen
 import kt.sanatani.wapower.ui.theme.WaColors
 import kt.sanatani.wapower.ui.theme.WaPowerTheme
+import kt.sanatani.wapower.ui.theme.WaShapes
 
 class MainActivity : ComponentActivity() {
 
@@ -84,8 +110,19 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                when {
-                    !isPairedOrHasSession || showConnectionPage -> {
+                LaunchedEffect(currentTab) {
+                    if (currentTab == MainTab.CALLS) {
+                        callController.reconcileActiveCalls()
+                    }
+                }
+
+                val incomingCall = callDeck.activeCalls.firstOrNull {
+                    it.direction == "in" && it.phase !in setOf("active", "ended")
+                }
+
+                Box(modifier = Modifier.fillMaxSize()) {
+                    when {
+                        !isPairedOrHasSession || showConnectionPage -> {
                         ConnectScreen(
                             state = state,
                             onStartConnect = { forceNew ->
@@ -203,6 +240,10 @@ class MainActivity : ComponentActivity() {
                                         callHistory = callHistory,
                                         onPlaceCall = { target, isVideo -> callController.placeCall(target, isVideo) },
                                         onAnswerCall = { cid -> callController.answerCall(cid) },
+                                        onAnswerWithMusic = { cid ->
+                                            val q = callDeck.queue.firstOrNull()?.queryOrUrl ?: "lofi hip hop beats"
+                                            callController.answerCall(cid, withAutoMusicQuery = q)
+                                        },
                                         onDeclineCall = { cid -> callController.declineCall(cid) },
                                         onHangupCall = { cid -> callController.hangupCall(cid) },
                                         onPauseAudio = { cid -> callController.pauseAudio(cid) },
@@ -237,6 +278,28 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                    }
+
+                    if (incomingCall != null) {
+                        IncomingCallOverlayBanner(
+                            call = incomingCall,
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .statusBarsPadding()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            onOpenDeck = {
+                                activeChatJid = null
+                                showConnectionPage = false
+                                currentTab = MainTab.CALLS
+                            },
+                            onAnswer = { callController.answerCall(incomingCall.callId) },
+                            onAnswerWithMusic = {
+                                val q = callDeck.queue.firstOrNull()?.queryOrUrl ?: "lofi hip hop beats"
+                                callController.answerCall(incomingCall.callId, withAutoMusicQuery = q)
+                            },
+                            onDecline = { callController.declineCall(incomingCall.callId) },
+                        )
+                    }
                 }
             }
         }
@@ -250,6 +313,95 @@ class MainActivity : ComponentActivity() {
             ) == PackageManager.PERMISSION_GRANTED
             if (!granted) {
                 requestNotifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+}
+
+@androidx.compose.runtime.Composable
+private fun IncomingCallOverlayBanner(
+    call: ActiveCallInfo,
+    modifier: Modifier = Modifier,
+    onOpenDeck: () -> Unit,
+    onAnswer: () -> Unit,
+    onAnswerWithMusic: () -> Unit,
+    onDecline: () -> Unit,
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = WaColors.SurfaceElevated),
+        border = BorderStroke(WaShapes.BorderWidth, WaColors.Primary),
+        shape = RoundedCornerShape(WaShapes.CardRadius),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = if (call.isVideo) Icons.Rounded.Videocam else Icons.Rounded.Call,
+                        contentDescription = null,
+                        tint = WaColors.Primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Column {
+                        Text(
+                            text = call.peerDisplay.ifBlank { call.peer },
+                            style = MaterialTheme.typography.titleMedium,
+                            color = WaColors.TextPrimary,
+                        )
+                        Text(
+                            text = if (call.isVideo) "Incoming video call • ${call.phase}" else "Incoming voice call • ${call.phase}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = WaColors.Primary,
+                        )
+                    }
+                }
+                TextButton(onClick = onOpenDeck) {
+                    Text("Deck", color = WaColors.TextSecondary)
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = onAnswer,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = WaColors.ButtonBackground,
+                        contentColor = WaColors.ButtonText,
+                    ),
+                    shape = RoundedCornerShape(WaShapes.ButtonRadius),
+                ) {
+                    Text("Answer")
+                }
+                OutlinedButton(
+                    onClick = onAnswerWithMusic,
+                    modifier = Modifier.weight(1f),
+                    border = BorderStroke(1.dp, WaColors.Primary.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(WaShapes.ButtonRadius),
+                ) {
+                    Text("+Music", color = WaColors.Primary)
+                }
+                OutlinedButton(
+                    onClick = onDecline,
+                    modifier = Modifier.weight(1f),
+                    border = BorderStroke(1.dp, WaColors.Danger.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(WaShapes.ButtonRadius),
+                ) {
+                    Icon(Icons.Rounded.CallEnd, contentDescription = null, tint = WaColors.Danger, modifier = Modifier.size(16.dp))
+                }
             }
         }
     }

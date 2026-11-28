@@ -367,6 +367,10 @@ object WaClientManager {
                     is NativeEvent.ProtoEvent -> {
                         handleUiProtoEvent(evt.code, evt.payload)
                         _repository?.handleProtoEvent(evt.code, evt.payload)
+                        if (evt.code == 36 || evt.code == 40) {
+                            appendLog("Proto call signal (code=${evt.code})")
+                            _callController?.reconcileActiveCalls()
+                        }
                     }
                 }
             }

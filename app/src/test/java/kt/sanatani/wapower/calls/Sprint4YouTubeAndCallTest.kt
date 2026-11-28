@@ -1,8 +1,14 @@
 package kt.sanatani.wapower.calls
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
+import kt.sanatani.wapower.jni.CallBridge
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class Sprint4YouTubeAndCallTest {
@@ -104,5 +110,31 @@ class Sprint4YouTubeAndCallTest {
         assertEquals(14, BufferProfile.SLOW.frames)
         assertEquals(360, VideoQuality.Q360P.maxHeight)
         assertEquals(480, VideoQuality.Q480P.maxHeight)
+    }
+
+    @Test
+    fun isVideoMedia_detectsMimeAndExtensionFallback() {
+        assertTrue(CallController.isVideoMedia("video/mp4", "clip.bin"))
+        assertTrue(CallController.isVideoMedia("application/octet-stream", "clip.mp4"))
+        assertTrue(CallController.isVideoMedia("", "clip.MKV"))
+        assertFalse(CallController.isVideoMedia("audio/mpeg", "song.mp3"))
+        assertFalse(CallController.isVideoMedia("application/octet-stream", "voice.wav"))
+    }
+
+    @Test
+    fun callBridge_separatesLogsFromCallEvents() = runTest {
+        val nextEvent = async { CallBridge.events.first() }
+        testScheduler.advanceUntilIdle()
+        repeat(100) { idx ->
+            CallBridge.dispatchCallEvent("u1", """{"event":"log","msg":"noise $idx"}""")
+        }
+        CallBridge.dispatchCallEvent(
+            "u1",
+            """{"event":"incoming","call_id":"C123","peer":"91999@s.whatsapp.net","phase":"ringing"}""",
+        )
+        val evt = nextEvent.await()
+        assertEquals("incoming", evt.event)
+        assertEquals("C123", evt.callId)
+        assertEquals("ringing", evt.phase)
     }
 }
